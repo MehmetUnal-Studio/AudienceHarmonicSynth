@@ -531,6 +531,20 @@ int main()
     {
         PartialEngine engine;
         configureDryTestEngine(engine);
+        r.expect(loadPianoDream(engine), "engine loads samples for MIDI keyboard spectral fallback test");
+        engine.scaleRootMidi.store(48);
+        engine.scaleMode.store(7); // Hydrogen Spectrum
+        engine.atomicScaleMode.store(0); // Core
+        engine.scaleOctaves.store(1);
+
+        const int step = engine.findNearestScaleStepForMidi(53); // F3 keyboard input.
+        r.expect(step >= 0, "incoming MIDI note outside degree-key range finds a spectral scale step");
+        r.expect(engine.getScaleMidi(step) == 53, "F3 input maps to Hydrogen's nearest F3 spectral degree");
+    }
+
+    {
+        PartialEngine engine;
+        configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for X movement replacement test");
         engine.releaseMs.store(6000.0f);
         engine.minTriggerMs.store(0.0f);

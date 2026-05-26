@@ -842,6 +842,31 @@ int PartialEngine::getScaleStepsPerOctave() const noexcept
                                 : getScaleDef(mode).count;
 }
 
+int PartialEngine::findNearestScaleStepForMidi (int midiNote) const noexcept
+{
+    const int total = getScaleTableSize();
+    if (total <= 0)
+        return -1;
+
+    int bestStep = 0;
+    int bestDistance = std::numeric_limits<int>::max();
+    for (int step = 0; step < total; ++step)
+    {
+        const int stepMidi = getScaleMidi(step);
+        if (stepMidi < 0)
+            continue;
+
+        const int distance = std::abs(stepMidi - midiNote);
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestStep = step;
+        }
+    }
+
+    return bestStep;
+}
+
 PartialEngine::PitchTarget PartialEngine::getScalePitch (int idx) const noexcept
 {
     const int mode = juce::jlimit(0, kTotalScaleModes - 1,

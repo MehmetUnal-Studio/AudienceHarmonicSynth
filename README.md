@@ -1,6 +1,6 @@
 # Audience Harmonic Synth
 
-Version 1.0.28
+Version 1.0.29
 
 VST3 + Standalone JUCE instrument driven by an audience's phones. Each
 participant is identified by seat position (row letter + column number). Their
@@ -229,3 +229,8 @@ MIDI/MPE monitoring into the upper console area and active-seat diagnostics into
 the wider lower pane. It also reduces duplicate MPE retrigger spam by treating
 same-source, same-note, same-bend Note On events as expression updates instead
 of forcing a Note Off / Note On cycle.
+Version 1.0.29 improves external MIDI keyboard input: notes that fall outside
+the scale-degree keyboard range now fall back to the nearest displayed
+scale/spectral step instead of being ignored. This makes compact atomic scales,
+such as Hydrogen Core, playable from normal MIDI keyboards even when a pressed
+key is beyond the current degree count.

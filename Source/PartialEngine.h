@@ -187,6 +187,7 @@ public:
 	    // Active scale info (matches the X-to-pitch map).
 	    int   getScaleTableSize() const noexcept;
 	    int   getScaleStepsPerOctave() const noexcept;
+	    int   findNearestScaleStepForMidi (int midiNote) const noexcept;
 	    int   getScaleMidi (int idx) const noexcept;
 	    double getScaleFrequencyHz (int idx) const noexcept;
 	    double getScaleLineWavelengthNm (int idx) const noexcept;

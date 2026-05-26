@@ -549,7 +549,10 @@ void AudienceProcessor::processIncomingMidiKeyboard (const juce::MidiBuffer& mid
             continue;
 
         const int note = msg.getNoteNumber();
-        const int step = note - rootMidi;
+        int step = note - rootMidi;
+        if (step < 0 || step >= totalSteps)
+            step = engine.findNearestScaleStepForMidi(note);
+
         if (step < 0 || step >= totalSteps)
             continue;
 
