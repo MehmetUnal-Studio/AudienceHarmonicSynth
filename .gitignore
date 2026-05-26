@@ -1,0 +1,17 @@
+build/
+build-*/
+cmake-build-*/
+.cache/
+.vscode/
+.idea/
+releases/
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+*.user
+*.swp
+.DS_Store
+
+# JUCE module copies fetched by CMake
+_deps/
