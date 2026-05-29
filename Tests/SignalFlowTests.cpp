@@ -100,7 +100,7 @@ namespace
         engine.engineSource.store(0);
         engine.samplePlaybackMode.store(0);
         engine.spectralElement.store(1);
-        engine.spectralPartialCount.store(9);
+        engine.spectralPartialCount.store(28);
         engine.spectralPartialSolo.store(0);
         engine.spectralStretch.store(0.0f);
         engine.atomicScaleMode.store(1);
@@ -255,7 +255,7 @@ int main()
         engine.atomicScaleMode.store(4); // Raw: expose every stored spectral line as a scale degree.
 
         engine.scaleMode.store(7);
-        r.expect(engine.getScaleTableSize() == 7, "hydrogen raw spectrum exposes all stored visible lines");
+        r.expect(engine.getScaleTableSize() == 6, "hydrogen raw spectrum exposes all Max data visible lines");
         r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01)
               && nearHz(engine.getScaleFrequencyHz(1), 706.38, 0.02)
               && nearHz(engine.getScaleFrequencyHz(2), 791.15, 0.02)
@@ -272,62 +272,101 @@ int main()
         engine.scaleRootMidi.store(72);
 
         engine.scaleMode.store(8);
-        r.expect(engine.getScaleTableSize() == 9, "helium raw spectrum exposes nine visible filtered lines");
-        r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01)
-              && nearHz(engine.getScaleFrequencyHz(2), 629.19, 0.02)
-              && nearHz(engine.getScaleFrequencyHz(8), 950.68, 0.02),
-                 "helium spectrum maps longest red wavelength onto C5");
+        r.expect(engine.getScaleTableSize() == 27, "helium raw spectrum exposes all positive Max data visible lines");
+        r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
+                 "helium spectrum maps longest Max-data wavelength onto C5");
         r.expect(engine.getScaleRangeName().contains("Helium Spectrum"),
                  "helium range label names spectral scale");
 
         engine.scaleMode.store(9);
-        r.expect(engine.getScaleTableSize() == 6, "lithium raw spectrum exposes six visible lines");
+        r.expect(engine.getScaleTableSize() == 15, "lithium raw spectrum exposes all positive Max data visible lines");
         r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
                  "lithium longest wavelength maps onto C5");
         r.expect(engine.getScaleRangeName().contains("Lithium Spectrum"),
                  "lithium range label names spectral scale");
 
         engine.scaleMode.store(10);
-        r.expect(engine.getScaleTableSize() == 27, "beryllium raw spectrum exposes all stored visible lines");
+        r.expect(engine.getScaleTableSize() == 67, "beryllium raw spectrum exposes all positive Max data visible lines");
         r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
                  "beryllium longest wavelength maps onto C5");
         r.expect(engine.getScaleRangeName().contains("Beryllium Spectrum"),
                  "beryllium range label names spectral scale");
 
         engine.scaleMode.store(11);
-        r.expect(engine.getScaleTableSize() == 26, "boron raw spectrum exposes all stored visible lines");
+        r.expect(engine.getScaleTableSize() == 74, "boron raw spectrum exposes all positive Max data visible lines");
         r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
                  "boron longest wavelength maps onto C5");
         r.expect(engine.getScaleRangeName().contains("Boron Spectrum"),
                  "boron range label names spectral scale");
 
         engine.scaleMode.store(12);
-        r.expect(engine.getScaleTableSize() == 47, "carbon raw spectrum exposes all stored visible lines");
+        r.expect(engine.getScaleTableSize() == 333, "carbon raw spectrum exposes all positive Max data visible lines");
         r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
                  "carbon longest wavelength maps onto C5");
         r.expect(engine.getScaleRangeName().contains("Carbon Spectrum"),
                  "carbon range label names spectral scale");
 
         engine.scaleMode.store(13);
-        r.expect(engine.getScaleTableSize() == 37, "oxygen raw spectrum exposes all stored visible lines");
+        r.expect(engine.getScaleTableSize() == 268, "oxygen raw spectrum exposes all positive Max data visible lines");
         r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
                  "oxygen longest wavelength maps onto C5");
         r.expect(engine.getScaleRangeName().contains("Oxygen Spectrum"),
                  "oxygen range label names spectral scale");
 
         engine.scaleMode.store(14);
-        r.expect(engine.getScaleTableSize() == 29, "fluorine raw spectrum exposes all stored visible lines");
+        r.expect(engine.getScaleTableSize() == 94, "fluorine raw spectrum exposes all positive Max data visible lines");
         r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
                  "fluorine longest wavelength maps onto C5");
         r.expect(engine.getScaleRangeName().contains("Fluorine Spectrum"),
                  "fluorine range label names spectral scale");
 
         engine.scaleMode.store(15);
-        r.expect(engine.getScaleTableSize() == 54, "neon raw spectrum exposes all stored visible lines");
+        r.expect(engine.getScaleTableSize() == 1000, "neon raw spectrum exposes all Max data visible lines");
         r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
                  "neon longest wavelength maps onto C5");
         r.expect(engine.getScaleRangeName().contains("Neon Spectrum"),
                  "neon range label names spectral scale");
+
+        struct RawScaleExpectation
+        {
+            int mode;
+            int count;
+            const char* name;
+        };
+
+        const RawScaleExpectation newRawScales[] {
+            { 16, 211, "Sodium Spectrum" },
+            { 17, 311, "Magnesium Spectrum" },
+            { 18, 265, "Aluminium Spectrum" },
+            { 19, 450, "Silicon Spectrum" },
+            { 20, 151, "Phosphorus Spectrum" },
+            { 21, 703, "Sulfur Spectrum" },
+            { 22, 232, "Chlorine Spectrum" },
+            { 23, 878, "Argon Spectrum" },
+            { 24, 134, "Potassium Spectrum" },
+            { 25, 248, "Calcium Spectrum" },
+            { 26, 916, "Scandium Spectrum" },
+            { 27, 1896, "Titanium Spectrum" },
+            { 28, 2234, "Vanadium Spectrum" },
+            { 29, 2213, "Chromium Spectrum" },
+            { 30, 645, "Manganese Spectrum" },
+            { 31, 4041, "Iron Spectrum" },
+            { 32, 695, "Cobalt Spectrum" },
+            { 33, 351, "Nickel Spectrum" },
+            { 34, 1004, "Copper Spectrum" },
+            { 35, 57, "Zinc Spectrum" },
+        };
+
+        for (const auto& e : newRawScales)
+        {
+            engine.scaleMode.store(e.mode);
+            r.expect(engine.getScaleTableSize() == e.count,
+                     std::string(e.name) + " raw spectrum exposes all positive stored visible lines");
+            r.expect(nearHz(engine.getScaleFrequencyHz(0), 523.251, 0.01),
+                     std::string(e.name) + " longest wavelength maps onto C5");
+            r.expect(engine.getScaleRangeName().contains(e.name),
+                     std::string(e.name) + " range label names spectral scale");
+        }
     }
 
     {
@@ -389,10 +428,10 @@ int main()
         engine.scaleOctaves.store(1);
 
         r.expect(engine.getSpectralElementName() == "Helium", "element synth selects helium dataset");
-        r.expect(nearHz(engine.getSpectralElementRootWavelengthNm(), 706.519, 0.001),
-                 "helium root wavelength is 706.519 nm");
-        r.expect(engine.getSpectralElementLineCount() == 9,
-                 "element synth preserves every helium raw partial");
+        r.expect(nearHz(engine.getSpectralElementRootWavelengthNm(), 667.815, 0.001),
+                 "helium root wavelength is the longest Max data line");
+        r.expect(engine.getSpectralElementLineCount() == 27,
+                 "element synth preserves every positive helium raw partial");
 
         const auto stats = triggerSeatAndRender(engine, 0.0f, 1.0f, 0.45);
         r.expect(stats.finite, "element synth render is finite without samples");
@@ -401,7 +440,7 @@ int main()
         r.expect(stats.peak <= 1.0001f, "element synth remains bounded by limiter",
                  "peak=" + std::to_string(stats.peak));
         r.expect(engine.getActiveVoiceCount() >= 3, "element synth spawns unison voices");
-        r.expect(engine.getDominantSampleName().contains("706.519"),
+        r.expect(engine.getDominantSampleName().contains("667.815"),
                  "element synth dominant readout shows root wavelength");
     }
 
@@ -411,7 +450,7 @@ int main()
         engine.engineSource.store(1);
         engine.spectralElement.store(2);
         engine.spectralPartialSolo.store(1);
-        engine.spectralPartialCount.store(6);
+        engine.spectralPartialCount.store(27);
         engine.scaleRootMidi.store(48);
         engine.scaleMode.store(0);
         engine.scaleOctaves.store(1);
@@ -419,8 +458,8 @@ int main()
         r.expect(engine.getSpectralElementName() == "Lithium", "element synth selects lithium dataset");
         r.expect(nearHz(engine.getSpectralElementRootWavelengthNm(), 670.791, 0.001),
                  "lithium root wavelength is 670.791 nm");
-        r.expect(engine.getSpectralElementLineCount() == 6,
-                 "element synth preserves every lithium raw partial");
+        r.expect(engine.getSpectralElementLineCount() == 15,
+                 "element synth preserves every positive lithium raw partial");
 
         const auto stats = triggerSeatAndRender(engine, 0.0f, 1.0f, 0.30);
         r.expect(stats.finite, "lithium partial solo render is finite");
@@ -433,7 +472,7 @@ int main()
         engine.engineSource.store(1);
         engine.spectralElement.store(3);
         engine.spectralPartialSolo.store(1);
-        engine.spectralPartialCount.store(27);
+        engine.spectralPartialCount.store(67);
         engine.scaleRootMidi.store(48);
         engine.scaleMode.store(0);
         engine.scaleOctaves.store(1);
@@ -441,7 +480,7 @@ int main()
         r.expect(engine.getSpectralElementName() == "Beryllium", "element synth selects beryllium dataset");
         r.expect(nearHz(engine.getSpectralElementRootWavelengthNm(), 698.275, 0.001),
                  "beryllium root wavelength is 698.275 nm");
-        r.expect(engine.getSpectralElementLineCount() == 27,
+        r.expect(engine.getSpectralElementLineCount() == 67,
                  "element synth preserves every beryllium raw partial");
 
         const auto stats = triggerSeatAndRender(engine, 0.0f, 1.0f, 0.30);
@@ -459,11 +498,31 @@ int main()
         };
 
         const ElementExpectation expectations[] {
-            { 4, "Boron", 628.547, 26 },
-            { 5, "Carbon", 694.645, 47 },
-            { 6, "Oxygen", 689.511, 37 },
-            { 7, "Fluorine", 696.635, 29 },
-            { 8, "Neon", 688.694, 54 },
+            { 4, "Boron", 678.612, 74 },
+            { 5, "Carbon", 696.231, 333 },
+            { 6, "Oxygen", 691.056, 268 },
+            { 7, "Fluorine", 696.635, 94 },
+            { 8, "Neon", 699.300, 1000 },
+            { 9, "Sodium", 665.150, 211 },
+            { 10, "Magnesium", 696.540, 311 },
+            { 11, "Aluminium", 692.000, 265 },
+            { 12, "Silicon", 699.836, 450 },
+            { 13, "Phosphorus", 699.269, 151 },
+            { 14, "Sulfur", 699.940, 703 },
+            { 15, "Chlorine", 698.189, 232 },
+            { 16, "Argon", 699.221, 878 },
+            { 17, "Potassium", 696.467, 134 },
+            { 18, "Calcium", 694.551, 248 },
+            { 19, "Scandium", 697.278, 916 },
+            { 20, "Titanium", 699.893, 1896 },
+            { 21, "Vanadium", 699.240, 2234 },
+            { 22, "Chromium", 699.073, 2213 },
+            { 23, "Manganese", 698.996, 645 },
+            { 24, "Iron", 699.988, 4041 },
+            { 25, "Cobalt", 699.732, 695 },
+            { 26, "Nickel", 697.351, 351 },
+            { 27, "Copper", 699.656, 1004 },
+            { 28, "Zinc", 694.320, 57 },
         };
 
         for (const auto& e : expectations)
@@ -473,7 +532,7 @@ int main()
             engine.engineSource.store(1);
             engine.spectralElement.store(e.index);
             engine.spectralPartialSolo.store(1);
-            engine.spectralPartialCount.store(e.lines);
+            engine.spectralPartialCount.store(juce::jmin(e.lines, PartialEngine::MAX_ELEMENT_PARTIALS));
             engine.scaleRootMidi.store(48);
             engine.scaleMode.store(0);
             engine.scaleOctaves.store(1);
@@ -507,7 +566,7 @@ int main()
         r.expect(rootPartialStats.peak > 0.001f, "partial solo root is audible");
 
         engine.clearAllSeats();
-        engine.spectralPartialCount.store(9);
+        engine.spectralPartialCount.store(28);
         const auto highPartialStats = triggerSeatAndRender(engine, 0.0f, 1.0f, 0.35);
         r.expect(highPartialStats.finite, "partial solo high line render is finite");
         r.expect(highPartialStats.peak > 0.001f, "partial solo high line is audible");
@@ -529,6 +588,58 @@ int main()
     }
 
     {
+        r.expect(nearHz(PartialEngine::midiNoteToFrequencyHz(60), 261.625565, 0.001),
+                 "MIDI note 60 maps to C4 frequency");
+        r.expect(nearHz(PartialEngine::midiNoteToFrequencyHz(64), 329.627557, 0.001),
+                 "MIDI note 64 maps to E4 frequency");
+        r.expect(nearHz(PartialEngine::midiNoteToFrequencyHz(67), 391.995436, 0.001),
+                 "MIDI note 67 maps to G4 frequency");
+    }
+
+    {
+        PartialEngine engine;
+        configureDryTestEngine(engine);
+        r.expect(loadPianoDream(engine), "engine loads samples for realtime MIDI keyboard polyphony test");
+        engine.scaleRootMidi.store(36);
+        engine.scaleMode.store(0);
+        engine.scaleOctaves.store(1);
+
+        engine.processKeyboardStepRealtime(0, 0, 1.0f, true);
+        engine.processKeyboardStepRealtime(1, 2, 1.0f, true);
+        engine.processKeyboardStepRealtime(2, 4, 1.0f, true);
+        renderSeconds(engine, 0.10);
+
+        const auto midis = activeMidis(engine);
+        r.expect(midis.count(36) == 1 && midis.count(40) == 1 && midis.count(43) == 1,
+                 "realtime MIDI keyboard path keeps held notes polyphonic");
+    }
+
+    {
+        PartialEngine engine;
+        configureDryTestEngine(engine);
+        r.expect(loadPianoDream(engine), "engine loads samples for direct MIDI keyboard polyphony test");
+
+        engine.processKeyboardPitchRealtime(0, 60, PartialEngine::midiNoteToFrequencyHz(60), 1.0f, true);
+        engine.processKeyboardPitchRealtime(1, 64, PartialEngine::midiNoteToFrequencyHz(64), 1.0f, true);
+        engine.processKeyboardPitchRealtime(2, 67, PartialEngine::midiNoteToFrequencyHz(67), 1.0f, true);
+        renderSeconds(engine, 0.12);
+
+        auto midis = activeMidis(engine);
+        r.expect(midis.count(60) == 1 && midis.count(64) == 1 && midis.count(67) == 1,
+                 "direct MIDI keyboard path keeps C4/E4/G4 held as separate voices");
+
+        engine.releaseMs.store(1.0f);
+        engine.processKeyboardPitchRealtime(1, 64, 0.0, 0.0f, false);
+        renderSeconds(engine, 0.20);
+        midis = activeMidis(engine);
+        r.expect(midis.count(60) == 1 && midis.count(64) == 0 && midis.count(67) == 1,
+                 "releasing E4 leaves C4 and G4 active");
+
+        engine.clearAllVoices();
+        r.expect(activeMidis(engine).empty(), "panic-style clear removes direct MIDI keyboard voices");
+    }
+
+    {
         PartialEngine engine;
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for MIDI keyboard spectral fallback test");
@@ -540,6 +651,51 @@ int main()
         const int step = engine.findNearestScaleStepForMidi(53); // F3 keyboard input.
         r.expect(step >= 0, "incoming MIDI note outside degree-key range finds a spectral scale step");
         r.expect(engine.getScaleMidi(step) == 53, "F3 input maps to Hydrogen's nearest F3 spectral degree");
+    }
+
+    {
+        PartialEngine engine;
+        configureDryTestEngine(engine);
+        engine.scaleRootMidi.store(12);
+        engine.scaleMode.store(9); // Lithium Spectrum
+        engine.atomicScaleMode.store(0); // Core: playable one-octave lithium keyboard.
+        engine.scaleOctaves.store(1);
+
+        r.expect(engine.getScaleStepsPerOctave() == 6, "Lithium core scale exposes six playable scale-keyboard degrees");
+
+        const int cStep = engine.findKeyboardScaleStepForMidi(24);  // C1 performance key.
+        const int dStep = engine.findKeyboardScaleStepForMidi(26);  // D1 performance key.
+        const int fsStep = engine.findKeyboardScaleStepForMidi(30); // F#1 performance key.
+        const int gStep = engine.findKeyboardScaleStepForMidi(31);  // G1 performance key.
+        const int gsStep = engine.findKeyboardScaleStepForMidi(32); // G#1 performance key.
+        const int cTopStep = engine.findKeyboardScaleStepForMidi(36); // C2 performance key.
+
+        r.expect(engine.getScaleMidi(cStep) == 12, "Lithium keyboard C1 maps to displayed C0 degree");
+        r.expect(engine.getScaleMidi(dStep) == 14, "Lithium keyboard D1 maps to displayed D0 degree");
+        r.expect(engine.getScaleMidi(fsStep) == 18, "Lithium keyboard F#1 maps to displayed F#0 core degree");
+        r.expect(engine.getScaleMidi(gStep) == 19, "Lithium keyboard G1 maps to displayed G0 degree");
+        r.expect(engine.getScaleMidi(gsStep) == 20, "Lithium keyboard G#1 maps to displayed G#0 degree");
+        r.expect(cTopStep == engine.getScaleStepsPerOctave() - 1,
+                 "Lithium keyboard C2 maps to the final displayed octave degree");
+    }
+
+    {
+        PartialEngine engine;
+        configureDryTestEngine(engine);
+        engine.engineSource.store(1);
+        engine.scaleRootMidi.store(12);
+        engine.scaleMode.store(9); // Lithium Spectrum
+        engine.atomicScaleMode.store(0); // Core: playable one-octave lithium keyboard.
+        engine.scaleOctaves.store(1);
+
+        engine.setKeyboardStep(0, engine.findKeyboardScaleStepForMidi(24), 1.0f, true);
+        engine.setKeyboardStep(1, engine.findKeyboardScaleStepForMidi(26), 1.0f, true);
+        engine.setKeyboardStep(2, engine.findKeyboardScaleStepForMidi(30), 1.0f, true);
+        renderSeconds(engine, 0.05);
+
+        const auto midis = activeMidis(engine);
+        r.expect(midis.count(12) == 1 && midis.count(14) == 1 && midis.count(18) == 1,
+                 "spectral MIDI keyboard mapping keeps multiple held notes polyphonic");
     }
 
     {

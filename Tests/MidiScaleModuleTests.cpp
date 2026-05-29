@@ -40,6 +40,13 @@ namespace
         if (! ok)
             ++failed;
     }
+
+    void processForTest (MidiScaleModule& module, juce::MidiBuffer& midi)
+    {
+        juce::MidiBuffer output;
+        module.process(midi, output);
+        midi.swapWith(output);
+    }
 }
 
 int main()
@@ -81,7 +88,7 @@ int main()
 
     juce::MidiBuffer midi;
     midi.addEvent(juce::MidiMessage::noteOn(2, 61, (juce::uint8) 100), 12);
-    module.process(midi);
+    processForTest(module, midi);
     auto events = collect(midi);
     expect(events.size() == 1
         && events[0].type == Event::Type::NoteOn
@@ -96,7 +103,7 @@ int main()
                      identityRemap, 0);
     midi.clear();
     midi.addEvent(juce::MidiMessage::noteOff(2, 61), 48);
-    module.process(midi);
+    processForTest(module, midi);
     events = collect(midi);
     expect(events.size() == 1
         && events[0].type == Event::Type::NoteOff
@@ -111,7 +118,7 @@ int main()
     module.setConfig(false, 0, MidiScaleModule::ScaleType::Major,
                      MidiScaleModule::CorrectionMode::Nearest, MidiScaleModule::defaultCustomMask(),
                      identityRemap, 0);
-    module.process(midi);
+    processForTest(module, midi);
     events = collect(midi);
     expect(events.size() == 2
         && events[0].type == Event::Type::NoteOn
@@ -136,7 +143,7 @@ int main()
     midi.clear();
     midi.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 90), 0);
     midi.addEvent(juce::MidiMessage::noteOff(1, 60), 20);
-    module.process(midi);
+    processForTest(module, midi);
     events = collect(midi);
     expect(events.size() == 2
         && events[0].noteOrCc == 67

@@ -1,6 +1,6 @@
 # Audience Harmonic Synth
 
-Version 1.0.29
+Version 1.0.35
 
 VST3 + Standalone JUCE instrument driven by an audience's phones. Each
 participant is identified by seat position (row letter + column number). Their
@@ -159,6 +159,102 @@ drains those events, updates voices, renders the selected sample/spectral path
 when audio is enabled, generates outgoing MIDI/MPE when MIDI is enabled, and
 publishes lightweight UI readouts for the editor visualizer.
 
+## Element Spectral Scale Clustering
+
+Element Spectral Synth keeps two related but separate representations of each
+atomic spectrum:
+
+- Raw/timbre spectrum: every positive-intensity emission line is preserved as
+  an additive timbre partial. Zero-intensity catalogue placeholders remain in
+  the source dataset but are not treated as playable or audible spectral lines.
+- Playable scale: nearby spectral lines can be clustered into a smaller set of
+  playable scale degrees.
+
+This means dense elements can become playable without deleting the physical
+spectral fingerprint. The full raw spectrum remains available to the timbre
+engine, while the scale view exposes a musically useful subset.
+
+The element source data is copied from the Max/Cosmic Unity `data/*.txt`
+datasets into this repository's `data/` folder. The plugin does not read those
+text files from the audio thread. Instead, run:
+
+```sh
+python3 tools/generate_element_spectral_data.py
+```
+
+to regenerate `Source/ElementSpectralData.cpp` and
+`Source/ElementSpectralData.h`. The generated C++ table is compiled into the
+plugin and then prewarmed by `PartialEngine::prepare`, so runtime spectral
+mapping remains realtime-safe.
+
+For each element, the longest positive-intensity wavelength is the spectral
+reference and maps to the played root:
+
+```text
+ratio_i = lambda_ref / lambda_i
+cents_i = 1200 * log2(ratio_i)
+cents_i = cents_i mod 1200
+```
+
+Pitch distance is measured in circular octave space, because `0 ct` and
+`1200 ct` are the same pitch class:
+
+```text
+distance(a, b) = min(abs(a - b), 1200 - abs(a - b))
+```
+
+The builder first keeps the root line, then sorts the remaining lines by
+log-compressed salience. A candidate line becomes a new scale degree only if it
+is far enough from all selected degrees. Otherwise, it is later assigned to the
+nearest selected degree as part of that degree's cluster.
+
+Default scale-reduction modes:
+
+| Atomic Scale Mode | Max degrees | Minimum separation | Use case |
+|---|---:|---:|---|
+| Core | 7 | 80 ct | sparse melodic performance |
+| Extended | 12 | 40 ct | default playable atomic scale |
+| Microtonal | 24 | 20 ct | denser microtonal performance |
+| Scientific | 48 | 10 ct | high-detail inspection |
+| Raw | unlimited | 0 ct | one degree per raw line |
+
+Every raw line is assigned to exactly one scale-degree cluster. Each cluster
+stores:
+
+- representative wavelength
+- representative cents and frequency
+- total and maximum intensity
+- cluster density
+- cluster spread in cents
+- source line IDs back to the raw dataset
+
+The representative pitch defaults to a medoid: a real source line inside the
+cluster with the smallest weighted circular distance to the other clustered
+lines. This avoids inventing artificial average pitches while still choosing a
+central, musically stable representative. The root cluster is special: the
+longest wavelength always remains fixed at `0 ct`.
+
+Timbre partials are not reduced:
+
+```text
+timbre_ratio_i = lambda_ref / lambda_i
+timbre_amp_i   = intensity_i / max_intensity
+partial_freq_i = played_root_hz * timbre_ratio_i
+```
+
+Scale-degree velocity is derived from cluster total intensity, but this is only
+used for scale weighting and display. It does not replace the raw partial
+amplitudes used by the timbre engine.
+
+In short:
+
+```text
+source data     -> original catalogue rows, including silent placeholders
+raw spectrum    -> positive-intensity emission lines
+timbre partials -> all positive lines preserved for additive tone color
+playable scale  -> clustered representative degrees for performance
+```
+
 ## MIDI Scale Module
 
 The Ableton-focused `Audience MIDI Generator` target includes a Scale MIDI
@@ -234,3 +330,22 @@ the scale-degree keyboard range now fall back to the nearest displayed
 scale/spectral step instead of being ignored. This makes compact atomic scales,
 such as Hydrogen Core, playable from normal MIDI keyboards even when a pressed
 key is beyond the current degree count.
+Version 1.0.30 improves spectral MIDI keyboard playability and polyphony. In
+Element/Atomic Spectral Scale mode, incoming external MIDI notes are mapped onto
+the same one-octave scale keyboard degrees shown in the UI, so compact scales
+such as Lithium can be played from a normal C1-C2 keyboard octave without
+collapsing held notes into a single nearest pitch.
+Version 1.0.31 adds the next five available spectral elements after Neon:
+Sodium, Magnesium, Aluminium, Silicon, and Phosphorus. Nitrogen remains omitted
+until a matching local `N.txt` dataset is available.
+Version 1.0.32 adds the next five available spectral elements after Phosphorus:
+Sulfur, Chlorine, Argon, Potassium, and Calcium.
+Version 1.0.33 adds the next five available spectral elements after Calcium:
+Scandium, Titanium, Vanadium, Chromium, and Manganese.
+Version 1.0.34 adds the next five available spectral elements after Manganese:
+Iron, Cobalt, Nickel, Copper, and Zinc.
+Version 1.0.35 publishes the Elemental Spektra UI/review pass: spectral line
+activity now drives synchronized Wavelength Wheel and Scale Keyboard
+highlighting from active voice snapshots, element spectra can be browsed from
+the left library rail, and the Max-derived spectral data/generator remain
+tracked for reproducible element tables.

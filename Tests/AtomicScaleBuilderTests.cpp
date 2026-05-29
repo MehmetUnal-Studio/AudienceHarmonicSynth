@@ -56,6 +56,15 @@ namespace
         };
     }
 
+    std::vector<Builder::SourceLine> zeroIntensityLines()
+    {
+        return {
+            { "silent-red", "silent-red", 700.0, Unit::Nanometer, 0.0 },
+            { "root",       "root",       650.0, Unit::Nanometer, 0.2 },
+            { "tone",       "tone",       500.0, Unit::Nanometer, 1.0 },
+        };
+    }
+
     std::vector<Builder::SourceLine> denseElementLines()
     {
         std::vector<Builder::SourceLine> lines;
@@ -151,6 +160,15 @@ int main()
              "raw mode still preserves timbre partials");
     r.expect(allRawLinesAssignedExactlyOnce(hydrogenRaw),
              "raw mode assigns each raw line once");
+
+    const auto zeroFiltered = Builder::buildPlayableAtomicScale(zeroIntensityLines(), performable);
+    r.expect(std::abs(zeroFiltered.lambdaRefNm - 650.0) < 0.001,
+             "zero-intensity longest wavelength does not become the spectral root");
+    r.expect(zeroFiltered.rawLines.size() == 2
+          && zeroFiltered.timbrePartials.size() == zeroFiltered.rawLines.size(),
+             "zero-intensity source rows are ignored by the scale and timbre builder");
+    r.expect(allRawLinesAssignedExactlyOnce(zeroFiltered),
+             "positive source rows still assign to exactly one scale cluster");
 
     Builder::Options denseOptions;
     denseOptions.elementName = "Dense";

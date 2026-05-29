@@ -42,6 +42,56 @@ namespace
         static const char* names[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
         return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
     }
+
+    juce::Colour wavelengthColour (double wavelengthNm)
+    {
+        double r = 0.0;
+        double g = 0.0;
+        double b = 0.0;
+
+        if (wavelengthNm >= 380.0 && wavelengthNm < 440.0)
+        {
+            r = -(wavelengthNm - 440.0) / (440.0 - 380.0);
+            b = 1.0;
+        }
+        else if (wavelengthNm >= 440.0 && wavelengthNm < 490.0)
+        {
+            g = (wavelengthNm - 440.0) / (490.0 - 440.0);
+            b = 1.0;
+        }
+        else if (wavelengthNm >= 490.0 && wavelengthNm < 510.0)
+        {
+            g = 1.0;
+            b = -(wavelengthNm - 510.0) / (510.0 - 490.0);
+        }
+        else if (wavelengthNm >= 510.0 && wavelengthNm < 580.0)
+        {
+            r = (wavelengthNm - 510.0) / (580.0 - 510.0);
+            g = 1.0;
+        }
+        else if (wavelengthNm >= 580.0 && wavelengthNm < 645.0)
+        {
+            r = 1.0;
+            g = -(wavelengthNm - 645.0) / (645.0 - 580.0);
+        }
+        else if (wavelengthNm >= 645.0 && wavelengthNm <= 750.0)
+        {
+            r = 1.0;
+        }
+
+        double factor = 0.0;
+        if (wavelengthNm >= 380.0 && wavelengthNm < 420.0)
+            factor = 0.3 + 0.7 * (wavelengthNm - 380.0) / (420.0 - 380.0);
+        else if (wavelengthNm >= 420.0 && wavelengthNm < 645.0)
+            factor = 1.0;
+        else if (wavelengthNm >= 645.0 && wavelengthNm <= 750.0)
+            factor = 0.3 + 0.7 * (750.0 - wavelengthNm) / (750.0 - 645.0);
+
+        return juce::Colour::fromFloatRGBA ((float) (r * factor),
+                                            (float) (g * factor),
+                                            (float) (b * factor),
+                                            1.0f);
+    }
 }
 
 AuroraComponent::AuroraComponent (PartialEngine& e) : engine(e)
@@ -166,8 +216,8 @@ void AuroraComponent::paint (juce::Graphics& g)
     auto area = getLocalBounds().reduced(10, 8);
     auto header = area.removeFromTop(24);
     const int scaleStripH = H < 260.0f
-                          ? juce::jlimit(74, 112, (int) std::round(H * 0.40f))
-                          : juce::jlimit(116, 176, (int) std::round(H * 0.46f));
+                          ? juce::jlimit(90, 144, (int) std::round(H * 0.46f))
+                          : juce::jlimit(150, 244, (int) std::round(H * 0.52f));
     auto scaleStrip = area.removeFromBottom(scaleStripH);
     area.removeFromBottom(8);
     auto map = area;
@@ -266,8 +316,16 @@ void AuroraComponent::paint (juce::Graphics& g)
         g.drawRoundedRectangle(scaleStrip.toFloat(), 5.0f, 1.0f);
 
         auto strip = scaleStrip.reduced(8, 6);
+        juce::Rectangle<int> wavelengthWheel;
+        if (spectralScale && strip.getWidth() >= 620 && strip.getHeight() >= 124)
+        {
+            const int wheelSize = juce::jlimit(118, 178, strip.getHeight() - 4);
+            auto wheelSlot = strip.removeFromLeft(wheelSize + 12);
+            wavelengthWheel = wheelSlot.withTrimmedRight(12).reduced(1);
+        }
+
         auto ruler = strip.removeFromTop(18);
-        auto noteAxis = strip.removeFromBottom(spectralScale ? 34 : 18);
+        auto noteAxis = strip.removeFromBottom(spectralScale ? 58 : 18);
         auto lines = strip.reduced(0, 4);
 
         juce::ColourGradient floorGlow(juce::Colours::transparentBlack,
@@ -311,12 +369,17 @@ void AuroraComponent::paint (juce::Graphics& g)
         const int loMidi = n > 0 ? engine.getScaleMidi(0) : -1;
 
         std::array<float, 128> midiEnergy {};
+        std::array<float, 8192> stepEnergy {};
         for (int i = 0; i < engine.getMaxVoices(); ++i)
         {
             const float amp = engine.getVoiceAmp(i);
             const int midi = engine.getVoiceMidi(i);
             if (amp > 0.015f && midi >= 0 && midi < (int) midiEnergy.size())
                 midiEnergy[(size_t) midi] += amp;
+
+            const int step = engine.getVoiceScaleStep(i);
+            if (amp > 0.015f && step >= 0 && step < juce::jmin(n, (int) stepEnergy.size()))
+                stepEnergy[(size_t) step] += amp;
         }
 
         float maxScaleEnergy = 0.0f;
@@ -327,13 +390,102 @@ void AuroraComponent::paint (juce::Graphics& g)
             if (midi < 0 || midi >= (int) midiEnergy.size())
                 continue;
 
-            const float e = midiEnergy[(size_t) midi];
+            const float e = spectralScale && i < (int) stepEnergy.size()
+                ? stepEnergy[(size_t) i]
+                : midiEnergy[(size_t) midi];
             if (e > maxScaleEnergy)
             {
                 maxScaleEnergy = e;
                 dominantMidi = midi;
             }
         }
+
+        auto drawWavelengthWheel = [&] (juce::Rectangle<int> bounds)
+        {
+            if (bounds.isEmpty())
+                return;
+
+            const int stepsPerOctave = juce::jlimit(0, n, engine.getScaleStepsPerOctave());
+            if (stepsPerOctave <= 0)
+                return;
+
+            g.setColour(juce::Colour(0xff030608).withAlpha(0.84f));
+            g.fillRoundedRectangle(bounds.toFloat(), 5.0f);
+            g.setColour(juce::Colour(0xff171f2a));
+            g.drawRoundedRectangle(bounds.toFloat(), 5.0f, 1.0f);
+
+            g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 7.5f, juce::Font::plain)));
+            g.setColour(juce::Colour(0xff69717d));
+            g.drawText("WAVELENGTH WHEEL", bounds.getX() + 7, bounds.getY() + 4,
+                       bounds.getWidth() - 14, 10, juce::Justification::centredLeft);
+            g.drawText("380-750 nm", bounds.getX() + 7, bounds.getBottom() - 13,
+                       bounds.getWidth() - 14, 10, juce::Justification::centredRight);
+
+            auto circleArea = bounds.reduced(8, 15);
+            const int circleSize = juce::jmin(circleArea.getWidth(), circleArea.getHeight());
+            if (circleSize <= 20)
+                return;
+
+            circleArea = juce::Rectangle<int>(circleArea.getCentreX() - circleSize / 2,
+                                              circleArea.getCentreY() - circleSize / 2,
+                                              circleSize, circleSize);
+
+            const float cx = (float) circleArea.getCentreX();
+            const float cy = (float) circleArea.getCentreY();
+            const float radius = (float) circleSize * 0.5f - 3.0f;
+
+            g.setColour(juce::Colour(0xff111821).withAlpha(0.58f));
+            g.fillEllipse(cx - radius, cy - radius, radius * 2.0f, radius * 2.0f);
+
+            for (int ring = 1; ring <= 3; ++ring)
+            {
+                const float rr = radius * (float) ring / 3.0f;
+                g.setColour(juce::Colour(0xff252d38).withAlpha(ring == 3 ? 0.74f : 0.22f));
+                g.drawEllipse(cx - rr, cy - rr, rr * 2.0f, rr * 2.0f, ring == 3 ? 1.1f : 0.6f);
+            }
+
+            const auto twoPi = juce::MathConstants<float>::twoPi;
+            constexpr double startNm = 380.0;
+            constexpr double endNm = 750.0;
+            constexpr double nmRange = endNm - startNm;
+
+            for (int i = 0; i < stepsPerOctave; ++i)
+            {
+                const double nm = engine.getScaleLineWavelengthNm(i);
+                if (nm < startNm || nm > endNm)
+                    continue;
+
+                float degreeActivity = 0.0f;
+                for (int step = i; step < n; step += stepsPerOctave)
+                {
+                    if (step >= 0 && step < (int) stepEnergy.size())
+                        degreeActivity += stepEnergy[(size_t) step];
+                }
+
+                const float activeNorm = maxScaleEnergy > 0.0f ? juce::jlimit(0.0f, 1.0f, degreeActivity / maxScaleEnergy)
+                                                               : 0.0f;
+                const bool active = degreeActivity > 0.015f;
+                const float amp = juce::jlimit(0.0f, 1.0f, engine.getScaleLineAmplitude(i));
+                const float angle = (float) ((nm - startNm) / nmRange) * twoPi;
+                const float endpointX = cx - radius * std::cos(angle);
+                const float endpointY = cy + radius * std::sin(angle);
+                const auto colour = wavelengthColour(nm);
+
+                g.setColour(colour.withAlpha(active ? 0.92f : 0.44f + amp * 0.32f));
+                g.drawLine(cx, cy, endpointX, endpointY, active ? 1.8f + activeNorm * 1.8f : 1.15f + amp * 0.7f);
+
+                if (active)
+                {
+                    g.setColour(juce::Colours::white.withAlpha(0.58f));
+                    g.drawLine(cx, cy, endpointX, endpointY, 2.4f + activeNorm * 1.4f);
+                }
+            }
+
+            g.setColour(juce::Colour(0xffdce6f4).withAlpha(0.78f));
+            g.fillEllipse(cx - 2.0f, cy - 2.0f, 4.0f, 4.0f);
+        };
+
+        drawWavelengthWheel(wavelengthWheel);
 
         auto xForT = [&] (float t)
         {
@@ -373,14 +525,14 @@ void AuroraComponent::paint (juce::Graphics& g)
 
         auto formatHz = [] (double hz)
         {
-            return hz >= 1000.0 ? juce::String(hz / 1000.0, 2) + "k"
-                                : juce::String(hz, 2);
+            return hz >= 1000.0 ? juce::String(hz / 1000.0, 2) + " kHz"
+                                : juce::String(hz, 2) + " Hz";
         };
 
         if (spectralScale)
         {
-            const int oneOctave = juce::jmin(engine.getScaleStepsPerOctave(), n);
-            for (int i = 0; i < oneOctave; ++i)
+            const int tickStride = n > 96 ? juce::jmax(1, n / 96) : 1;
+            for (int i = 0; i < n; i += tickStride)
             {
                 const float x = xForT(tForStep(i));
                 g.setColour(juce::Colour(0xff59616d).withAlpha(0.85f));
@@ -422,8 +574,10 @@ void AuroraComponent::paint (juce::Graphics& g)
             const int midi = engine.getScaleMidi(i);
             if (midi < 0) continue;
             const float t = tForStep(i);
-            const float activity = (midi >= 0 && midi < (int) midiEnergy.size())
-                                 ? midiEnergy[(size_t) midi] : 0.0f;
+            const float activity = spectralScale && i < (int) stepEnergy.size()
+                                 ? stepEnergy[(size_t) i]
+                                 : ((midi >= 0 && midi < (int) midiEnergy.size())
+                                        ? midiEnergy[(size_t) midi] : 0.0f);
             const float activeNorm = maxScaleEnergy > 0.0f ? juce::jlimit(0.0f, 1.0f, activity / maxScaleEnergy)
                                                            : 0.0f;
             const auto col = interpStops(1.0f - t);
@@ -449,20 +603,21 @@ void AuroraComponent::paint (juce::Graphics& g)
         {
             g.setColour(juce::Colour(0xff5c636d));
             g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 8.0f, juce::Font::plain)));
-            g.drawText("AUDIO Hz", scaleStrip.getX() + 8, noteAxis.getY() + 3, 64, 10, juce::Justification::left);
+            g.drawText("AUDIO FREQ", scaleStrip.getX() + 8, noteAxis.getY() + 3, 72, 10, juce::Justification::left);
 
             std::vector<juce::Rectangle<int>> usedLabels;
-            const int oneOctave = juce::jmin(engine.getScaleStepsPerOctave(), n);
-            for (int i = 0; i < oneOctave; ++i)
+            const int labelStride = n > 96 ? juce::jmax(1, (n + 95) / 96) : 1;
+            const int lanes = juce::jlimit(2, 4, (noteAxis.getHeight() - 6) / 13);
+            for (int i = 0; i < n; i += labelStride)
             {
                 const float x = xForT(tForStep(i));
                 const auto label = formatHz(engine.getScaleFrequencyHz(i));
-                const int labelW = juce::jlimit(44, 62, (int) label.length() * 6 + 10);
+                const int labelW = juce::jlimit(52, 72, (int) label.length() * 5 + 12);
                 juce::Rectangle<int> box((int) std::round(x) - labelW / 2,
-                                         noteAxis.getY() + 3 + (i % 2) * 13,
+                                         noteAxis.getY() + 14 + (i % lanes) * 12,
                                          labelW, 11);
 
-                for (int pass = 0; pass < 2; ++pass)
+                for (int pass = 0; pass < lanes; ++pass)
                 {
                     bool overlaps = false;
                     for (const auto& r : usedLabels)
@@ -471,7 +626,7 @@ void AuroraComponent::paint (juce::Graphics& g)
                     if (! overlaps)
                         break;
 
-                    box.setY(noteAxis.getY() + 3 + ((i + pass + 1) % 2) * 13);
+                    box.setY(noteAxis.getY() + 14 + ((i + pass + 1) % lanes) * 12);
                 }
 
                 usedLabels.push_back(box);

@@ -6,8 +6,8 @@
 /*
     DebugPanel
 
-    Toggleable overlay that shows incoming OSC data per-seat in real time -
-    like a synth console. Activates / deactivates from the ribbon toggle.
+    Toggleable overlay for MIDI/MPE diagnostics. Activates / deactivates
+    from the ribbon toggle.
 */
 class DebugPanel : public juce::Component, private juce::Timer
 {
@@ -23,8 +23,10 @@ private:
     void timerCallback() override;
 
     AudienceProcessor& proc;
-    juce::TextEditor   seatsView;
     juce::TextEditor   scaleView;
     juce::TextEditor   octaveView;
     juce::TextEditor   midiView;
+    juce::TextEditor   reportView;
+    juce::TextButton   copyReportButton { "Copy Report" };
+    juce::String       lastReport;
 };

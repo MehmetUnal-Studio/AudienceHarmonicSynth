@@ -280,7 +280,11 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     addAndMakeVisible(soundModeLabel);
 
     const juce::StringArray elements { "Hydrogen", "Helium", "Lithium", "Beryllium",
-                                       "Boron", "Carbon", "Oxygen", "Fluorine", "Neon" };
+                                       "Boron", "Carbon", "Oxygen", "Fluorine", "Neon",
+                                       "Sodium", "Magnesium", "Aluminium", "Silicon", "Phosphorus",
+                                       "Sulfur", "Chlorine", "Argon", "Potassium", "Calcium",
+                                       "Scandium", "Titanium", "Vanadium", "Chromium", "Manganese",
+                                       "Iron", "Cobalt", "Nickel", "Copper", "Zinc" };
     for (int i = 0; i < elements.size(); ++i) spectralElementCombo.addItem(elements[i], i + 1);
     styleCombo(spectralElementCombo);
     styleLabel(spectralElementLabel, "ELEMENT");
@@ -315,7 +319,13 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     for (int i = 0; i < rootOctaves.size(); ++i) rootOctaveCombo.addItem(rootOctaves[i], i + 1);
     const juce::StringArray scales { "Major", "Natural Minor", "Pentatonic", "Dorian", "Lydian", "Harmonic Minor", "Whole Tone",
                                      "Hydrogen Spectrum", "Helium Spectrum", "Lithium Spectrum", "Beryllium Spectrum",
-                                     "Boron Spectrum", "Carbon Spectrum", "Oxygen Spectrum", "Fluorine Spectrum", "Neon Spectrum" };
+                                     "Boron Spectrum", "Carbon Spectrum", "Oxygen Spectrum", "Fluorine Spectrum", "Neon Spectrum",
+                                     "Sodium Spectrum", "Magnesium Spectrum", "Aluminium Spectrum", "Silicon Spectrum",
+                                     "Phosphorus Spectrum", "Sulfur Spectrum", "Chlorine Spectrum", "Argon Spectrum",
+                                     "Potassium Spectrum", "Calcium Spectrum", "Scandium Spectrum", "Titanium Spectrum",
+                                     "Vanadium Spectrum", "Chromium Spectrum", "Manganese Spectrum",
+                                     "Iron Spectrum", "Cobalt Spectrum", "Nickel Spectrum", "Copper Spectrum",
+                                     "Zinc Spectrum" };
     for (int i = 0; i < scales.size(); ++i) scaleCombo.addItem(scales[i], i + 1);
     const juce::StringArray polyphonyModes { "Normal", "High", "Ultra" };
     for (int i = 0; i < polyphonyModes.size(); ++i) polyphonyCombo.addItem(polyphonyModes[i], i + 1);
@@ -323,6 +333,8 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     for (int i = 0; i < audioMidiOutputModes.size(); ++i) audioMidiOutputModeCombo.addItem(audioMidiOutputModes[i], i + 1);
     const juce::StringArray midiOutputTypes { "Off", "Normal MIDI", "MPE MIDI" };
     for (int i = 0; i < midiOutputTypes.size(); ++i) midiOutputTypeCombo.addItem(midiOutputTypes[i], i + 1);
+    const juce::StringArray externalMidiPitchModes { "Direct", "Scale", "Trigger" };
+    for (int i = 0; i < externalMidiPitchModes.size(); ++i) externalMidiPitchModeCombo.addItem(externalMidiPitchModes[i], i + 1);
     for (int ch = 1; ch <= 16; ++ch) normalMidiChannelCombo.addItem(juce::String(ch), ch);
     const juce::StringArray bendRanges { "2 st", "12 st", "24 st", "48 st" };
     for (int i = 0; i < bendRanges.size(); ++i) mpeBendRangeCombo.addItem(bendRanges[i], i + 1);
@@ -334,6 +346,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     styleCombo(polyphonyCombo);
     styleCombo(audioMidiOutputModeCombo);
     styleCombo(midiOutputTypeCombo);
+    styleCombo(externalMidiPitchModeCombo);
     styleCombo(normalMidiChannelCombo);
     styleCombo(mpeBendRangeCombo);
     styleCombo(mpePitchModeCombo);
@@ -349,6 +362,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     styleLabel(polyphonyLabel, "POLY");
     styleLabel(audioMidiOutputModeLabel, "OUTPUT MODE");
     styleLabel(midiOutputTypeLabel, "MIDI OUT");
+    styleLabel(externalMidiPitchModeLabel, "MIDI IN");
     styleLabel(normalMidiChannelLabel, "CH");
     styleLabel(mpeBendRangeLabel, "BEND");
     styleLabel(mpePitchModeLabel, "MPE PITCH");
@@ -375,6 +389,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     addAndMakeVisible(polyphonyCombo);
     addAndMakeVisible(audioMidiOutputModeCombo);
     addAndMakeVisible(midiOutputTypeCombo);
+    addAndMakeVisible(externalMidiPitchModeCombo);
     addAndMakeVisible(normalMidiChannelCombo);
     addAndMakeVisible(mpeBendRangeCombo);
     addAndMakeVisible(mpePitchModeCombo);
@@ -389,6 +404,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     addAndMakeVisible(polyphonyLabel);
     addAndMakeVisible(audioMidiOutputModeLabel);
     addAndMakeVisible(midiOutputTypeLabel);
+    addAndMakeVisible(externalMidiPitchModeLabel);
     addAndMakeVisible(normalMidiChannelLabel);
     addAndMakeVisible(mpeBendRangeLabel);
     addAndMakeVisible(mpePitchModeLabel);
@@ -440,6 +456,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     polyphonyAttach   = std::make_unique<CA>(proc.apvts, "polyphonyMode", polyphonyCombo);
     audioMidiOutputModeAttach = std::make_unique<CA>(proc.apvts, "audioMidiOutputMode", audioMidiOutputModeCombo);
     midiOutputTypeAttach = std::make_unique<CA>(proc.apvts, "midiOutputType", midiOutputTypeCombo);
+    externalMidiPitchModeAttach = std::make_unique<CA>(proc.apvts, "externalMidiPitchMode", externalMidiPitchModeCombo);
     normalMidiChannelAttach = std::make_unique<CA>(proc.apvts, "normalMidiChannel", normalMidiChannelCombo);
     mpeBendRangeAttach = std::make_unique<CA>(proc.apvts, "mpePitchBendRange", mpeBendRangeCombo);
     mpePitchModeAttach = std::make_unique<CA>(proc.apvts, "mpePitchMode", mpePitchModeCombo);
@@ -526,6 +543,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     polyphonyCombo   .setTooltip("Voice budget: Normal 256, High 512, Ultra 1024. Unison folds down automatically as the crowd grows.");
     audioMidiOutputModeCombo.setTooltip("Choose whether this plugin renders internal audio, MIDI only, or both.");
     midiOutputTypeCombo.setTooltip("Normal MIDI sends nearest notes; MPE MIDI preserves spectral cents with per-note pitch bend.");
+    externalMidiPitchModeCombo.setTooltip("Direct plays normal MIDI notes. Scale quantizes to the selected scale. Trigger maps keys to the visible spectral scale keyboard.");
     midiOutputDeviceCombo.setTooltip("Choose where generated MIDI is sent: the DAW host bus, a virtual MIDI port, or a physical MIDI device.");
     midiOutputRefreshBtn.setTooltip("Rescan system MIDI output devices.");
     normalMidiChannelCombo.setTooltip("Single channel used by Normal MIDI output.");
@@ -617,6 +635,7 @@ void AudienceEditor::updateOutputModeVisibility()
     audioVisible(spectralStretchSlider); audioVisible(spectralStretchLabel);
     audioVisible(audioMidiOutputModeCombo); audioVisible(audioMidiOutputModeLabel);
     audioVisible(midiOutputTypeCombo); audioVisible(midiOutputTypeLabel);
+    audioVisible(externalMidiPitchModeCombo); audioVisible(externalMidiPitchModeLabel);
     audioVisible(normalMidiChannelCombo); audioVisible(normalMidiChannelLabel);
     audioVisible(mpeBendRangeCombo); audioVisible(mpeBendRangeLabel);
     audioVisible(mpePitchModeCombo); audioVisible(mpePitchModeLabel);
@@ -638,6 +657,8 @@ void AudienceEditor::updateOutputModeVisibility()
     const bool granular = sampleLibrary
         && proc.engine.samplePlaybackMode.load(std::memory_order_relaxed) == 1;
 
+    scaleCombo.setVisible(! elementSynth);
+    scaleLabel.setVisible(! elementSynth);
     samplePlaybackCombo.setVisible(sampleLibrary);
     samplePlaybackLabel.setVisible(sampleLibrary);
     spectralElementCombo.setVisible(elementSynth);
@@ -683,7 +704,7 @@ void AudienceEditor::updateOutputModeVisibility()
     setActive(midiOutputStatusLabel, midiActive);
     setActive(midiActivityLabel, midiActive);
 
-    libraryRail.setAlpha(elementSynth ? 0.48f : 1.0f);
+    libraryRail.setAlpha(1.0f);
 }
 
 void AudienceEditor::showAudioSettings()
@@ -1009,6 +1030,17 @@ void AudienceEditor::paintScaleKeyboard (juce::Graphics& g, juce::Rectangle<int>
 
     auto keyArea = inner.reduced(0, 2);
     const float keyW = (float) keyArea.getWidth() / (float) keys;
+
+    constexpr int kMaxVisualScaleSteps = 8192;
+    std::array<float, kMaxVisualScaleSteps> stepEnergy {};
+    for (int voice = 0; voice < proc.engine.getMaxVoices(); ++voice)
+    {
+        const float voiceAmp = proc.engine.getVoiceAmp(voice);
+        const int step = proc.engine.getVoiceScaleStep(voice);
+        if (voiceAmp > 0.015f && step >= 0 && step < keys && step < kMaxVisualScaleSteps)
+            stepEnergy[(size_t) step] += voiceAmp;
+    }
+
     for (int i = 0; i < keys; ++i)
     {
         auto key = juce::Rectangle<float>((float) keyArea.getX() + (float) i * keyW + 1.0f,
@@ -1017,14 +1049,17 @@ void AudienceEditor::paintScaleKeyboard (juce::Graphics& g, juce::Rectangle<int>
                                           (float) keyArea.getHeight());
         const bool computerHeld = i < (int) kComputerKeys.size() && keyboardSlotDown[(size_t) i];
         const bool mouseHeld = mouseKeyboardStep == i && keyboardSlotDown[(size_t) mouseKeyboardSlot];
-        const bool down = computerHeld || mouseHeld;
+        const float engineEnergy = i < kMaxVisualScaleSteps ? stepEnergy[(size_t) i] : 0.0f;
+        const bool engineHeld = engineEnergy > 0.015f;
+        const bool down = computerHeld || mouseHeld || engineHeld;
+        const float engineNorm = juce::jlimit(0.0f, 1.0f, engineEnergy);
         const float amp = proc.engine.isSpectralScale()
             ? juce::jlimit(0.15f, 1.0f, proc.engine.getScaleLineAmplitude(i))
             : 0.72f;
         const auto accent = cs::accAmber.interpolatedWith(cs::accBlue,
                                                           total > 1 ? (float) i / (float) (total - 1) : 0.0f);
 
-        g.setColour(down ? accent.withAlpha(0.95f)
+        g.setColour(down ? accent.withAlpha(0.82f + engineNorm * 0.16f)
                          : juce::Colour(0xff111625).interpolatedWith(accent, 0.08f + amp * 0.30f));
         g.fillRoundedRectangle(key, 5.0f);
         if (proc.engine.isSpectralScale())
@@ -1034,6 +1069,12 @@ void AudienceEditor::paintScaleKeyboard (juce::Graphics& g, juce::Rectangle<int>
             auto strength = key.reduced(3.0f, 3.0f).removeFromBottom(barH);
             g.setColour(accent.withAlpha(down ? 0.78f : 0.34f + amp * 0.46f));
             g.fillRoundedRectangle(strength, 3.0f);
+        }
+        if (engineHeld)
+        {
+            const float glowAlpha = 0.22f + engineNorm * 0.34f;
+            g.setColour(juce::Colours::white.withAlpha(glowAlpha));
+            g.drawRoundedRectangle(key.reduced(1.0f), 4.0f, 1.4f + engineNorm * 1.0f);
         }
         g.setColour(down ? accent.brighter(0.28f) : cs::hairline);
         g.drawRoundedRectangle(key, 5.0f, 1.0f);
@@ -1322,6 +1363,9 @@ void AudienceEditor::resized()
     debugPanel.toFront(false);
 
     y += auroraH + gap;
+    keyboardPanelBounds = { mainX, y, mainW, keyboardH };
+    y += keyboardH + gap;
+
     macroPanelBounds = { mainX, y, mainW, macroH };
     midiOutputPanelBounds = {};
 
@@ -1387,13 +1431,14 @@ void AudienceEditor::resized()
     const bool showAdvancedMpe = innerW >= 760;
     const int modeW = compactMidi ? 94 : 104;
     const int typeW = compactMidi ? 92 : 98;
+    const int inputModeW = compactMidi ? 76 : 88;
     const int channelW = compactMidi ? 42 : 46;
     const int bendW = showBend ? 62 : 0;
     const int pitchModeW = showAdvancedMpe ? 72 : 0;
     const int setupW = showAdvancedMpe ? 58 : 0;
     const int refreshW = showRefresh ? 54 : 0;
-    const int fixedW = modeW + typeW + channelW + bendW + pitchModeW + setupW + refreshW
-                     + midiGap * (3 + (showBend ? 1 : 0) + (showAdvancedMpe ? 2 : 0) + (showRefresh ? 1 : 0));
+    const int fixedW = modeW + typeW + inputModeW + channelW + bendW + pitchModeW + setupW + refreshW
+                     + midiGap * (4 + (showBend ? 1 : 0) + (showAdvancedMpe ? 2 : 0) + (showRefresh ? 1 : 0));
     const int deviceW = juce::jmax(compactMidi ? 92 : 160, innerW - fixedW);
     int midiX = midiInner.getX();
 
@@ -1403,6 +1448,9 @@ void AudienceEditor::resized()
     midiOutputTypeLabel.setBounds(midiX, labelY, typeW, 12);
     midiOutputTypeCombo.setBounds(midiX, controlY, typeW, 24);
     midiX += typeW + midiGap;
+    externalMidiPitchModeLabel.setBounds(midiX, labelY, inputModeW, 12);
+    externalMidiPitchModeCombo.setBounds(midiX, controlY, inputModeW, 24);
+    midiX += inputModeW + midiGap;
     midiOutputDeviceLabel.setBounds(midiX, labelY, deviceW, 12);
     midiOutputDeviceCombo.setBounds(midiX, controlY, deviceW, 24);
     midiOutputStatusLabel.setBounds(midiX, statusY, juce::jmax(120, midiOutputPanelBounds.getRight() - midiX - 132), 12);
@@ -1504,8 +1552,6 @@ void AudienceEditor::resized()
     spectralPartialLabel.setBounds(partX + 5 * partStep, grainY + 47, 86, 12);
     spectralPartialSlider.setBounds(partX + 5 * partStep, grainY + 60, 104, 22);
     y += moduleH + gap;
-    keyboardPanelBounds = { mainX, y, mainW, keyboardH };
-    y += keyboardH + gap;
     ribbonBounds = { mainX, y, mainW, ribbonH };
 
     const int ribbonControlY = ribbonBounds.getY() + 17;

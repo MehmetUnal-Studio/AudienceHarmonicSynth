@@ -96,7 +96,7 @@ public:
     void prepare (double sampleRate, int blockSize = 512);
     void reset();
 
-    // ---- OSC thread (lock-free) ----
+    // ---- non-audio control threads ----
     void setX  (int row, int col, float xNorm) override;
     void setY  (int row, int col, float yNorm) override;
     void setOn (int row, int col, bool on) override;
@@ -106,6 +106,9 @@ public:
     // ---- audio thread ----
     void render (float* outL, float* outR, int numSamples);
     void processControlEvents (int numSamples);
+    void processKeyboardStepRealtime (int slot, int scaleStep, float velocity, bool on);
+    void processKeyboardPitchRealtime (int slot, int midiNote, double frequencyHz, float velocity, bool on);
+    static double midiNoteToFrequencyHz (int midiNote) noexcept;
 
     struct MidiSourceEvent
     {
@@ -152,7 +155,7 @@ public:
     std::atomic<int>   polyphonyMode  { 0 };           // Normal / High / Ultra
     std::atomic<int>   engineSource   { 0 };           // Sample Library / Element Spectral Synth
     std::atomic<int>   samplePlaybackMode { 0 };       // Direct Sample Player / Granular
-    std::atomic<int>   spectralElement { 1 };          // H / He / Li / Be / B / C / O / F / Ne
+    std::atomic<int>   spectralElement { 1 };          // H..Zn, with Nitrogen omitted until a matching dataset is available
     std::atomic<int>   spectralPartialCount { 9 };
     std::atomic<int>   spectralPartialSolo { 0 };       // Audition one raw spectral line.
     std::atomic<float> spectralStretch { 0.0f };
@@ -188,6 +191,7 @@ public:
 	    int   getScaleTableSize() const noexcept;
 	    int   getScaleStepsPerOctave() const noexcept;
 	    int   findNearestScaleStepForMidi (int midiNote) const noexcept;
+	    int   findKeyboardScaleStepForMidi (int midiNote) const noexcept;
 	    int   getScaleMidi (int idx) const noexcept;
 	    double getScaleFrequencyHz (int idx) const noexcept;
 	    double getScaleLineWavelengthNm (int idx) const noexcept;
@@ -216,6 +220,7 @@ public:
     int   getMaxVoices() const noexcept             { return MAX_VOICES; }
     float getVoiceAmp     (int i) const noexcept;
     int   getVoiceMidi    (int i) const noexcept;
+    int   getVoiceScaleStep (int i) const noexcept;
     int   getVoiceSeatRow (int i) const noexcept;
     int   getVoiceSeatCol (int i) const noexcept;
     bool  isSeatActive    (int row, int col) const noexcept;
@@ -277,6 +282,7 @@ private:
         std::atomic<float> uiAmp { 0.0f };
         std::atomic<float> uiX   { 0.5f };
         std::atomic<int>   uiMidi { -1 };
+        std::atomic<int>   uiScaleStep { -1 };
         std::atomic<int>   uiSeatRow { -1 };
         std::atomic<int>   uiSeatCol { -1 };
     };
@@ -329,12 +335,13 @@ private:
 	    void         handleEvent (const VoiceEvent& e);
 	    void         maybeTrigger (int row, int col, int sIdx, float x, bool forceTrigger);
     void         keyboardOn (int slot, int scaleStep, float velocity);
+    void         keyboardPitchOn (int slot, const PitchTarget& target, int scaleStep, float x, float velocity);
     void         keyboardOff (int slot);
 	    void         retuneActiveSeatsNow();
 	    int          allocateVoice (int row, int col, int midi,
 	                                double frequencyHz, float velocityGain,
 	                                float detuneCents, float gainScale, float panOffset,
-	                                float x, float y);
+	                                float x, float y, int scaleStep);
     void         freeVoice (int idx);
     void         enqueueMidiEvent (const MidiSourceEvent& e) noexcept;
     void         enqueueSeatMidiNoteOff (int row, int col, int sourceId) noexcept;
@@ -358,6 +365,7 @@ private:
     std::array<SeatState, MAX_SEATS>  seats;
     std::array<KeyboardState, MAX_KEYBOARD_SLOTS> keyboardSlots;
 
+    juce::CriticalSection                     eventWriteLock;
     juce::AbstractFifo                        eventFifo { EVENT_QUEUE_SIZE };
     std::array<VoiceEvent, EVENT_QUEUE_SIZE>  eventBuffer;
     juce::AbstractFifo                            midiEventFifo { MIDI_EVENT_QUEUE_SIZE };

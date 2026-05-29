@@ -89,7 +89,14 @@ public:
     int getMidiNotesSent() const noexcept    { return midiNotesSent.load(std::memory_order_relaxed); }
     int getActiveMpeVoices() const noexcept  { return activeMpeVoices.load(std::memory_order_relaxed); }
     int getAvailableMpeChannels() const noexcept { return availableMpeChannels.load(std::memory_order_relaxed); }
+    int getActiveExternalMidiKeys() const noexcept { return activeExternalMidiKeys.load(std::memory_order_relaxed); }
+    int getLastExternalMidiNote() const noexcept { return lastExternalMidiNote.load(std::memory_order_relaxed); }
+    int getLastExternalMidiChannel() const noexcept { return lastExternalMidiChannel.load(std::memory_order_relaxed); }
+    juce::String getExternalMidiPitchModeName() const;
     juce::String getOutgoingMidiDebugText (int maxEvents = 96) const;
+    juce::String getIncomingMidiDebugText (int maxEvents = 96) const;
+    juce::String getMidiStateDebugText() const;
+    juce::String getMidiDebugReportText() const;
     juce::StringArray getMidiOutputOptions() const;
     juce::String getMidiOutputStatus() const;
     juce::String getMidiOutputDescription() const;
@@ -109,6 +116,7 @@ public:
 private:
     void timerCallback() override;
     juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    void cacheParameterPointers();
     void pullParams();
     void processIncomingMidiKeyboard (const juce::MidiBuffer&);
     void releaseAllMidiKeyboardNotes();
@@ -129,6 +137,7 @@ private:
     static int bendRangeFromChoice (int choice) noexcept;
     static int velocityFromUnit (float value) noexcept;
     static int pressureFromUnit (float value) noexcept;
+    void recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
     void recordOutgoingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
     void queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages) noexcept;
     void drainExternalMidiOutputQueue();
@@ -166,6 +175,8 @@ private:
     static constexpr int midiDebugEventQueueSize = 256;
     std::array<MidiDebugSlot, midiDebugEventQueueSize> midiDebugEvents {};
     std::atomic<uint32_t> midiDebugWriteCounter { 0 };
+    std::array<MidiDebugSlot, midiDebugEventQueueSize> incomingMidiDebugEvents {};
+    std::atomic<uint32_t> incomingMidiDebugWriteCounter { 0 };
 
     std::unique_ptr<juce::MidiOutput> midiOutput;
     std::atomic<int> midiOutputOptionIndex { 0 };
@@ -189,6 +200,18 @@ private:
 
     static constexpr int maxMidiSources = PartialEngine::MAX_SEATS + PartialEngine::MAX_KEYBOARD_SLOTS;
     std::array<MidiOutVoiceState, maxMidiSources> midiOutVoices {};
+
+    struct MidiVoiceDebugSlot
+    {
+        std::atomic<int> active { 0 };
+        std::atomic<int> sourceId { -1 };
+        std::atomic<int> channel { 0 };
+        std::atomic<int> note { -1 };
+        std::atomic<int> pitchBend { 8192 };
+        std::atomic<int> age { 0 };
+    };
+
+    std::array<MidiVoiceDebugSlot, maxMidiSources> midiVoiceDebug {};
     std::array<int, 17> mpeChannelOwner {};
     uint32_t midiVoiceAgeCounter = 0;
     bool mpeSetupDirty = true;
@@ -210,8 +233,66 @@ private:
     int lastSamplePlaybackMode = -1;
     int lastSpectralElement = -1;
     int lastAtomicScaleMode = -1;
-    std::array<int, 128> midiNoteToKeyboardSlot {};
-    std::array<int, PartialEngine::MAX_KEYBOARD_SLOTS> keyboardSlotToMidiNote {};
+    static constexpr int midiInputChannels = 16;
+    static constexpr int midiInputNotes = 128;
+    static constexpr int midiInputKeyCount = midiInputChannels * midiInputNotes;
+    std::array<int, midiInputKeyCount> midiKeyToKeyboardSlot {};
+    std::array<int, PartialEngine::MAX_KEYBOARD_SLOTS> keyboardSlotToMidiKey {};
+    std::array<std::atomic<int>, PartialEngine::MAX_KEYBOARD_SLOTS> keyboardDebugKeys {};
+    std::atomic<int> lastExternalMidiNote { -1 };
+    std::atomic<int> lastExternalMidiChannel { -1 };
+    std::atomic<int> activeExternalMidiKeys { 0 };
+    std::atomic<int> externalMidiPitchModeSnapshot { 0 };
+
+    struct RawParams
+    {
+        std::atomic<float>* pitch = nullptr;
+        std::atomic<float>* layerMix = nullptr;
+        std::atomic<float>* attack = nullptr;
+        std::atomic<float>* release = nullptr;
+        std::atomic<float>* brightness = nullptr;
+        std::atomic<float>* movement = nullptr;
+        std::atomic<float>* reverb = nullptr;
+        std::atomic<float>* delay = nullptr;
+        std::atomic<float>* master = nullptr;
+        std::atomic<float>* energy = nullptr;
+        std::atomic<float>* motionMacro = nullptr;
+        std::atomic<float>* toneMacro = nullptr;
+        std::atomic<float>* spaceMacro = nullptr;
+        std::atomic<float>* signatureMode = nullptr;
+        std::atomic<float>* grainSize = nullptr;
+        std::atomic<float>* grainDensity = nullptr;
+        std::atomic<float>* pitchSpread = nullptr;
+        std::atomic<float>* positionJitter = nullptr;
+        std::atomic<float>* stereoSpread = nullptr;
+        std::atomic<float>* reverseGrains = nullptr;
+        std::atomic<float>* freeze = nullptr;
+        std::atomic<float>* grainShape = nullptr;
+        std::atomic<float>* wetDry = nullptr;
+        std::atomic<float>* tapeDrive = nullptr;
+        std::atomic<float>* polyphonyMode = nullptr;
+        std::atomic<float>* scaleRoot = nullptr;
+        std::atomic<float>* scaleRootOctave = nullptr;
+        std::atomic<float>* scaleMode = nullptr;
+        std::atomic<float>* scaleOctaves = nullptr;
+        std::atomic<float>* engineSource = nullptr;
+        std::atomic<float>* samplePlaybackMode = nullptr;
+        std::atomic<float>* spectralElement = nullptr;
+        std::atomic<float>* spectralPartialCount = nullptr;
+        std::atomic<float>* spectralPartialSolo = nullptr;
+        std::atomic<float>* spectralStretch = nullptr;
+        std::atomic<float>* atomicScaleMode = nullptr;
+        std::atomic<float>* audioMidiOutputMode = nullptr;
+        std::atomic<float>* midiOutputType = nullptr;
+        std::atomic<float>* normalMidiChannel = nullptr;
+        std::atomic<float>* mpeMasterChannel = nullptr;
+        std::atomic<float>* mpeMemberFirstChannel = nullptr;
+        std::atomic<float>* mpeMemberLastChannel = nullptr;
+        std::atomic<float>* mpePitchBendRange = nullptr;
+        std::atomic<float>* mpeSendSetupMessages = nullptr;
+        std::atomic<float>* mpePitchMode = nullptr;
+        std::atomic<float>* externalMidiPitchMode = nullptr;
+    } rawParams;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceProcessor)
 };

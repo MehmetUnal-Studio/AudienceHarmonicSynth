@@ -116,12 +116,16 @@ AtomicScaleBuilder::Result AtomicScaleBuilder::buildPlayableAtomicScale (
         if (! std::isfinite(nm) || nm <= 0.0)
             continue;
 
+        const double intensity = src.intensity;
+        if (! std::isfinite(intensity) || intensity <= 0.0)
+            continue;
+
         RawLine line;
         line.sourceIndex = i;
         line.id = src.id.isNotEmpty() ? src.id : ("line-" + juce::String(i + 1));
         line.label = src.label;
         line.wavelengthNm = nm;
-        line.intensity = std::max(0.0, src.intensity);
+        line.intensity = intensity;
         raw.push_back(line);
 
         if (nm > lambdaRefNm)

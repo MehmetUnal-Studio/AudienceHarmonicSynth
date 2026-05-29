@@ -49,7 +49,6 @@ public:
     void setConfig (bool shouldEnable, int rootNote, ScaleType scaleType,
                     CorrectionMode correctionMode, int customMask,
                     const std::array<int, 12>& pitchClassRemap, int semitoneTranspose);
-    void process (juce::MidiBuffer& midi);
     void process (const juce::MidiBuffer& input, juce::MidiBuffer& output);
 
 private:

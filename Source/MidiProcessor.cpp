@@ -20,6 +20,21 @@ namespace
         const int clamped = juce::jlimit(0, 127, midi);
         return juce::String(kNoteNames[clamped % 12]) + juce::String(clamped / 12 - 1);
     }
+
+    float rawParamValue (const std::atomic<float>* param, float fallback = 0.0f) noexcept
+    {
+        return param != nullptr ? param->load(std::memory_order_relaxed) : fallback;
+    }
+
+    int rawParamInt (const std::atomic<float>* param, int fallback = 0) noexcept
+    {
+        return (int) rawParamValue(param, (float) fallback);
+    }
+
+    bool rawParamBool (const std::atomic<float>* param, bool fallback = false) noexcept
+    {
+        return rawParamValue(param, fallback ? 1.0f : 0.0f) > 0.5f;
+    }
 }
 
 AudienceMidiProcessor::AudienceMidiProcessor()
@@ -31,6 +46,7 @@ AudienceMidiProcessor::AudienceMidiProcessor()
       simulator(*this)
 {
     instanceId = nextInstanceId.fetch_add(1, std::memory_order_relaxed);
+    cacheParameterPointers();
     engine.channelMode.store((int) MidiEngine::MidiChannelMode::Single);
     engine.energyMacro.store(1.0f);
     engine.retriggerMs.store(0.0f);
@@ -91,6 +107,23 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceMidiProcessor::creat
     return layout;
 }
 
+void AudienceMidiProcessor::cacheParameterPointers()
+{
+    rawParams.channel = apvts.getRawParameterValue("channel");
+    rawParams.root = apvts.getRawParameterValue("root");
+    rawParams.rangeLowOctave = apvts.getRawParameterValue("rangeLowOctave");
+    rawParams.rangeHighOctave = apvts.getRawParameterValue("rangeHighOctave");
+    rawParams.scaleMode = apvts.getRawParameterValue("scaleMode");
+    rawParams.transpose = apvts.getRawParameterValue("transpose");
+    rawParams.midiScaleEnabled = apvts.getRawParameterValue("midiScaleEnabled");
+    rawParams.midiScaleCorrection = apvts.getRawParameterValue("midiScaleCorrection");
+    rawParams.midiScaleCustomMask = apvts.getRawParameterValue("midiScaleCustomMask");
+
+    for (int i = 0; i < 12; ++i)
+        rawParams.midiScaleRemap[(size_t) i] =
+            apvts.getRawParameterValue("midiScaleRemap" + juce::String(i));
+}
+
 void AudienceMidiProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = juce::jmax(1.0, sampleRate);
@@ -111,20 +144,20 @@ bool AudienceMidiProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 
 void AudienceMidiProcessor::pullParams()
 {
-    const int newChannel = (int) apvts.getRawParameterValue("channel")->load();
-    const int newRoot = (int) apvts.getRawParameterValue("root")->load();
-    const int rawRangeLow = (int) apvts.getRawParameterValue("rangeLowOctave")->load();
-    const int rawRangeHigh = (int) apvts.getRawParameterValue("rangeHighOctave")->load();
+    const int newChannel = rawParamInt(rawParams.channel, 1);
+    const int newRoot = rawParamInt(rawParams.root);
+    const int rawRangeLow = rawParamInt(rawParams.rangeLowOctave);
+    const int rawRangeHigh = rawParamInt(rawParams.rangeHighOctave, 4);
     const int newRangeLow = juce::jlimit(0, 7, rawRangeLow);
     const int newRangeHigh = juce::jlimit(newRangeLow + 1, 8, rawRangeHigh);
-    const int newScaleMode = (int) apvts.getRawParameterValue("scaleMode")->load();
-    const int newTranspose = (int) apvts.getRawParameterValue("transpose")->load();
-    const bool scaleEnabled = apvts.getRawParameterValue("midiScaleEnabled")->load() > 0.5f;
-    const int scaleCorrection = (int) apvts.getRawParameterValue("midiScaleCorrection")->load();
-    const int customMask = (int) apvts.getRawParameterValue("midiScaleCustomMask")->load();
+    const int newScaleMode = rawParamInt(rawParams.scaleMode);
+    const int newTranspose = rawParamInt(rawParams.transpose);
+    const bool scaleEnabled = rawParamBool(rawParams.midiScaleEnabled);
+    const int scaleCorrection = rawParamInt(rawParams.midiScaleCorrection);
+    const int customMask = rawParamInt(rawParams.midiScaleCustomMask, MidiScaleModule::defaultCustomMask());
     std::array<int, 12> remap {};
     for (int i = 0; i < 12; ++i)
-        remap[(size_t) i] = (int) apvts.getRawParameterValue("midiScaleRemap" + juce::String(i))->load();
+        remap[(size_t) i] = rawParamInt(rawParams.midiScaleRemap[(size_t) i], i);
 
     engine.channel.store(newChannel);
     engine.channelMode.store((int) MidiEngine::MidiChannelMode::Single);

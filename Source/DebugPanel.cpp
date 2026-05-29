@@ -24,14 +24,26 @@ DebugPanel::DebugPanel (AudienceProcessor& p) : proc(p)
         e.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
                                                   11.5f, juce::Font::plain)));
     };
-    styleEditor(seatsView);
     styleEditor(scaleView);
     styleEditor(octaveView);
     styleEditor(midiView);
-    addAndMakeVisible(seatsView);
+    styleEditor(reportView);
     addAndMakeVisible(scaleView);
     addAndMakeVisible(octaveView);
     addAndMakeVisible(midiView);
+    addAndMakeVisible(reportView);
+
+    copyReportButton.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    copyReportButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
+    copyReportButton.setColour(juce::TextButton::textColourOffId, kText);
+    copyReportButton.setColour(juce::ComboBox::outlineColourId, kHairline);
+    copyReportButton.onClick = [this]
+    {
+        lastReport = proc.getMidiDebugReportText();
+        juce::SystemClipboard::copyTextToClipboard(lastReport);
+        reportView.setText(lastReport, juce::dontSendNotification);
+    };
+    addAndMakeVisible(copyReportButton);
 
     startTimerHz(20);
 }
@@ -43,8 +55,6 @@ void DebugPanel::timerCallback()
     if (! isShowing())
         return;
 
-    seatsView.setText(proc.engine.getActiveSeatsSnapshot(24), juce::dontSendNotification);
-
     juce::String s;
     s << "scale range : " << proc.engine.getScaleRangeName() << "\n";
     s << "library     : " << proc.currentLibraryName << "  ("
@@ -53,6 +63,17 @@ void DebugPanel::timerCallback()
     s << "voices/seats: "
       << proc.engine.getActiveVoiceCount() << " voices / "
       << proc.engine.getRegisteredSeatCount() << " seats\n";
+    const int lastMidiNote = proc.getLastExternalMidiNote();
+    static const char* midiNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+    const juce::String lastMidiName = lastMidiNote >= 0
+        ? juce::String(midiNames[((lastMidiNote % 12) + 12) % 12]) + juce::String(lastMidiNote / 12 - 1)
+        : juce::String("--");
+    s << "external MIDI: "
+      << proc.getExternalMidiPitchModeName()
+      << " | active " << proc.getActiveExternalMidiKeys()
+      << " | last ch " << proc.getLastExternalMidiChannel()
+      << " " << lastMidiName
+      << " (" << lastMidiNote << ")\n";
     s << "----------------------------------------\n";
 
     const int n = proc.engine.getScaleTableSize();
@@ -73,6 +94,8 @@ void DebugPanel::timerCallback()
     scaleView.setText(s, juce::dontSendNotification);
     octaveView.setText(proc.engine.getScaleOneOctaveDebugText(), juce::dontSendNotification);
     midiView.setText(proc.getOutgoingMidiDebugText(96), juce::dontSendNotification);
+    lastReport = proc.getMidiDebugReportText();
+    reportView.setText(lastReport, juce::dontSendNotification);
 }
 
 void DebugPanel::visibilityChanged()
@@ -109,11 +132,11 @@ void DebugPanel::paint (juce::Graphics& g)
     const int thirdW = getWidth() / 3;
     g.drawText("scale + status", thirdW + 18, 30, 240, 22, juce::Justification::left);
     g.drawText("root octave", thirdW * 2 + 18, 30, 240, 22, juce::Justification::left);
-    g.drawText("active seats", 18, topBottom + 14, 240, 22, juce::Justification::left);
+    g.drawText("debug report", 18, topBottom + 14, 240, 22, juce::Justification::left);
 
     g.setColour(kText3);
     g.setFont(juce::Font(juce::FontOptions(10.5f)));
-    g.drawText("row / col / X / Y / note", 18, topBottom + 38, 320, 14, juce::Justification::left);
+    g.drawText("incoming MIDI / keyboard slots / active MPE voices", 18, topBottom + 38, 420, 14, juce::Justification::left);
 
     g.setColour(kHairline);
     g.drawLine((float) thirdW, 30.0f,
@@ -132,5 +155,6 @@ void DebugPanel::resized()
     midiView.setBounds(18, 76, thirdW - 28, topBottom - 90);
     scaleView.setBounds(thirdW + 18, 56, thirdW - 36, topBottom - 70);
     octaveView.setBounds(thirdW * 2 + 18, 56, getWidth() - thirdW * 2 - 36, topBottom - 70);
-    seatsView.setBounds(18, topBottom + 58, getWidth() - 36, getHeight() - topBottom - 72);
+    copyReportButton.setBounds(getWidth() - 150, topBottom + 16, 130, 28);
+    reportView.setBounds(18, topBottom + 58, getWidth() - 36, getHeight() - topBottom - 72);
 }

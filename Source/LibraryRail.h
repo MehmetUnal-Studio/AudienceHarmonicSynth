@@ -27,18 +27,31 @@ public:
     void refresh();
 
 private:
+    enum class RailMode
+    {
+        Samples,
+        Elements
+    };
+
     int  getNumRows() override;
     void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override;
     void listBoxItemClicked (int row, const juce::MouseEvent&) override;
     int  countSamplesForLibrary (const juce::String& name) const;
+    void setChoiceParameter (const juce::String& parameterId, int choiceIndex);
+    int  spectralScaleStartIndex() const;
 
     AudienceProcessor& proc;
+    RailMode           railMode = RailMode::Samples;
     juce::StringArray  libraryNames;
     juce::Array<int>   sampleCounts;
+    juce::StringArray  elementNames;
+    juce::Array<int>   elementIndices;
     int                selectedRow = -1;
 
     juce::ListBox      listbox;
     juce::TextEditor   searchBox;
+    juce::TextButton   samplesTabBtn  { "Samples" };
+    juce::TextButton   elementsTabBtn { "Elements" };
     juce::TextButton   rescanBtn { "Rescan" };
     juce::TextEditor   samplePreview;
 };

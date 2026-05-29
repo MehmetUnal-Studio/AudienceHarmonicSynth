@@ -11,9 +11,9 @@
     /cs/<row>/<col>/finger<n>/{on|line|v} messages and pokes the
     seat target's atomic/event targets.
 
-    Listener is registered with RealtimeCallback so we don't go through
-    the message thread for every packet. The callbacks only touch
-    SeatEventSink's lock-free setters - safe.
+    Listener uses JUCE's realtime OSC receiver callback so standalone tests
+    and hosts do not need a message-pump dependency. The callback is not the
+    audio thread; keep fan-out lock-free and parsing allocation-light.
 */
 class OscBridge
 {

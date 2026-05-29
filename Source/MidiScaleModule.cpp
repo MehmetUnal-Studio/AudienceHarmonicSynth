@@ -213,13 +213,6 @@ int MidiScaleModule::applyRemapAndTranspose (int noteNumber) const noexcept
     return juce::jlimit(0, 127, safeNote - pc + mappedPc + transpose);
 }
 
-void MidiScaleModule::process (juce::MidiBuffer& midi)
-{
-    juce::MidiBuffer processed;
-    process(midi, processed);
-    midi.swapWith(processed);
-}
-
 void MidiScaleModule::process (const juce::MidiBuffer& input, juce::MidiBuffer& output)
 {
     output.clear();

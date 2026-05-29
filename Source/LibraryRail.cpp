@@ -21,6 +21,33 @@ LibraryRail::LibraryRail (AudienceProcessor& p) : proc(p)
     listbox.setColour(juce::ListBox::outlineColourId,    juce::Colours::transparentBlack);
     addAndMakeVisible(listbox);
 
+    auto styleTab = [] (juce::TextButton& b)
+    {
+        b.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff10151c));
+        b.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff18242a));
+        b.setColour(juce::TextButton::textColourOffId, kText3);
+        b.setColour(juce::TextButton::textColourOnId, kText);
+    };
+
+    styleTab(samplesTabBtn);
+    styleTab(elementsTabBtn);
+    samplesTabBtn.setClickingTogglesState(false);
+    elementsTabBtn.setClickingTogglesState(false);
+    samplesTabBtn.onClick = [this]()
+    {
+        railMode = RailMode::Samples;
+        searchBox.setTextToShowWhenEmpty("Search libraries...", kText3);
+        refresh();
+    };
+    elementsTabBtn.onClick = [this]()
+    {
+        railMode = RailMode::Elements;
+        searchBox.setTextToShowWhenEmpty("Search elements...", kText3);
+        refresh();
+    };
+    addAndMakeVisible(samplesTabBtn);
+    addAndMakeVisible(elementsTabBtn);
+
     searchBox.setTextToShowWhenEmpty("Search libraries...", kText3);
     searchBox.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff05080c));
     searchBox.setColour(juce::TextEditor::textColourId,       kText);
@@ -58,37 +85,76 @@ LibraryRail::~LibraryRail() = default;
 
 void LibraryRail::refresh()
 {
-    const auto allLibraries = proc.getAvailableLibraries();
     const auto query = searchBox.getText().trim().toLowerCase();
     libraryNames.clear();
     sampleCounts.clear();
+    elementNames.clear();
+    elementIndices.clear();
 
-    for (const auto& name : allLibraries)
+    if (railMode == RailMode::Samples)
     {
-        if (query.isNotEmpty() && ! name.toLowerCase().contains(query))
-            continue;
+        const auto allLibraries = proc.getAvailableLibraries();
+        for (const auto& name : allLibraries)
+        {
+            if (query.isNotEmpty() && ! name.toLowerCase().contains(query))
+                continue;
 
-        libraryNames.add(name);
-        sampleCounts.add(countSamplesForLibrary(name));
+            libraryNames.add(name);
+            sampleCounts.add(countSamplesForLibrary(name));
+        }
+
+        selectedRow = libraryNames.indexOf(proc.currentLibraryName);
+    }
+    else if (auto* elements = dynamic_cast<juce::AudioParameterChoice*> (proc.apvts.getParameter("spectralElement")))
+    {
+        const int selectedElement = (int) proc.apvts.getRawParameterValue("spectralElement")->load();
+        for (int i = 0; i < elements->choices.size(); ++i)
+        {
+            const auto name = elements->choices[i];
+            if (query.isNotEmpty() && ! name.toLowerCase().contains(query))
+                continue;
+
+            elementNames.add(name);
+            elementIndices.add(i);
+        }
+
+        selectedRow = elementIndices.indexOf(selectedElement);
     }
 
-    selectedRow = libraryNames.indexOf(proc.currentLibraryName);
     listbox.updateContent();
     if (selectedRow >= 0)
         listbox.selectRow(selectedRow, true, true);
 
     juce::String preview;
-    const auto& lib = proc.engine.getLibrary();
-    const int   n   = lib.numSamples();
-    for (int i = 0; i < n; ++i)
+    if (railMode == RailMode::Samples)
     {
-        if (auto* s = lib.getSample(i))
-            preview << s->rootNote << "   " << s->displayName << "\n";
+        const auto& lib = proc.engine.getLibrary();
+        const int   n   = lib.numSamples();
+        for (int i = 0; i < n; ++i)
+        {
+            if (auto* s = lib.getSample(i))
+                preview << s->rootNote << "   " << s->displayName << "\n";
+        }
     }
+    else
+    {
+        preview << proc.engine.getSpectralElementName() << " Spectrum\n";
+        preview << "root " << juce::String(proc.engine.getSpectralElementRootWavelengthNm(), 3) << " nm\n";
+        preview << proc.engine.getScaleRangeName() << "\n";
+        preview << "raw lines " << juce::String(proc.engine.getSpectralElementLineCount()) << "\n";
+    }
+
     samplePreview.setText(preview, juce::dontSendNotification);
+    samplesTabBtn .setToggleState(railMode == RailMode::Samples, juce::dontSendNotification);
+    elementsTabBtn.setToggleState(railMode == RailMode::Elements, juce::dontSendNotification);
+    rescanBtn.setVisible(railMode == RailMode::Samples);
+    resized();
 }
 
-int LibraryRail::getNumRows() { return libraryNames.size(); }
+int LibraryRail::getNumRows()
+{
+    return railMode == RailMode::Samples ? libraryNames.size() : elementNames.size();
+}
 
 int LibraryRail::countSamplesForLibrary (const juce::String& name) const
 {
@@ -106,14 +172,20 @@ int LibraryRail::countSamplesForLibrary (const juce::String& name) const
 
 void LibraryRail::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected)
 {
+    if (railMode == RailMode::Elements
+        && row >= 0
+        && row < elementIndices.size())
+        selected = elementIndices[row] == (int) proc.apvts.getRawParameterValue("spectralElement")->load();
+
     auto bounds = juce::Rectangle<float>(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f);
     g.setColour(selected ? kRowSelected : juce::Colours::transparentBlack);
     g.fillRoundedRectangle(bounds, 4.0f);
     g.setColour(selected ? kAccent.withAlpha(0.6f) : kHairline);
     g.drawRoundedRectangle(bounds, 4.0f, selected ? 1.0f : 0.5f);
 
-    if (row < 0 || row >= libraryNames.size()) return;
-    const auto name = libraryNames[row];
+    const auto rowCount = railMode == RailMode::Samples ? libraryNames.size() : elementNames.size();
+    if (row < 0 || row >= rowCount) return;
+    const auto name = railMode == RailMode::Samples ? libraryNames[row] : elementNames[row];
 
     g.setColour(selected ? kText : kText2);
     g.setFont(juce::Font(juce::FontOptions(11.5f)));
@@ -121,20 +193,57 @@ void LibraryRail::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bo
                w - 28, 14, juce::Justification::centredLeft);
 
     const int count = (row >= 0 && row < sampleCounts.size()) ? sampleCounts[row] : 0;
+    const auto subtitle = railMode == RailMode::Samples
+        ? (juce::String(count) + " samples")
+        : (selected
+            ? ("root " + juce::String(proc.engine.getSpectralElementRootWavelengthNm(), 3) + " nm")
+            : juce::String("element spectrum"));
+
     g.setColour(kText3);
     g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
                                             10.0f, juce::Font::plain)));
-    g.drawText(juce::String(count) + " samples",
+    g.drawText(subtitle,
                (int) bounds.getX() + 14, (int) bounds.getY() + 19,
                w - 28, 14, juce::Justification::centredLeft);
 }
 
 void LibraryRail::listBoxItemClicked (int row, const juce::MouseEvent&)
 {
-    if (row < 0 || row >= libraryNames.size()) return;
-    proc.setCurrentLibrary(libraryNames[row]);
+    if (railMode == RailMode::Samples)
+    {
+        if (row < 0 || row >= libraryNames.size()) return;
+        setChoiceParameter("engineSource", 0);
+        proc.setCurrentLibrary(libraryNames[row]);
+    }
+    else
+    {
+        if (row < 0 || row >= elementIndices.size()) return;
+        const int element = elementIndices[row];
+        setChoiceParameter("engineSource", 1);
+        setChoiceParameter("spectralElement", element);
+        setChoiceParameter("scaleMode", spectralScaleStartIndex() + element);
+    }
+
     selectedRow = row;
     refresh();
+}
+
+void LibraryRail::setChoiceParameter (const juce::String& parameterId, int choiceIndex)
+{
+    if (auto* param = proc.apvts.getParameter(parameterId))
+    {
+        param->beginChangeGesture();
+        param->setValueNotifyingHost(param->convertTo0to1((float) choiceIndex));
+        param->endChangeGesture();
+    }
+}
+
+int LibraryRail::spectralScaleStartIndex() const
+{
+    if (auto* scales = dynamic_cast<juce::AudioParameterChoice*> (proc.apvts.getParameter("scaleMode")))
+        return juce::jmax(0, scales->choices.indexOf("Hydrogen Spectrum"));
+
+    return 7;
 }
 
 void LibraryRail::paint (juce::Graphics& g)
@@ -154,10 +263,11 @@ void LibraryRail::paint (juce::Graphics& g)
 
     g.setColour(kText);
     g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());
-    g.drawText("Sample Libraries", 12, 28, 150, 18, juce::Justification::left);
+    g.drawText(railMode == RailMode::Samples ? "Sample Libraries" : "Element Spectra",
+               12, 28, 150, 18, juce::Justification::left);
 
     g.setColour(kHairline);
-    g.drawLine(12.0f, 88.0f, (float) getWidth() - 12.0f, 88.0f, 1.0f);
+    g.drawLine(12.0f, 108.0f, (float) getWidth() - 12.0f, 108.0f, 1.0f);
 
     // active library banner near the bottom of the rail
     const int yBanner = getHeight() - 130;
@@ -182,8 +292,12 @@ void LibraryRail::paint (juce::Graphics& g)
 
 void LibraryRail::resized()
 {
-    searchBox.setBounds(12, 56, getWidth() - 78, 24);
-    rescanBtn.setBounds(getWidth() - 60, 56, 48, 24);
-    listbox.setBounds(8, 94, getWidth() - 16, getHeight() - 238);
+    const int tabW = (getWidth() - 28) / 2;
+    samplesTabBtn.setBounds(12, 50, tabW, 22);
+    elementsTabBtn.setBounds(16 + tabW, 50, getWidth() - 28 - tabW, 22);
+
+    searchBox.setBounds(12, 78, railMode == RailMode::Samples ? getWidth() - 78 : getWidth() - 24, 24);
+    rescanBtn.setBounds(getWidth() - 60, 78, 48, 24);
+    listbox.setBounds(8, 114, getWidth() - 16, getHeight() - 258);
     samplePreview.setBounds(12, getHeight() - 66, getWidth() - 24, 54);
 }

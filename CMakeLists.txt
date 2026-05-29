@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(AudienceHarmonicSynth VERSION 1.0.29 LANGUAGES C CXX)
+project(AudienceHarmonicSynth VERSION 1.0.35 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,6 +61,7 @@ target_sources(AudienceHarmonicSynth PRIVATE
     Source/LibraryRail.cpp
     Source/DebugPanel.cpp
     Source/AtomicScaleBuilder.cpp
+    Source/ElementSpectralData.cpp
     Source/PartialEngine.cpp
     Source/SampleLibrary.cpp
     Source/OscBridge.cpp
@@ -234,6 +235,7 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     add_executable(AudienceSignalFlowTests
         Tests/SignalFlowTests.cpp
         Source/AtomicScaleBuilder.cpp
+        Source/ElementSpectralData.cpp
         Source/PartialEngine.cpp
         Source/SampleLibrary.cpp
     )
@@ -351,6 +353,7 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     add_executable(AudiencePerformanceSmokeTests
         Tests/PerformanceSmokeTests.cpp
         Source/AtomicScaleBuilder.cpp
+        Source/ElementSpectralData.cpp
         Source/PartialEngine.cpp
         Source/SampleLibrary.cpp
     )

@@ -96,6 +96,7 @@ private:
     };
 
     juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
+    void cacheParameterPointers();
     void pullParams();
     void logInput (InputType type, int row, int col, float value) noexcept;
     void logOutputMidi (const juce::MidiBuffer& midi) noexcept;
@@ -137,6 +138,20 @@ private:
     std::array<OutputSlot, 32> outputSlots;
     std::atomic<uint32_t> inputSerial { 0 };
     std::atomic<uint32_t> outputSerial { 0 };
+
+    struct RawParams
+    {
+        std::atomic<float>* channel = nullptr;
+        std::atomic<float>* root = nullptr;
+        std::atomic<float>* rangeLowOctave = nullptr;
+        std::atomic<float>* rangeHighOctave = nullptr;
+        std::atomic<float>* scaleMode = nullptr;
+        std::atomic<float>* transpose = nullptr;
+        std::atomic<float>* midiScaleEnabled = nullptr;
+        std::atomic<float>* midiScaleCorrection = nullptr;
+        std::atomic<float>* midiScaleCustomMask = nullptr;
+        std::array<std::atomic<float>*, 12> midiScaleRemap {};
+    } rawParams;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceMidiProcessor)
 };
