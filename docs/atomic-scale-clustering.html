@@ -1,0 +1,1208 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atomic Spectral Scale Clustering - Audience Harmonic Synth</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080a0c;
+      --surface: #101419;
+      --surface-2: #151a20;
+      --line: #28323c;
+      --line-soft: rgba(144, 164, 180, 0.18);
+      --text: #f3f6f9;
+      --muted: #9aa4af;
+      --dim: #67727d;
+      --sodium: #f2ca3a;
+      --green: #63e082;
+      --cyan: #65d9ee;
+      --violet: #bd80ff;
+      --red: #ff6b5c;
+      --ink: #0a0d10;
+      --max: 1160px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      background: var(--bg);
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+        var(--bg);
+      background-size: 64px 64px;
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    a {
+      color: var(--cyan);
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
+
+    .shell {
+      width: min(var(--max), calc(100vw - 36px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      border-bottom: 1px solid var(--line);
+      background: rgba(8, 10, 12, 0.9);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar .shell {
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      border: 2px solid var(--green);
+      box-shadow: inset 0 0 0 7px #172019;
+      position: relative;
+      flex: 0 0 auto;
+    }
+
+    .mark::after {
+      content: "";
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--sodium);
+      left: 11px;
+      top: 11px;
+      box-shadow: 0 0 18px rgba(242, 202, 58, 0.65);
+    }
+
+    .brand strong {
+      display: block;
+      font-size: 14px;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    .brand span {
+      display: block;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+    }
+
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    nav a {
+      color: var(--muted);
+      font-size: 13px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      padding: 6px 10px;
+    }
+
+    nav a:hover {
+      color: var(--text);
+      border-color: var(--line);
+      text-decoration: none;
+    }
+
+    header {
+      padding: 48px 0 28px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .intro-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
+      gap: 34px;
+      align-items: center;
+    }
+
+    .eyebrow {
+      margin: 0 0 12px;
+      color: var(--sodium);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 880px;
+      font-size: clamp(38px, 5.2vw, 76px);
+      font-weight: 800;
+    }
+
+    .lead {
+      margin: 22px 0 0;
+      max-width: 720px;
+      color: #d7dde3;
+      font-size: clamp(18px, 2.1vw, 23px);
+      line-height: 1.45;
+    }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      margin-top: 30px;
+      border: 1px solid var(--line);
+      background: var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .summary-strip div {
+      background: var(--surface);
+      padding: 18px;
+    }
+
+    .summary-strip b {
+      display: block;
+      font-size: 20px;
+      margin-bottom: 4px;
+    }
+
+    .summary-strip span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .visual-stage {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #05080a;
+      overflow: hidden;
+    }
+
+    .stage-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .stage-header strong {
+      color: var(--text);
+      font-family: inherit;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+    }
+
+    .canvas-wrap {
+      padding: 12px;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    main {
+      padding: 10px 0 72px;
+    }
+
+    section {
+      padding: 54px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h2 {
+      margin: 0 0 18px;
+      font-size: clamp(28px, 3.4vw, 46px);
+    }
+
+    h3 {
+      margin: 0 0 10px;
+      font-size: 21px;
+    }
+
+    p {
+      color: #d6dbe0;
+      margin: 0 0 18px;
+    }
+
+    .article {
+      max-width: 850px;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.88fr);
+      gap: 34px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      background: rgba(16, 20, 25, 0.78);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .panel-body {
+      padding: 18px;
+    }
+
+    .formula {
+      display: flex;
+      align-items: center;
+      margin: 18px 0;
+      border-left: 3px solid var(--cyan);
+      padding: 14px 16px;
+      background: rgba(101, 217, 238, 0.06);
+      color: var(--text);
+      overflow-x: auto;
+    }
+
+    .formula math {
+      font-size: 1.28rem;
+      font-family: "STIX Two Math", Cambria Math, "Times New Roman", serif;
+    }
+
+    .formula annotation {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    .callout {
+      border: 1px solid rgba(242, 202, 58, 0.38);
+      background: rgba(242, 202, 58, 0.08);
+      border-radius: 8px;
+      padding: 18px;
+      color: #f7e7a2;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .flow-step {
+      min-height: 112px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: var(--surface);
+      position: relative;
+    }
+
+    .flow-step::after {
+      content: "";
+      position: absolute;
+      right: -12px;
+      top: 50%;
+      width: 12px;
+      height: 1px;
+      background: var(--line);
+    }
+
+    .flow-step:nth-child(3)::after,
+    .flow-step:nth-child(6)::after {
+      display: none;
+    }
+
+    .flow-step small {
+      color: var(--sodium);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .flow-step p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .mode-controls {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+      margin: 18px 0 16px;
+    }
+
+    button {
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--muted);
+      font: inherit;
+      font-weight: 700;
+      padding: 10px 8px;
+      cursor: pointer;
+      transition: 120ms ease;
+    }
+
+    button:hover {
+      border-color: #495762;
+      color: var(--text);
+    }
+
+    button.active {
+      background: var(--sodium);
+      color: var(--ink);
+      border-color: var(--sodium);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+
+    .metric {
+      padding: 14px;
+      background: var(--surface);
+    }
+
+    .metric span {
+      display: block;
+      color: var(--dim);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 10px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .metric b {
+      display: block;
+      margin-top: 4px;
+      font-size: 24px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 18px;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line-soft);
+      padding: 10px 9px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    th:first-child,
+    td:first-child,
+    th:nth-child(2),
+    td:nth-child(2) {
+      text-align: left;
+    }
+
+    th {
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    td {
+      color: #e9eef3;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      padding: 4px 9px;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+    }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+
+    .note-grid {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 20px;
+    }
+
+    .note {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 12px 10px;
+      min-height: 78px;
+    }
+
+    .note strong {
+      display: block;
+      font-size: 18px;
+    }
+
+    .note span {
+      display: block;
+      color: var(--muted);
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      margin-top: 5px;
+    }
+
+    .note.featured {
+      border-color: rgba(242, 202, 58, 0.65);
+      background: rgba(242, 202, 58, 0.11);
+    }
+
+    .slide-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    .slide-list article {
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+
+    code,
+    pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    pre {
+      margin: 18px 0 0;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #07090b;
+      overflow-x: auto;
+      color: #e8edf2;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    footer {
+      padding: 34px 0 52px;
+      color: var(--dim);
+      font-size: 13px;
+    }
+
+    @media (max-width: 880px) {
+      .intro-grid,
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+
+      .summary-strip,
+      .flow,
+      .metrics,
+      .slide-list {
+        grid-template-columns: 1fr;
+      }
+
+      .flow-step::after {
+        display: none;
+      }
+
+      .mode-controls {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .note-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      nav {
+        display: none;
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+        color: #111;
+      }
+
+      .topbar,
+      button {
+        display: none;
+      }
+
+      .panel,
+      .visual-stage,
+      .summary-strip,
+      .metric,
+      .flow-step,
+      .note,
+      pre {
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="shell">
+      <div class="brand">
+        <div class="mark" aria-hidden="true"></div>
+        <div>
+          <strong>Audience Harmonic Synth</strong>
+          <span>Elemental Spektra Article</span>
+        </div>
+      </div>
+      <nav aria-label="Page sections">
+        <a href="#problem">Problem</a>
+        <a href="#algorithm">Algorithm</a>
+        <a href="#modes">Modes</a>
+        <a href="#example">Example</a>
+        <a href="#slides">Slides</a>
+      </nav>
+    </div>
+  </div>
+
+  <header>
+    <div class="shell intro-grid">
+      <div>
+        <p class="eyebrow">Atomic spectral scale clustering</p>
+        <h1>From atomic spectra to a playable musical scale</h1>
+        <p class="lead">
+          Audience Harmonic Synth separates each element's emission lines into two musical roles:
+          the complete raw spectrum remains available as timbre, while the playable scale is
+          reduced by clustering nearby spectral lines.
+        </p>
+        <div class="summary-strip" aria-label="Three core ideas">
+          <div>
+            <b>No raw data is lost</b>
+            <span>Every spectral line remains available as a timbre partial.</span>
+          </div>
+          <div>
+            <b>The scale becomes playable</b>
+            <span>Very close lines are grouped into one pitch family.</span>
+          </div>
+          <div>
+            <b>MPE preserves tuning</b>
+            <span>Microtonal targets are emitted as note plus pitch bend.</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="visual-stage" aria-label="Beryllium spectrum visualization">
+        <div class="stage-header">
+          <strong>Beryllium Core Mode</strong>
+          <span>380-750 nm / 0-1200 ct</span>
+        </div>
+        <div class="canvas-wrap">
+          <canvas id="heroCanvas" width="920" height="560"></canvas>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section id="problem">
+      <div class="shell two-col">
+        <div class="article">
+          <p class="eyebrow">01 / Problem</p>
+          <h2>Why clustering is necessary</h2>
+          <p>
+            Atomic emission spectra contain wavelength and relative intensity information.
+            Sparse elements such as hydrogen contain only a few strong lines. Dense elements
+            such as iron, sodium, or sulfur can contain dozens or hundreds of visible-region lines.
+          </p>
+          <p>
+            If every line is converted directly into a playable pitch, a single octave can
+            become crowded with extremely close microtonal notes. Some lines land within
+            10-20 cents of one another. These intervals are often perceived less as separate
+            scale degrees and more as shimmer, beating, or metallic movement inside the timbre.
+          </p>
+          <div class="callout">
+            Core idea: do not delete spectral data; change its musical role. Nearby lines become
+            one playable scale degree, while every source line continues to live inside the timbre.
+          </div>
+        </div>
+        <div class="panel">
+          <div class="stage-header">
+            <strong>Timbre / Scale separation</strong>
+            <span>two layers</span>
+          </div>
+          <div class="panel-body">
+            <div class="flow" style="grid-template-columns: 1fr;">
+              <div class="flow-step">
+                <small>Raw spectrum</small>
+                <p>All wavelengths and intensity values from the element dataset are preserved.</p>
+              </div>
+              <div class="flow-step">
+                <small>Timbre partials</small>
+                <p>Every line becomes an additive or spectral partial in the atomic tone color.</p>
+              </div>
+              <div class="flow-step">
+                <small>Playable scale</small>
+                <p>Nearby pitch-class lines are clustered and represented by a selected scale degree.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="algorithm">
+      <div class="shell">
+        <div class="article">
+          <p class="eyebrow">02 / Algorithm</p>
+          <h2>From wavelength ratio to pitch family</h2>
+          <p>
+            First, the longest valid wavelength of the selected element is treated as the
+            reference line. This line becomes the musical root. All other lines are measured
+            against that reference.
+          </p>
+          <div class="formula" role="img" aria-label="r sub i equals lambda reference divided by lambda sub i">
+            <math display="block">
+              <msub><mi>r</mi><mi>i</mi></msub>
+              <mo>=</mo>
+              <mfrac>
+                <msub><mi>&lambda;</mi><mrow><mi>r</mi><mi>e</mi><mi>f</mi></mrow></msub>
+                <msub><mi>&lambda;</mi><mi>i</mi></msub>
+              </mfrac>
+            </math>
+          </div>
+          <p>
+            The ratio is converted into a musical distance in cents, then folded into one octave.
+          </p>
+          <div class="formula" role="img" aria-label="cents sub i equals 1200 times log base 2 of r sub i modulo 1200">
+            <math display="block">
+              <msub><mi>C</mi><mi>i</mi></msub>
+              <mo>=</mo>
+              <mrow>
+                <mo>(</mo>
+                <mn>1200</mn>
+                <mo>&sdot;</mo>
+                <msub><mi>log</mi><mn>2</mn></msub>
+                <mo>(</mo>
+                <msub><mi>r</mi><mi>i</mi></msub>
+                <mo>)</mo>
+                <mo>)</mo>
+              </mrow>
+              <mo>mod</mo>
+              <mn>1200</mn>
+            </math>
+          </div>
+          <p>
+            Because octave pitch space is circular, distance is not measured as a simple
+            linear difference. 0 cents and 1200 cents describe the same pitch-class point.
+          </p>
+          <div class="formula" role="img" aria-label="distance between a and b equals minimum of absolute a minus b and 1200 minus absolute a minus b">
+            <math display="block">
+              <mi>d</mi>
+              <mo>(</mo><mi>a</mi><mo>,</mo><mi>b</mi><mo>)</mo>
+              <mo>=</mo>
+              <mi>min</mi>
+              <mo>(</mo>
+              <mrow><mo>|</mo><mi>a</mi><mo>-</mo><mi>b</mi><mo>|</mo></mrow>
+              <mo>,</mo>
+              <mrow><mn>1200</mn><mo>-</mo><mo>|</mo><mi>a</mi><mo>-</mo><mi>b</mi><mo>|</mo></mrow>
+              <mo>)</mo>
+            </math>
+          </div>
+        </div>
+
+        <div class="flow" aria-label="Algorithm flow">
+          <div class="flow-step">
+            <small>Step 1</small>
+            <h3>Normalize</h3>
+            <p>Angstrom and nanometer input is normalized so all lines live in nm.</p>
+          </div>
+          <div class="flow-step">
+            <small>Step 2</small>
+            <h3>Reference</h3>
+            <p>The longest wavelength is selected as the root line and reference wavelength.</p>
+          </div>
+          <div class="flow-step">
+            <small>Step 3</small>
+            <h3>Pitch class</h3>
+            <p>Each line is converted into a ratio and cent value, then folded into one octave.</p>
+          </div>
+          <div class="flow-step">
+            <small>Step 4</small>
+            <h3>Salience</h3>
+            <p>Intensity is log-compressed and normalized to determine selection priority.</p>
+          </div>
+          <div class="flow-step">
+            <small>Step 5</small>
+            <h3>Cluster</h3>
+            <p>Nearby pitch-class lines are assigned to the same pitch family.</p>
+          </div>
+          <div class="flow-step">
+            <small>Step 6</small>
+            <h3>Representative</h3>
+            <p>A real source line is selected from each cluster as the representative scale degree.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="modes">
+      <div class="shell two-col">
+        <div>
+          <p class="eyebrow">03 / Reduction modes</p>
+          <h2>One algorithm, multiple musical densities</h2>
+          <p>
+            The same atomic data can be opened at different levels of detail. Core mode is
+            the cleanest version for composition and performance. Raw mode performs no
+            reduction and exposes the full scientific line set.
+          </p>
+
+          <div class="mode-controls" aria-label="Scale mode selector">
+            <button class="active" data-mode="core">Core</button>
+            <button data-mode="extended">Extended</button>
+            <button data-mode="microtonal">Microtonal</button>
+            <button data-mode="scientific">Scientific</button>
+            <button data-mode="raw">Raw</button>
+          </div>
+
+          <div class="metrics" aria-live="polite">
+            <div class="metric">
+              <span>Max degree</span>
+              <b id="metricDegree">7</b>
+            </div>
+            <div class="metric">
+              <span>Min distance</span>
+              <b id="metricDistance">80 ct</b>
+            </div>
+            <div class="metric">
+              <span>Use case</span>
+              <b id="metricUse">Melodic</b>
+            </div>
+          </div>
+        </div>
+
+        <div class="visual-stage">
+          <div class="stage-header">
+            <strong>Cluster spacing</strong>
+            <span id="modeCaption">Core / Melodic</span>
+          </div>
+          <div class="canvas-wrap">
+            <canvas id="modeCanvas" width="760" height="420"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="example">
+      <div class="shell">
+        <p class="eyebrow">04 / Example</p>
+        <h2>Beryllium Spectrum - Core mode</h2>
+        <p class="article">
+          In this example, 27 raw lines are preserved as timbre partials. On the playable
+          scale side, Core mode produces 7 representative degrees. Each row is one scale
+          degree; the cluster column shows how many raw lines are assigned to that degree.
+        </p>
+
+        <table aria-label="Beryllium Core mode scale degrees">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>rep nm</th>
+              <th>cents</th>
+              <th>audio Hz</th>
+              <th>vel</th>
+              <th>cluster</th>
+              <th>spread</th>
+              <th>nearest</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr><td>1</td><td>698.275</td><td>0.0</td><td>261.63</td><td>0.076</td><td>3</td><td>35.4</td><td>C4 +0.0ct</td></tr>
+            <tr><td>2</td><td>654.789</td><td>111.3</td><td>279.00</td><td>0.233</td><td>4</td><td>17.6</td><td>C#4 +111.3ct</td></tr>
+            <tr><td>3</td><td>614.201</td><td>222.1</td><td>297.44</td><td>0.032</td><td>4</td><td>38.5</td><td>D4 +222.1ct</td></tr>
+            <tr><td>4</td><td>515.600</td><td>525.1</td><td>354.32</td><td>0.214</td><td>5</td><td>27.2</td><td>F4 +525.1ct</td></tr>
+            <tr><td>5</td><td>467.342</td><td>695.2</td><td>390.91</td><td>1.000</td><td>5</td><td>29.7</td><td>G4 +695.2ct</td></tr>
+            <tr><td>6</td><td>437.110</td><td>811.0</td><td>417.94</td><td>0.101</td><td>4</td><td>33.5</td><td>G#4 +811.0ct</td></tr>
+            <tr><td>7</td><td>386.551</td><td>1023.8</td><td>472.61</td><td>0.297</td><td>2</td><td>12.4</td><td>A#4 +1023.8ct</td></tr>
+          </tbody>
+        </table>
+
+        <div class="note-grid" aria-label="Core scale keyboard preview">
+          <div class="note featured"><strong>C4</strong><span>261.63 Hz</span><span>root</span></div>
+          <div class="note"><strong>C#4</strong><span>279.00 Hz</span><span>111.3 ct</span></div>
+          <div class="note"><strong>D4</strong><span>297.44 Hz</span><span>222.1 ct</span></div>
+          <div class="note"><strong>F4</strong><span>354.32 Hz</span><span>525.1 ct</span></div>
+          <div class="note featured"><strong>G4</strong><span>390.91 Hz</span><span>strongest</span></div>
+          <div class="note"><strong>G#4</strong><span>417.94 Hz</span><span>811.0 ct</span></div>
+          <div class="note"><strong>A#4</strong><span>472.61 Hz</span><span>1023.8 ct</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="shell two-col">
+        <div class="article">
+          <p class="eyebrow">05 / Representative selection</p>
+          <h2>Selecting a real line from each cluster</h2>
+          <p>
+            To represent the center of a cluster, the system uses the medoid approach by
+            default. The medoid is the real spectral line with the smallest weighted distance
+            to the other lines in the cluster.
+          </p>
+          <p>
+            This avoids inventing artificial pitches. The result is always grounded in an
+            actual wavelength from the element dataset, so the scale remains musically legible
+            without losing its physical spectral origin.
+          </p>
+        </div>
+        <div class="panel">
+          <div class="stage-header">
+            <strong>Representative modes</strong>
+            <span>options</span>
+          </div>
+          <div class="panel-body">
+            <p><span class="tag"><span class="dot"></span>Strongest</span></p>
+            <p>Selects the highest-intensity line inside the cluster.</p>
+            <p><span class="tag"><span class="dot" style="background:var(--cyan)"></span>Medoid</span></p>
+            <p>Selects the real line closest to the weighted center of the cluster. This is the default.</p>
+            <p><span class="tag"><span class="dot" style="background:var(--violet)"></span>Weighted mean</span></p>
+            <p>Uses a circular weighted mean. It is smooth, but it can create an artificial pitch.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="slides">
+      <div class="shell">
+        <p class="eyebrow">06 / Presentation outline</p>
+        <h2>Slide-deck structure</h2>
+        <p class="article">
+          This article can be converted directly into a presentation. The structure below
+          gives a clear visual narrative for explaining the method.
+        </p>
+        <div class="slide-list">
+          <article>
+            <h3>1. Raw atomic spectrum</h3>
+            <p>Show the element's emission lines as wavelength and intensity.</p>
+          </article>
+          <article>
+            <h3>2. Root and ratio</h3>
+            <p>Explain that the longest wavelength becomes the root and all other lines are ratio-mapped.</p>
+          </article>
+          <article>
+            <h3>3. Octave circle</h3>
+            <p>Show the 0-1200 cent space as a circle and emphasize circular distance.</p>
+          </article>
+          <article>
+            <h3>4. Cluster reduction</h3>
+            <p>Show how nearby lines become one degree while their detail moves into timbre.</p>
+          </article>
+          <article>
+            <h3>5. Beryllium example</h3>
+            <p>Use the table and keyboard preview to show 27 raw lines reduced to 7 Core degrees.</p>
+          </article>
+          <article>
+            <h3>6. Musical result</h3>
+            <p>Connect the method back to the idea that each element has both scale and timbre identity.</p>
+          </article>
+        </div>
+
+        <pre>Raw spectral lines
+  -> full timbre partials: every line remains audible as atomic color
+  -> playable scale: nearby pitch classes become clusters
+
+Cluster center = scale degree
+Cluster source lines = shimmer / beating / timbre detail</pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="shell">
+      Audience Harmonic Synth - Elemental Spektra documentation. Static article page for explaining atomic spectral scale clustering.
+    </div>
+  </footer>
+
+  <script>
+    const beCore = [
+      { nm: 698.275, cents: 0.0, hz: 261.63, vel: 0.076, cluster: 3 },
+      { nm: 654.789, cents: 111.3, hz: 279.00, vel: 0.233, cluster: 4 },
+      { nm: 614.201, cents: 222.1, hz: 297.44, vel: 0.032, cluster: 4 },
+      { nm: 515.600, cents: 525.1, hz: 354.32, vel: 0.214, cluster: 5 },
+      { nm: 467.342, cents: 695.2, hz: 390.91, vel: 1.000, cluster: 5 },
+      { nm: 437.110, cents: 811.0, hz: 417.94, vel: 0.101, cluster: 4 },
+      { nm: 386.551, cents: 1023.8, hz: 472.61, vel: 0.297, cluster: 2 }
+    ];
+
+    const rawSketch = [
+      386.513, 386.542, 386.551, 386.572, 386.602, 399.55,
+      424.914, 425.21, 425.305, 432.955, 436.066, 437.11,
+      440.794, 457.267, 467.342, 470.937, 508.775, 515.6,
+      517, 521.833, 527.081, 540.304, 585.701, 614.201,
+      654.789, 655.836, 698.275
+    ];
+
+    const modes = {
+      core: { label: "Core / Melodic", max: 7, min: 80, use: "Melodic", active: beCore.map(d => d.nm) },
+      extended: { label: "Extended / Performable", max: 12, min: 40, use: "Playable", active: [698.275, 675.713, 655.836, 614.201, 585.701, 540.304, 517, 467.342, 457.267, 440.794, 425.305, 386.542] },
+      microtonal: { label: "Microtonal", max: 24, min: 20, use: "Micro", active: rawSketch.filter((_, i) => i % 1 === 0).slice(0, 24) },
+      scientific: { label: "Scientific", max: 48, min: 10, use: "Analysis", active: rawSketch },
+      raw: { label: "Raw", max: "all", min: 0, use: "Full", active: rawSketch }
+    };
+
+    function wavelengthToRgb(wavelength) {
+      let r = 0, g = 0, b = 0, factor = 0;
+      if (wavelength >= 380 && wavelength < 440) {
+        r = -(wavelength - 440) / 60; g = 0; b = 1;
+      } else if (wavelength < 490) {
+        r = 0; g = (wavelength - 440) / 50; b = 1;
+      } else if (wavelength < 510) {
+        r = 0; g = 1; b = -(wavelength - 510) / 20;
+      } else if (wavelength < 580) {
+        r = (wavelength - 510) / 70; g = 1; b = 0;
+      } else if (wavelength < 645) {
+        r = 1; g = -(wavelength - 645) / 65; b = 0;
+      } else if (wavelength <= 750) {
+        r = 1; g = 0; b = 0;
+      }
+
+      if (wavelength >= 380 && wavelength < 420) {
+        factor = 0.3 + 0.7 * (wavelength - 380) / 40;
+      } else if (wavelength < 645) {
+        factor = 1;
+      } else if (wavelength <= 750) {
+        factor = 0.3 + 0.7 * (750 - wavelength) / 105;
+      }
+
+      return `rgb(${Math.round(r * factor * 255)}, ${Math.round(g * factor * 255)}, ${Math.round(b * factor * 255)})`;
+    }
+
+    function drawHero() {
+      const canvas = document.getElementById("heroCanvas");
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#05080a";
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.strokeStyle = "rgba(144,164,180,0.16)";
+      ctx.lineWidth = 1;
+      for (let x = 40; x < w - 40; x += 48) {
+        ctx.beginPath();
+        ctx.moveTo(x, 38);
+        ctx.lineTo(x, h - 38);
+        ctx.stroke();
+      }
+
+      const left = 54, right = w - 42, top = 52, base = 242;
+      ctx.strokeStyle = "rgba(144,164,180,0.35)";
+      ctx.beginPath();
+      ctx.moveTo(left, top);
+      ctx.lineTo(right, top);
+      ctx.moveTo(left, base);
+      ctx.lineTo(right, base);
+      ctx.stroke();
+
+      rawSketch.forEach((nm, i) => {
+        const x = left + (nm - 380) / 370 * (right - left);
+        const height = 30 + ((i * 17) % 90);
+        ctx.strokeStyle = wavelengthToRgb(nm);
+        ctx.globalAlpha = 0.22;
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(x, base);
+        ctx.lineTo(x, base - height);
+        ctx.stroke();
+      });
+      ctx.globalAlpha = 1;
+
+      beCore.forEach((d) => {
+        const x = left + (d.nm - 380) / 370 * (right - left);
+        const lineHeight = 80 + d.vel * 130;
+        ctx.strokeStyle = wavelengthToRgb(d.nm);
+        ctx.shadowColor = wavelengthToRgb(d.nm);
+        ctx.shadowBlur = 16;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(x, base);
+        ctx.lineTo(x, base - lineHeight);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+
+        ctx.fillStyle = "#dce5ec";
+        ctx.font = "18px SFMono-Regular, Consolas, monospace";
+        ctx.fillText(`${d.hz.toFixed(2)} Hz`, Math.max(18, Math.min(w - 130, x - 44)), base + 46 + (d.cluster % 2) * 30);
+      });
+
+      drawWheel(ctx, w * 0.5, 420, 108, beCore);
+      ctx.fillStyle = "#9aa4af";
+      ctx.font = "15px SFMono-Regular, Consolas, monospace";
+      ctx.fillText("wavelength spectrum", left, 28);
+      ctx.fillText("octave pitch-class wheel", w * 0.5 - 118, h - 24);
+    }
+
+    function drawWheel(ctx, cx, cy, r, degrees) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(144,164,180,0.36)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(144,164,180,0.10)";
+      for (let ring = 1; ring <= 2; ring++) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, r * ring / 3, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      degrees.forEach((d) => {
+        const angle = (-90 + d.cents / 1200 * 360) * Math.PI / 180;
+        const x = cx + Math.cos(angle) * r;
+        const y = cy + Math.sin(angle) * r;
+        ctx.strokeStyle = wavelengthToRgb(d.nm);
+        ctx.lineWidth = 2 + d.vel * 4;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+      });
+      ctx.fillStyle = "#dce5ec";
+      ctx.beginPath();
+      ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawMode(modeName) {
+      const mode = modes[modeName];
+      document.getElementById("metricDegree").textContent = mode.max;
+      document.getElementById("metricDistance").textContent = `${mode.min} ct`;
+      document.getElementById("metricUse").textContent = mode.use;
+      document.getElementById("modeCaption").textContent = mode.label;
+
+      const canvas = document.getElementById("modeCanvas");
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      const left = 42, right = w - 32, y = 190;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#05080a";
+      ctx.fillRect(0, 0, w, h);
+
+      ctx.strokeStyle = "rgba(144,164,180,0.22)";
+      ctx.beginPath();
+      ctx.moveTo(left, y);
+      ctx.lineTo(right, y);
+      ctx.stroke();
+
+      rawSketch.forEach((nm) => {
+        const x = left + (nm - 380) / 370 * (right - left);
+        ctx.strokeStyle = "rgba(154,164,175,0.22)";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, y - 70);
+        ctx.lineTo(x, y + 70);
+        ctx.stroke();
+      });
+
+      mode.active.forEach((nm, i) => {
+        const x = left + (nm - 380) / 370 * (right - left);
+        ctx.strokeStyle = wavelengthToRgb(nm);
+        ctx.fillStyle = wavelengthToRgb(nm);
+        ctx.lineWidth = 3;
+        ctx.shadowColor = wavelengthToRgb(nm);
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.moveTo(x, y - 96);
+        ctx.lineTo(x, y + 96);
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        ctx.arc(x, y + 126, 5, 0, Math.PI * 2);
+        ctx.fill();
+        if (modeName === "core" || i % 3 === 0) {
+          ctx.fillStyle = "#dce5ec";
+          ctx.font = "13px SFMono-Regular, Consolas, monospace";
+          ctx.fillText(nm.toFixed(modeName === "raw" ? 0 : 1), x - 18, y + 154);
+        }
+      });
+
+      ctx.fillStyle = "#9aa4af";
+      ctx.font = "14px SFMono-Regular, Consolas, monospace";
+      ctx.fillText("grey = raw spectral lines", left, 34);
+      ctx.fillText("color = selected representatives", left, 58);
+      ctx.fillText(`${mode.label}: max ${mode.max} degree, min ${mode.min} cent`, left, h - 28);
+    }
+
+    document.querySelectorAll("[data-mode]").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll("[data-mode]").forEach((b) => b.classList.remove("active"));
+        button.classList.add("active");
+        drawMode(button.dataset.mode);
+      });
+    });
+
+    drawHero();
+    drawMode("core");
+  </script>
+</body>
+</html>
