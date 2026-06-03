@@ -7,6 +7,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "PartialEngine.h"
 #include "MidiPitch.h"
+#include "MpeMidiOutput.h"
 #include "OscBridge.h"
 #include "Simulator.h"
 
@@ -86,9 +87,9 @@ public:
     void setMuted (bool shouldMute) noexcept { muted.store(shouldMute); }
     bool isMuted() const noexcept            { return muted.load(); }
     void panic();
-    int getMidiNotesSent() const noexcept    { return midiNotesSent.load(std::memory_order_relaxed); }
-    int getActiveMpeVoices() const noexcept  { return activeMpeVoices.load(std::memory_order_relaxed); }
-    int getAvailableMpeChannels() const noexcept { return availableMpeChannels.load(std::memory_order_relaxed); }
+    int getMidiNotesSent() const noexcept    { return mpeOut.getMidiNotesSent(); }
+    int getActiveMpeVoices() const noexcept  { return mpeOut.getActiveMpeVoices(); }
+    int getAvailableMpeChannels() const noexcept { return mpeOut.getAvailableMpeChannels(); }
     int getActiveExternalMidiKeys() const noexcept { return activeExternalMidiKeys.load(std::memory_order_relaxed); }
     int getLastExternalMidiNote() const noexcept { return lastExternalMidiNote.load(std::memory_order_relaxed); }
     int getLastExternalMidiChannel() const noexcept { return lastExternalMidiChannel.load(std::memory_order_relaxed); }
@@ -121,24 +122,8 @@ private:
     void processIncomingMidiKeyboard (const juce::MidiBuffer&);
     void releaseAllMidiKeyboardNotes();
     void renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples);
-    void handleMidiSourceEvent (const PartialEngine::MidiSourceEvent& event,
-                                juce::MidiBuffer& midiMessages, int sampleOffset);
-    void sendAllMidiNotesOff (juce::MidiBuffer& midiMessages, int sampleOffset);
-    void sendMidiResetMessages (juce::MidiBuffer& midiMessages, int sampleOffset);
-    void resetMidiOutputState() noexcept;
-    void sendMpeSetupIfNeeded (juce::MidiBuffer& midiMessages, int sampleOffset);
-    void sendPitchBendRangeRpn (juce::MidiBuffer& midiMessages, int sampleOffset,
-                                int channel, int semitones);
-    int  allocateMpeChannelForSource (int sourceId, juce::MidiBuffer& midiMessages, int sampleOffset);
-    void releaseMpeChannelForSource (int sourceId) noexcept;
-    void sendNoteOffForSource (int sourceId, juce::MidiBuffer& midiMessages, int sampleOffset);
-    void sendExpressionForSource (int sourceId, const PartialEngine::MidiSourceEvent& event,
-                                  juce::MidiBuffer& midiMessages, int sampleOffset, bool force);
-    static int bendRangeFromChoice (int choice) noexcept;
-    static int velocityFromUnit (float value) noexcept;
-    static int pressureFromUnit (float value) noexcept;
+    MpeMidiOutput::MpeConfig buildMpeConfig() const;
     void recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
-    void recordOutgoingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
     void queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages) noexcept;
     void drainExternalMidiOutputQueue();
     void sendImmediateAllNotesOffToExternal();
@@ -151,6 +136,7 @@ private:
     juce::MidiBuffer midiRenderScratch;
     bool midiRenderScratchLoanedToHost = false;
     std::array<PartialEngine::MidiSourceEvent, 512> midiSourceScratch {};
+    std::array<MpeMidiOutput::NoteEvent, 512> midiNoteEventScratch {};
 
     struct PackedMidiEvent
     {
@@ -173,8 +159,6 @@ private:
     };
 
     static constexpr int midiDebugEventQueueSize = 256;
-    std::array<MidiDebugSlot, midiDebugEventQueueSize> midiDebugEvents {};
-    std::atomic<uint32_t> midiDebugWriteCounter { 0 };
     std::array<MidiDebugSlot, midiDebugEventQueueSize> incomingMidiDebugEvents {};
     std::atomic<uint32_t> incomingMidiDebugWriteCounter { 0 };
 
@@ -192,46 +176,18 @@ private:
     int          pendingMidiOutputOption = 0;
     juce::String pendingLibraryName;
 
-    struct MidiOutVoiceState
-    {
-        bool active = false;
-        int sourceId = -1;
-        int channel = 1;
-        int note = -1;
-        int pitchBend = 8192;
-        int pressure = -1;
-        int timbre = -1;
-        int expression = -1;
-        double frequencyHz = 0.0;
-        uint32_t age = 0;
-    };
+    // Owns the MIDI-output state + emission logic (extracted from this class).
+    MpeMidiOutput mpeOut;
 
-    static constexpr int maxMidiSources = PartialEngine::MAX_SEATS + PartialEngine::MAX_KEYBOARD_SLOTS;
-    std::array<MidiOutVoiceState, maxMidiSources> midiOutVoices {};
-
-    struct MidiVoiceDebugSlot
-    {
-        std::atomic<int> active { 0 };
-        std::atomic<int> sourceId { -1 };
-        std::atomic<int> channel { 0 };
-        std::atomic<int> note { -1 };
-        std::atomic<int> pitchBend { 8192 };
-        std::atomic<int> age { 0 };
-    };
-
-    std::array<MidiVoiceDebugSlot, maxMidiSources> midiVoiceDebug {};
-    std::array<int, 17> mpeChannelOwner {};
-    uint32_t midiVoiceAgeCounter = 0;
-    bool mpeSetupDirty = true;
+    // Per-frame change-detection trackers kept in the processor: they compare the
+    // current APVTS-derived MIDI config against the previous block to decide when
+    // to re-send the MPE setup / issue a safety all-notes-off.
     int lastAudioMidiOutputMode = 0;
     int lastMidiOutputType = 0;
     int lastMpeBendRange = 48;
     int lastMpeMemberFirst = 2;
     int lastMpeMemberLast = 16;
     int lastMpeSetupEnabled = 1;
-    std::atomic<int> midiNotesSent { 0 };
-    std::atomic<int> activeMpeVoices { 0 };
-    std::atomic<int> availableMpeChannels { 15 };
 
     std::atomic<bool> muted { false };
     int lastScaleRoot = -1;
