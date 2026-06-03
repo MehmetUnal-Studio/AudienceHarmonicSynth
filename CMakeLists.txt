@@ -29,7 +29,7 @@ FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(AudienceHarmonicSynth
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audienceharmonicsynth"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynth"
     VERSION                     "${AUDIENCE_HARMONIC_SYNTH_VERSION}"
     IS_SYNTH                    TRUE
     NEEDS_MIDI_INPUT            ${AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_INPUT}
@@ -40,7 +40,7 @@ juce_add_plugin(AudienceHarmonicSynth
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Ahss
     FORMATS                     ${AUDIENCE_HARMONIC_SYNTH_FORMATS}
-    PRODUCT_NAME                "Audience Harmonic Synth"
+    PRODUCT_NAME                "SpektraSynth"
 )
 
 juce_generate_juce_header(AudienceHarmonicSynth)
@@ -70,7 +70,7 @@ target_sources(AudienceHarmonicSynth PRIVATE
 
 juce_add_plugin(AudienceHarmonicMidi
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audienceharmonicmidi"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmidi"
     IS_SYNTH                    FALSE
     NEEDS_MIDI_INPUT            TRUE
     NEEDS_MIDI_OUTPUT           TRUE
@@ -80,7 +80,7 @@ juce_add_plugin(AudienceHarmonicMidi
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Ahmd
     FORMATS                     VST3 Standalone
-    PRODUCT_NAME                "Audience Harmonic MIDI"
+    PRODUCT_NAME                "SpektraSynth MIDI"
 )
 
 juce_generate_juce_header(AudienceHarmonicMidi)
@@ -96,7 +96,7 @@ target_sources(AudienceHarmonicMidi PRIVATE
 
 juce_add_plugin(AudienceMidiGenerator
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audiencemidigenerator"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmidigenerator"
     IS_SYNTH                    FALSE
     NEEDS_MIDI_INPUT            TRUE
     NEEDS_MIDI_OUTPUT           TRUE
@@ -106,7 +106,7 @@ juce_add_plugin(AudienceMidiGenerator
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Amgn
     FORMATS                     VST3
-    PRODUCT_NAME                "Audience MIDI Generator"
+    PRODUCT_NAME                "SpektraSynth MIDI Generator"
 )
 
 juce_generate_juce_header(AudienceMidiGenerator)
@@ -122,8 +122,8 @@ target_sources(AudienceMidiGenerator PRIVATE
 
 juce_add_gui_app(AudienceMidiDevice
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audiencemididevice"
-    PRODUCT_NAME                "Audience MIDI Device"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmididevice"
+    PRODUCT_NAME                "SpektraSynth MIDI Device"
 )
 
 juce_generate_juce_header(AudienceMidiDevice)

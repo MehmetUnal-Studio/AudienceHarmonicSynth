@@ -33,10 +33,15 @@ DebugPanel::DebugPanel (AudienceProcessor& p) : proc(p)
     addAndMakeVisible(midiView);
     addAndMakeVisible(reportView);
 
-    copyReportButton.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
-    copyReportButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
-    copyReportButton.setColour(juce::TextButton::textColourOffId, kText);
-    copyReportButton.setColour(juce::ComboBox::outlineColourId, kHairline);
+    auto styleButton = [] (juce::TextButton& b)
+    {
+        b.setColour(juce::TextButton::buttonColourId,   juce::Colours::transparentBlack);
+        b.setColour(juce::TextButton::buttonOnColourId, juce::Colours::transparentBlack);
+        b.setColour(juce::TextButton::textColourOffId,  kText);
+        b.setColour(juce::ComboBox::outlineColourId,    kHairline);
+    };
+
+    styleButton(copyReportButton);
     copyReportButton.onClick = [this]
     {
         lastReport = proc.getMidiDebugReportText();
@@ -44,6 +49,24 @@ DebugPanel::DebugPanel (AudienceProcessor& p) : proc(p)
         reportView.setText(lastReport, juce::dontSendNotification);
     };
     addAndMakeVisible(copyReportButton);
+
+    // Dedicated copy for the outgoing MIDI / MPE stream. Grabs the full ring
+    // buffer (not just the on-screen tail), so the hard-to-screenshot event log
+    // can be pasted as text. Flashes "Copied" briefly for feedback.
+    styleButton(copyMidiButton);
+    copyMidiButton.setTooltip("Copy the full outgoing MIDI / MPE event stream to the clipboard");
+    copyMidiButton.onClick = [this]
+    {
+        juce::SystemClipboard::copyTextToClipboard(proc.getOutgoingMidiDebugText(256));
+        copyMidiButton.setButtonText("Copied");
+        juce::Component::SafePointer<DebugPanel> safe(this);
+        juce::Timer::callAfterDelay(1000, [safe]
+        {
+            if (safe != nullptr)
+                safe->copyMidiButton.setButtonText("Copy");
+        });
+    };
+    addAndMakeVisible(copyMidiButton);
 
     startTimerHz(20);
 }
@@ -153,6 +176,7 @@ void DebugPanel::resized()
     const int topBottom = getHeight() - bottomH;
     const int thirdW = getWidth() / 3;
     midiView.setBounds(18, 76, thirdW - 28, topBottom - 90);
+    copyMidiButton.setBounds(thirdW - 74, 28, 64, 24);   // right edge aligns with midiView
     scaleView.setBounds(thirdW + 18, 56, thirdW - 36, topBottom - 70);
     octaveView.setBounds(thirdW * 2 + 18, 56, getWidth() - thirdW * 2 - 36, topBottom - 70);
     copyReportButton.setBounds(getWidth() - 150, topBottom + 16, 130, 28);

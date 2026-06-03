@@ -224,12 +224,9 @@ void AuroraComponent::paint (juce::Graphics& g)
 
     // ---- panel labels ----
     {
-        g.setColour(juce::Colour(0xff686f79));
-        g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 9.0f, juce::Font::plain)));
-        g.drawText("02", header.removeFromLeft(22), juce::Justification::centredLeft);
         g.setColour(juce::Colour(0xffd9dde6));
-        g.setFont(juce::Font(juce::FontOptions(10.5f)).boldened());
-        g.drawText("AUDIENCE MAP", header.removeFromLeft(122), juce::Justification::centredLeft);
+        g.setFont(juce::Font(juce::FontOptions(11.5f)).boldened());
+        g.drawText("AUDIENCE MAP", header.removeFromLeft(140), juce::Justification::centredLeft);
 
         g.setColour(juce::Colour(0xff707681));
         g.setFont(juce::Font(juce::FontOptions(10.0f)));
@@ -255,6 +252,9 @@ void AuroraComponent::paint (juce::Graphics& g)
         const float cellW = (float) grid.getWidth()  / (float) cols;
         const float cellH = (float) grid.getHeight() / (float) rows;
         const float seatR = juce::jlimit(1.4f, 4.2f, std::min(cellW, cellH) * 0.33f);
+        // Active seats are the hero of the map: render them well above the tiny
+        // inactive-dot size so a live audience reads clearly from a distance.
+        const float activeBaseR = juce::jlimit(6.0f, 16.0f, std::max(cellW, cellH) * 0.62f);
 
         g.setColour(juce::Colour(0x15161d25));
         for (int r = 0; r <= rows; ++r)
@@ -285,16 +285,19 @@ void AuroraComponent::paint (juce::Graphics& g)
                 const float xNorm = engine.getSeatX(row, col);
                 const float amp = juce::jlimit(0.0f, 1.0f, engine.getSeatY(row, col));
                 const auto colr = bandColour(xNorm).interpolatedWith(juce::Colour(0xffeff7ff), 0.16f);
-                const float activeR = seatR * (1.5f + amp * 1.2f);
+                const float activeR = activeBaseR * (0.82f + amp * 0.5f);
 
-                g.setColour(colr.withAlpha(0.12f + amp * 0.20f));
-                g.fillEllipse(cx - activeR * 2.1f, cy - activeR * 2.1f,
-                              activeR * 4.2f, activeR * 4.2f);
-                g.setColour(colr.withAlpha(0.92f));
+                // soft outer glow
+                g.setColour(colr.withAlpha(0.10f + amp * 0.18f));
+                g.fillEllipse(cx - activeR * 2.4f, cy - activeR * 2.4f,
+                              activeR * 4.8f, activeR * 4.8f);
+                // glowing core
+                g.setColour(colr.withAlpha(0.95f));
                 g.fillEllipse(cx - activeR, cy - activeR, activeR * 2.0f, activeR * 2.0f);
-                g.setColour(juce::Colours::white.withAlpha(0.38f));
-                g.fillEllipse(cx - activeR * 0.34f, cy - activeR * 0.34f,
-                              activeR * 0.68f, activeR * 0.68f);
+                // hot centre
+                g.setColour(juce::Colours::white.withAlpha(0.45f));
+                g.fillEllipse(cx - activeR * 0.32f, cy - activeR * 0.32f,
+                              activeR * 0.64f, activeR * 0.64f);
             }
         }
 
@@ -369,7 +372,10 @@ void AuroraComponent::paint (juce::Graphics& g)
         const int loMidi = n > 0 ? engine.getScaleMidi(0) : -1;
 
         std::array<float, 128> midiEnergy {};
-        std::array<float, 8192> stepEnergy {};
+        // Only clear the [0, n) range we actually index, instead of memset-ing
+        // all 8192 floats (32 KB) on every paint.
+        std::array<float, 8192> stepEnergy;
+        std::fill_n(stepEnergy.begin(), (size_t) juce::jmin(n, (int) stepEnergy.size()), 0.0f);
         for (int i = 0; i < engine.getMaxVoices(); ++i)
         {
             const float amp = engine.getVoiceAmp(i);

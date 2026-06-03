@@ -30,6 +30,7 @@ private:
     void paintWindowDots (juce::Graphics&, juce::Rectangle<int>);
     void paintBedPanel  (juce::Graphics&, juce::Rectangle<int>);
     void paintParticlePanel (juce::Graphics&, juce::Rectangle<int>);
+    void paintModulePanel (juce::Graphics&, juce::Rectangle<int>);
     void paintMacroPanel (juce::Graphics&, juce::Rectangle<int>);
     void paintScaleKeyboard (juce::Graphics&, juce::Rectangle<int>);
     void paintRibbon    (juce::Graphics&, juce::Rectangle<int>);
@@ -111,6 +112,8 @@ private:
 
     juce::Rectangle<int> bedPanelBounds, particlePanelBounds, macroPanelBounds, keyboardPanelBounds, ribbonBounds;
     juce::Rectangle<int> midiOutputPanelBounds;
+    juce::Rectangle<int> textureTabBounds, voicesTabBounds;   // clickable module tabs
+    int moduleTab = 0;   // 0 = Texture, 1 = Voices (bottom module is tabbed)
 
     static constexpr int computerKeyboardSlots = 36;
     static constexpr int mouseKeyboardSlot = computerKeyboardSlots;
@@ -118,6 +121,7 @@ private:
     int mouseKeyboardStep = -1;
     juce::StringArray lastMidiOutputOptions;
     int midiOutputRefreshCounter = 0;
+    int lastVisibilityKey = -1;   // gates updateOutputModeVisibility() to actual mode changes
 
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;

@@ -580,7 +580,7 @@ void AudienceMidiGeneratorEditor::drawHeader (juce::Graphics& g)
 
     g.setColour(text());
     g.setFont(sans(24.0f, juce::Font::bold));
-    g.drawText("Audience MIDI Generator", header.getX() + 82, header.getY() + 18, 360, 28, juce::Justification::centredLeft);
+    g.drawText("SpektraSynth MIDI Generator", header.getX() + 82, header.getY() + 18, 360, 28, juce::Justification::centredLeft);
     g.setColour(textDim());
     g.setFont(sans(13.0f));
     g.drawText("UDP audience seats -> scale, remap, channel and MIDI output", header.getX() + 82, header.getY() + 48, 460, 18, juce::Justification::centredLeft);

@@ -4098,10 +4098,19 @@ void PartialEngine::applyLimiter (float* L, float* R, int n)
     constexpr float attackPer  = 0.35f;    // per-sample attack toward gainTarget when over
     constexpr float releasePer = 0.00006f; // per-sample release toward 1.0
 
+    // A single NaN/Inf (e.g. from a corrupted feedback path) otherwise sticks in
+    // limGain forever, because every comparison against it is false. Sanitize the
+    // gain and each sample so a transient non-finite value cannot kill output.
+    if (! std::isfinite(limGain))
+        limGain = 1.0f;
+
     for (int i = 0; i < n; ++i)
     {
-        const float lN = L[i] * limGain;
-        const float rN = R[i] * limGain;
+        float l = std::isfinite(L[i]) ? L[i] : 0.0f;
+        float r = std::isfinite(R[i]) ? R[i] : 0.0f;
+
+        const float lN = l * limGain;
+        const float rN = r * limGain;
         const float peak = juce::jmax(std::abs(lN), std::abs(rN));
 
         if (peak > ceiling)
@@ -4114,8 +4123,11 @@ void PartialEngine::applyLimiter (float* L, float* R, int n)
             limGain += (1.0f - limGain) * releasePer;
         }
 
-        L[i] = juce::jlimit(-1.0f, 1.0f, L[i] * limGain);
-        R[i] = juce::jlimit(-1.0f, 1.0f, R[i] * limGain);
+        if (! std::isfinite(limGain))
+            limGain = 1.0f;
+
+        L[i] = juce::jlimit(-1.0f, 1.0f, l * limGain);
+        R[i] = juce::jlimit(-1.0f, 1.0f, r * limGain);
     }
 }
 

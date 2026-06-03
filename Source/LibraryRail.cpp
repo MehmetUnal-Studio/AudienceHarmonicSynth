@@ -259,7 +259,7 @@ void LibraryRail::paint (juce::Graphics& g)
     g.setColour(kText3);
     g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(),
                                             10.0f, juce::Font::plain)));
-    g.drawText("01  LIBRARY", 12, 10, 120, 14, juce::Justification::left);
+    g.drawText("LIBRARY", 12, 10, 120, 14, juce::Justification::left);
 
     g.setColour(kText);
     g.setFont(juce::Font(juce::FontOptions(12.0f)).boldened());

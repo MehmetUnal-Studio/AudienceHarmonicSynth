@@ -184,6 +184,14 @@ private:
     double currentSampleRate = 44100.0;
     int instanceId = 1;
 
+    // setStateInformation may run on a background thread (or before prepareToPlay),
+    // so it stages the device/network/library work here and the message-thread
+    // timer applies it. The release/acquire on the flag publishes the fields below.
+    std::atomic<bool> pendingStateApply { false };
+    int          pendingUdpPort = 6060;
+    int          pendingMidiOutputOption = 0;
+    juce::String pendingLibraryName;
+
     struct MidiOutVoiceState
     {
         bool active = false;

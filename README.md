@@ -1,4 +1,4 @@
-# Audience Harmonic Synth
+# SpektraSynth
 
 Version 1.0.35
 
@@ -35,8 +35,8 @@ cmake --build build --config Release -j
 
 The first configure downloads JUCE 8.0.4 via FetchContent. Release outputs:
 
-- VST3: `build/AudienceHarmonicSynth_artefacts/Release/VST3/Audience Harmonic Synth.vst3`
-- Standalone: `build/AudienceHarmonicSynth_artefacts/Release/Standalone/Audience Harmonic Synth.app`
+- VST3: `build/AudienceHarmonicSynth_artefacts/Release/VST3/SpektraSynth.vst3`
+- Standalone: `build/AudienceHarmonicSynth_artefacts/Release/Standalone/SpektraSynth.app`
 
 The build copies `Samples/` into each bundle's `Contents/Resources/Samples`
 folder. During development, the plugin can also load the source-tree `Samples/`
@@ -257,7 +257,7 @@ playable scale  -> clustered representative degrees for performance
 
 ## MIDI Scale Module
 
-The Ableton-focused `Audience MIDI Generator` target includes a Scale MIDI
+The Ableton-focused `SpektraSynth MIDI Generator` target includes a Scale MIDI
 module before MIDI is sent to the host/external output. When enabled, note
 events are locked to a selected root, scale type, and correction mode while
 velocity, timing, channel, CC, pitch bend, aftertouch, and other non-note data

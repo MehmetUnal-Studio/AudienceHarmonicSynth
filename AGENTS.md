@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-This is a JUCE/C++ audio plugin called Audience Harmonic Synth.
+This is a JUCE/C++ audio plugin called SpektraSynth.
 
 The plugin is an audience-driven musical instrument with:
 - internal audio synthesis

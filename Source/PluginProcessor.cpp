@@ -56,7 +56,7 @@ AudienceProcessor::AudienceProcessor()
     const std::initializer_list<juce::File> rootCandidates {
         getBundledSamplesDirectory(),
         juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-            .getChildFile("Audience Harmonic Synth/Samples"),
+            .getChildFile("SpektraSynth/Samples"),
         juce::File(AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH)
     };
     for (auto& c : rootCandidates)
@@ -81,7 +81,7 @@ void AudienceProcessor::rescanLibraryRoot()
     const std::initializer_list<juce::File> rootCandidates {
         getBundledSamplesDirectory(),
         juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-            .getChildFile("Audience Harmonic Synth/Samples"),
+            .getChildFile("SpektraSynth/Samples"),
         juce::File(AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH)
     };
 
@@ -255,8 +255,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
         ParameterID ("mpeZone", 1), "MPE Zone",
         StringArray { "Lower" }, 0));
 
-    layout.add (std::make_unique<AudioParameterInt>(
-        ParameterID ("normalMidiChannel", 1), "Normal MIDI Channel", 1, 16, 1));
+    {
+        // Choice (not Int) so the editor's ComboBoxAttachment indexes correctly.
+        // 16 choices keep the same normalised 0..1 mapping as the old Int(1..16),
+        // so existing sessions recall the same channel.
+        juce::StringArray midiChannelChoices;
+        for (int ch = 1; ch <= 16; ++ch)
+            midiChannelChoices.add (juce::String (ch));
+        layout.add (std::make_unique<AudioParameterChoice>(
+            ParameterID ("normalMidiChannel", 1), "Normal MIDI Channel", midiChannelChoices, 0));
+    }
 
     layout.add (std::make_unique<AudioParameterInt>(
         ParameterID ("mpeMasterChannel", 1), "MPE Master Channel", 1, 16, 1));
@@ -269,7 +277,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
 
     layout.add (std::make_unique<AudioParameterChoice>(
         ParameterID ("mpePitchBendRange", 1), "MPE Pitch Bend Range",
-        StringArray { "2 st", "12 st", "24 st", "48 st" }, 3));
+        StringArray { "2 st", "12 st", "24 st", "48 st" }, 0));   // default 2 st:
+        // spectral degrees are emitted as nearest 12-TET note + bend, and that
+        // offset is always <= +/-50 cents. 2 st (the universal MPE/synth default)
+        // gives ample range AND is interpreted correctly by receivers that don't
+        // adopt our bend-range RPN, so the microtonal scale survives. Wider ranges
+        // are only needed for large Glide-mode pitch slides.
 
     layout.add (std::make_unique<AudioParameterBool>(
         ParameterID ("mpeSendSetupMessages", 1), "MPE Send Setup Messages", true));
@@ -653,7 +666,6 @@ void AudienceProcessor::processIncomingMidiKeyboard (const juce::MidiBuffer& mid
 
     std::array<int, midiInputKeyCount> pendingAction {};
     std::array<float, midiInputKeyCount> pendingVelocity {};
-    std::array<unsigned char, midiInputKeyCount> pendingSawNoteOff {};
     std::array<unsigned char, midiInputKeyCount> pendingForcedOff {};
 
     for (const auto metadata : midiMessages)
@@ -688,10 +700,7 @@ void AudienceProcessor::processIncomingMidiKeyboard (const juce::MidiBuffer& mid
             lastExternalMidiNote.store(msg.getNoteNumber(), std::memory_order_relaxed);
             const int key = midiKeyIndex(channel, msg.getNoteNumber());
             if (key >= 0)
-            {
                 pendingAction[(size_t) key] = -1;
-                pendingSawNoteOff[(size_t) key] = 1;
-            }
             continue;
         }
 
@@ -727,7 +736,15 @@ void AudienceProcessor::processIncomingMidiKeyboard (const juce::MidiBuffer& mid
 
         const int existingSlot = midiKeyToKeyboardSlot[(size_t) key];
         const bool alreadyActive = existingSlot >= 0 && existingSlot < PartialEngine::MAX_KEYBOARD_SLOTS;
-        if (alreadyActive && pendingSawNoteOff[(size_t) key] != 0 && pendingForcedOff[(size_t) key] == 0)
+        // Feedback / redundant-trigger guard: a key that is already sounding must NOT be
+        // retriggered by another Note On unless it was force-released. When our MPE output
+        // is monitored or looped back (virtual port also open as input, or a host routing
+        // out -> in), our own notes echo back as repeated Note Ons; retriggering on them
+        // produced a Note Off/On storm that destabilised polyphonic per-note pitch bends
+        // (the receiver collapsed to 12-TET). Holding a key is a single press, so any
+        // further Note On with no intervening Note Off is redundant -> keep the voice.
+        // Real re-strikes still work: they send Note Off first, which frees the slot.
+        if (alreadyActive && pendingForcedOff[(size_t) key] == 0)
         {
             refreshActiveKeyCount();
             continue;
@@ -945,11 +962,13 @@ void AudienceProcessor::sendNoteOffForSource (int sourceId, juce::MidiBuffer& mi
     midiMessages.addEvent(juce::MidiMessage::channelPressureChange(ch, 0), sampleOffset);
 
     if (rawParamInt(rawParams.midiOutputType) == 2)
-    {
         midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, 8192), sampleOffset);
-        state.active = false;
-        releaseMpeChannelForSource(sourceId);
-    }
+
+    // Release the MPE member channel unconditionally. If the output type was
+    // switched away from MPE while this note was held, gating the release on
+    // type==2 leaked the channel, so the member pool shrank over time.
+    state.active = false;
+    releaseMpeChannelForSource(sourceId);
 
     state = {};
     auto& debug = midiVoiceDebug[(size_t) sourceId];
@@ -1151,7 +1170,7 @@ void AudienceProcessor::handleMidiSourceEvent (const PartialEngine::MidiSourceEv
     }
     else
     {
-        const int ch = juce::jlimit(1, 16, rawParamInt(rawParams.normalMidiChannel, 1));
+        const int ch = juce::jlimit(1, 16, rawParamInt(rawParams.normalMidiChannel, 0) + 1);
         state.channel = ch;
         state.pitchBend = 8192;
         midiMessages.addEvent(juce::MidiMessage::noteOn(ch, state.note, (juce::uint8) velocity), sampleOffset);
@@ -1294,6 +1313,14 @@ void AudienceProcessor::drainExternalMidiOutputQueue()
 void AudienceProcessor::timerCallback()
 {
     drainExternalMidiOutputQueue();
+
+    if (pendingStateApply.exchange(false, std::memory_order_acquire))
+    {
+        setUdpPort(pendingUdpPort);
+        setMidiOutputOptionIndex(pendingMidiOutputOption);
+        if (pendingLibraryName.isNotEmpty())
+            setCurrentLibrary(pendingLibraryName);
+    }
 }
 
 juce::String AudienceProcessor::getOutgoingMidiDebugText (int maxEvents) const
@@ -1610,7 +1637,7 @@ juce::StringArray AudienceProcessor::getMidiOutputOptions() const
 {
     juce::StringArray options;
     options.add("Host MIDI Output");
-    options.add("Virtual: Audience Harmonic Synth MIDI Out");
+    options.add("Virtual: SpektraSynth MIDI Out");
 
     for (const auto& device : juce::MidiOutput::getAvailableDevices())
         options.add(device.name);
@@ -1648,8 +1675,8 @@ void AudienceProcessor::setMidiOutputOptionIndex (int index)
     if (midiOutputOptionIndex.load(std::memory_order_relaxed) == 1)
     {
         const juce::String portName = instanceId <= 1
-            ? "Audience Harmonic Synth MIDI Out"
-            : "Audience Harmonic Synth MIDI Out " + juce::String(instanceId);
+            ? "SpektraSynth MIDI Out"
+            : "SpektraSynth MIDI Out " + juce::String(instanceId);
 
         midiOutput = juce::MidiOutput::createNewDevice(portName);
         if (midiOutput != nullptr)
@@ -1761,13 +1788,14 @@ void AudienceProcessor::setStateInformation (const void* data, int size)
         if (state.isValid())
         {
             apvts.replaceState(state);
-            const int port = (int) state.getProperty("udpPort", 6060);
-            setUdpPort(port);
-            setMidiOutputOptionIndex((int) state.getProperty("midiOutputOption", 0));
 
-            const auto lib = state.getProperty("currentLibrary").toString();
-            if (lib.isNotEmpty())
-                setCurrentLibrary(lib);
+            // Defer socket bind / MIDI device open / sample-library disk I/O to the
+            // message-thread timer. The host may call this on a background thread or
+            // before prepareToPlay, where doing that work inline can deadlock or race.
+            pendingUdpPort          = (int) state.getProperty("udpPort", 6060);
+            pendingMidiOutputOption = (int) state.getProperty("midiOutputOption", 0);
+            pendingLibraryName      = state.getProperty("currentLibrary").toString();
+            pendingStateApply.store(true, std::memory_order_release);
         }
     }
 }
