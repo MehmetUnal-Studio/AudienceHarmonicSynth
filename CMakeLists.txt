@@ -370,6 +370,27 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_test(NAME AudienceAtomicScaleBuilderTests COMMAND AudienceAtomicScaleBuilderTests)
 
+    add_executable(AudienceSampleLibraryTests
+        Tests/SampleLibraryTests.cpp
+        Source/SampleLibrary.cpp
+    )
+
+    target_compile_definitions(AudienceSampleLibraryTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/Samples"
+    )
+
+    target_link_libraries(AudienceSampleLibraryTests PRIVATE
+        juce::juce_audio_formats
+        juce::juce_audio_basics
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceSampleLibraryTests COMMAND AudienceSampleLibraryTests)
+
     add_executable(AudiencePerformanceSmokeTests
         Tests/PerformanceSmokeTests.cpp
         Source/AtomicScaleBuilder.cpp
