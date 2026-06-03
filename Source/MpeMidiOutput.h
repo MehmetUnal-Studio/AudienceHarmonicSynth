@@ -74,8 +74,12 @@ public:
     // so a subsequent reset() observes the new range exactly as before.
     void setMemberRange (int first, int last) noexcept;
 
-    // Marks the MPE setup (MCM + per-member RPN) as needing to be re-sent.
-    void markSetupDirty() noexcept { mpeSetupDirty = true; }
+    // Marks the MPE setup (MCM + per-member RPN) as needing to be re-sent. B24:
+    // mpeSetupDirty is atomic - this is written on the message thread (processor
+    // change-detection) while render() reads+clears it on the audio thread. Relaxed
+    // ordering is sufficient: the flag only gates whether the next render re-emits
+    // the (idempotent) setup; no other state is published through it.
+    void markSetupDirty() noexcept { mpeSetupDirty.store(true, std::memory_order_relaxed); }
 
     // Clears all output state (voices, channel ownership, counters, debug).
     void reset() noexcept;
@@ -208,7 +212,7 @@ private:
     std::array<MidiVoiceDebugSlot, kMaxMidiSources> midiVoiceDebug {};
     std::array<int, 17> mpeChannelOwner {};
     uint32_t midiVoiceAgeCounter = 0;
-    bool mpeSetupDirty = true;
+    std::atomic<bool> mpeSetupDirty { true };  // B24: see markSetupDirty().
 
     // Active member-channel range. Kept in sync with config by setMemberRange /
     // render; defaults match the old lastMpeMemberFirst/Last initial values.

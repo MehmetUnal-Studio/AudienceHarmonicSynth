@@ -42,6 +42,22 @@ namespace
     {
         return rawParamValue(param, fallback ? 1.0f : 0.0f) > 0.5f;
     }
+
+    // B8: the MPE zone fully determines the channel layout. Maps the mpeZone choice
+    // index to its legal MPE master + member-channel range. This is the single
+    // source of truth shared by buildMpeConfig() (which feeds MpeMidiOutput) and the
+    // processBlock change-detection (which decides when to re-send setup / all-off),
+    // so the two can never disagree about which channels a zone uses.
+    struct MpeZoneChannels { int master; int memberFirst; int memberLast; };
+
+    MpeZoneChannels zoneChannels (int zoneIndex) noexcept
+    {
+        // Upper (1): master 16, members 1..15. Anything else -> Lower (0): master 1,
+        // members 2..16 (the historical default; byte-identical to prior behaviour).
+        if (zoneIndex == 1)
+            return { 16, 1, 15 };
+        return { 1, 2, 16 };
+    }
 }
 
 AudienceProcessor::AudienceProcessor()
@@ -262,7 +278,10 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
 
     layout.add (std::make_unique<AudioParameterChoice>(
         ParameterID ("mpeZone", 1), "MPE Zone",
-        StringArray { "Lower" }, 0));
+        StringArray { "Lower", "Upper" }, 0));   // 0 = Lower (default), 1 = Upper.
+        // The zone now fully OWNS the MPE channel layout (master + member range);
+        // see buildMpeConfig(). Lower keeps the historical master1/members2-16,
+        // Upper uses master16/members1-15.
 
     {
         // Choice (not Int) so the editor's ComboBoxAttachment indexes correctly.
@@ -390,6 +409,7 @@ void AudienceProcessor::cacheParameterPointers()
     rawParams.audioMidiOutputMode = apvts.getRawParameterValue("audioMidiOutputMode");
     rawParams.midiOutputType = apvts.getRawParameterValue("midiOutputType");
     rawParams.normalMidiChannel = apvts.getRawParameterValue("normalMidiChannel");
+    rawParams.mpeZone = apvts.getRawParameterValue("mpeZone");
     rawParams.mpeMasterChannel = apvts.getRawParameterValue("mpeMasterChannel");
     rawParams.mpeMemberFirstChannel = apvts.getRawParameterValue("mpeMemberFirstChannel");
     rawParams.mpeMemberLastChannel = apvts.getRawParameterValue("mpeMemberLastChannel");
@@ -505,13 +525,23 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const bool renderAudio = outputMode != 1 && ! muted.load();
     const bool renderMidi = outputMode != 0 && midiType != 0;
     const int bendRange = MpeMidiOutput::bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
-    const int mpeFirst = juce::jlimit(2, 16, rawParamInt(rawParams.mpeMemberFirstChannel, 2));
-    const int mpeLast = juce::jlimit(mpeFirst, 16, rawParamInt(rawParams.mpeMemberLastChannel, 16));
+    // B8: the member range (and master) are now DERIVED from the MPE zone, so the
+    // change-detection tracks the ZONE-derived channels. Switching Lower<->Upper
+    // changes both the master and the member first/last, which flips
+    // midiConfigChanged -> the existing safety path (emitSafetyReset + reset on the
+    // OLD channels, then markSetupDirty so the MCM is re-sent on the NEW master and
+    // allocation moves to the NEW member range) fires exactly as for any other
+    // config change.
+    const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone, 0));
+    const int mpeMaster = juce::jlimit(1, 16, zone.master);
+    const int mpeFirst = juce::jlimit(1, 16, zone.memberFirst);
+    const int mpeLast = juce::jlimit(mpeFirst, 16, zone.memberLast);
     const int setupEnabled = rawParamBool(rawParams.mpeSendSetupMessages, true) ? 1 : 0;
 
     const bool midiConfigChanged = outputMode != lastAudioMidiOutputMode
         || midiType != lastMidiOutputType
         || bendRange != lastMpeBendRange
+        || mpeMaster != lastMpeMaster
         || mpeFirst != lastMpeMemberFirst
         || mpeLast != lastMpeMemberLast
         || setupEnabled != lastMpeSetupEnabled;
@@ -521,6 +551,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     lastAudioMidiOutputMode = outputMode;
     lastMidiOutputType = midiType;
     lastMpeBendRange = bendRange;
+    lastMpeMaster = mpeMaster;
     lastMpeMemberFirst = mpeFirst;
     lastMpeMemberLast = mpeLast;
     lastMpeSetupEnabled = setupEnabled;
@@ -610,8 +641,12 @@ void AudienceProcessor::processIncomingMidiKeyboard (const juce::MidiBuffer& mid
     const int totalSteps = engine.getScaleTableSize();
     const int rootMidi = engine.scaleRootMidi.load(std::memory_order_relaxed);
     const bool mpeOutputActive = rawParamInt(rawParams.midiOutputType) == 2;
-    const int mpeFirst = juce::jlimit(2, 16, rawParamInt(rawParams.mpeMemberFirstChannel, 2));
-    const int mpeLast = juce::jlimit(mpeFirst, 16, rawParamInt(rawParams.mpeMemberLastChannel, 16));
+    // B8: derive the member range we guard against from the active MPE zone (the
+    // zone owns the layout) so the "ignore local MPE member input" range matches
+    // what we actually emit on (Lower: 2..16, Upper: 1..15).
+    const auto incomingZone = zoneChannels(rawParamInt(rawParams.mpeZone, 0));
+    const int mpeFirst = juce::jlimit(1, 16, incomingZone.memberFirst);
+    const int mpeLast = juce::jlimit(mpeFirst, 16, incomingZone.memberLast);
 
     auto midiKeyIndex = [] (int channel, int note) noexcept
     {
@@ -844,9 +879,21 @@ MpeMidiOutput::MpeConfig AudienceProcessor::buildMpeConfig() const
 {
     MpeMidiOutput::MpeConfig config;
     config.outputType           = rawParamInt(rawParams.midiOutputType);
-    config.masterChannel        = rawParamInt(rawParams.mpeMasterChannel, 1);
-    config.memberFirst          = rawParamInt(rawParams.mpeMemberFirstChannel, 2);
-    config.memberLast           = rawParamInt(rawParams.mpeMemberLastChannel, 16);
+
+    // B8: the MPE zone now fully OWNS the channel layout. We DERIVE the master and
+    // member-channel range from the mpeZone choice index instead of reading the
+    // manual mpeMasterChannel / mpeMemberFirstChannel / mpeMemberLastChannel params
+    // (those stay in the APVTS layout purely for session compatibility, but are no
+    // longer consulted here):
+    //   Lower (0): master 1,  members 2..16  (15 members) - historical default,
+    //              byte-identical to the prior behaviour.
+    //   Upper (1): master 16, members 1..15  (15 members).
+    // The derived member range never includes the master channel in either zone.
+    const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone, 0));
+    config.masterChannel        = zone.master;
+    config.memberFirst          = zone.memberFirst;
+    config.memberLast           = zone.memberLast;
+
     config.pitchBendRangeChoice = rawParamInt(rawParams.mpePitchBendRange, 3);
     config.normalMidiChannel    = rawParamInt(rawParams.normalMidiChannel, 0);
     config.sendSetupMessages    = rawParamBool(rawParams.mpeSendSetupMessages, true);
@@ -1131,8 +1178,11 @@ juce::String AudienceProcessor::getIncomingMidiDebugText (int maxEvents) const
       << " note " << getLastExternalMidiNote() << "\n";
     if (rawParamInt(rawParams.midiOutputType) == 2)
     {
-        const int first = juce::jlimit(2, 16, rawParamInt(rawParams.mpeMemberFirstChannel, 2));
-        const int last = juce::jlimit(first, 16, rawParamInt(rawParams.mpeMemberLastChannel, 16));
+        // B8: the guarded member range follows the active MPE zone (Lower 2..16,
+        // Upper 1..15), matching the channels processIncomingMidiKeyboard ignores.
+        const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone, 0));
+        const int first = juce::jlimit(1, 16, zone.memberFirst);
+        const int last = juce::jlimit(first, 16, zone.memberLast);
         s << "guard       : ignoring local MPE member input ch "
           << first << "-" << last << "\n";
     }
@@ -1231,6 +1281,10 @@ juce::String AudienceProcessor::getMidiStateDebugText() const
     s << "MPE voices         : " << getActiveMpeVoices()
       << " active / " << getAvailableMpeChannels() << " available\n";
     s << "MIDI output        : " << getMidiOutputStatus() << "\n";
+    // B7: surface the external-MIDI FIFO overflow counter so a full
+    // host-output queue (dropped outgoing messages) is visible in the report.
+    s << "MIDI out dropped   : "
+      << (int) externalMidiDropped.load(std::memory_order_relaxed) << "\n";
     s << "\nactive keyboard slots\n";
 
     int listed = 0;
@@ -1414,9 +1468,14 @@ void AudienceProcessor::setSampleDirectory (const juce::File& dir)
 void AudienceProcessor::setUdpPort (int port)
 {
     udpPort = port;
-    const bool ok = osc.start(port);
-    oscStatus = ok ? ("Listening on UDP " + juce::String(port))
-                   : ("FAILED to bind UDP " + juce::String(port) + " - port busy?");
+    osc.start(port);
+    // B25: take the UI-visible status straight from OscBridge::oscStatus() so the
+    // shared-UDP-port "PORT FULL" condition (when the 16-client cap is hit and this
+    // instance receives no OSC) becomes visible in the DebugPanel, instead of the
+    // old text which only distinguished bound vs. bind-failed. The bridge string
+    // already covers Listening / FAILED-to-bind / PORT FULL; connection logic is
+    // unchanged.
+    oscStatus = osc.oscStatus();
 }
 
 void AudienceProcessor::panic()

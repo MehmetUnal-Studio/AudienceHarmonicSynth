@@ -185,6 +185,11 @@ private:
     int lastAudioMidiOutputMode = 0;
     int lastMidiOutputType = 0;
     int lastMpeBendRange = 48;
+    // B8: zone-derived MPE channel trackers. Defaults match the Lower zone
+    // (master 1, members 2..16) so the first block with the default zone detects
+    // no spurious change. A Lower<->Upper switch changes master/first/last and is
+    // caught by midiConfigChanged.
+    int lastMpeMaster = 1;
     int lastMpeMemberFirst = 2;
     int lastMpeMemberLast = 16;
     int lastMpeSetupEnabled = 1;
@@ -249,6 +254,7 @@ private:
         std::atomic<float>* audioMidiOutputMode = nullptr;
         std::atomic<float>* midiOutputType = nullptr;
         std::atomic<float>* normalMidiChannel = nullptr;
+        std::atomic<float>* mpeZone = nullptr;
         std::atomic<float>* mpeMasterChannel = nullptr;
         std::atomic<float>* mpeMemberFirstChannel = nullptr;
         std::atomic<float>* mpeMemberLastChannel = nullptr;

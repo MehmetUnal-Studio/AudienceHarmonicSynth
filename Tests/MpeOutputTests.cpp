@@ -92,6 +92,25 @@ namespace
         return c;
     }
 
+    // Upper-zone MPE config (B8): master 16, members 1..15. The zone fully
+    // determines the channel layout; this mirrors what buildMpeConfig() derives
+    // for mpeZone == 1.
+    MpeMidiOutput::MpeConfig mpeConfigUpper (int pitchBendChoice = 3)
+    {
+        MpeMidiOutput::MpeConfig c;
+        c.outputType = 2;
+        c.masterChannel = 16;
+        c.memberFirst = 1;
+        c.memberLast = 15;
+        c.pitchBendRangeChoice = pitchBendChoice;
+        c.normalMidiChannel = 0;
+        c.sendSetupMessages = true;
+        c.pitchMode = 0;
+        c.motionMacro = 0.5f;
+        c.energy = 0.5f;
+        return c;
+    }
+
     MpeMidiOutput::NoteEvent noteOn (int sourceId, double freqHz, float vel = 0.8f,
                                      float x = 0.5f, float y = 0.5f)
     {
@@ -474,6 +493,89 @@ int main()
             expect(mpe.getActiveMpeVoices() == 1,
                    (label + ": one active MPE voice after the note-on").c_str());
         }
+    }
+
+    // ---- Test 10: Upper zone (B8) - master ch16, members ch1..15 ----
+    // The MPE zone now fully determines the channel layout. Upper => master 16,
+    // members 1..15. This must hold while every Lower-zone assertion above keeps
+    // passing (Lower is verified by Tests 1-9 with the default master1/members2-16).
+    {
+        MpeMidiOutput mpe;
+        const auto config = mpeConfigUpper(3); // bend range choice 3 -> 48 st
+        const auto bendRange = MpeMidiOutput::bendRangeFromChoice(3);
+        const int memberCount = 15 - 1 + 1; // 15 members (ch1..15)
+
+        // ---- setup messages: MCM on master ch16, RPN on each member ch1..15 ----
+        juce::MidiBuffer onBuffer;
+        const auto on = noteOn(0, kA4);
+        mpe.render(config, &on, 1, onBuffer, 64);
+        const auto onMsgs = decode(onBuffer);
+
+        // MCM (CC101=0, CC100=6, CC6=memberCount) on master channel 16, in order,
+        // at the very front - the Upper-zone analogue of Test 1's ch1 MCM.
+        const bool mcmOk = onMsgs.size() >= 3
+            && isController(onMsgs[0], 16, 101, 0)
+            && isController(onMsgs[1], 16, 100, 6)
+            && isController(onMsgs[2], 16, 6, memberCount);
+        expect(mcmOk, "Upper zone: MCM (CC101=0, CC100=6, CC6=15) emitted on master ch16 first");
+
+        // Per-member pitch-bend-range RPN: each member channel 1..15 gets CC6=bendRange.
+        bool allMembersHaveRpn = true;
+        for (int ch = 1; ch <= 15; ++ch)
+        {
+            const int idx = indexOf(onMsgs, [ch, bendRange] (const Msg& m)
+                                    { return isController(m, ch, 6, bendRange); });
+            if (idx < 0)
+                allMembersHaveRpn = false;
+        }
+        expect(allMembersHaveRpn, "Upper zone: per-member pitch-bend-range RPN (CC6=bendRange) on ch1..15");
+
+        // The master channel 16 must NOT receive a per-member RPN (it is the zone
+        // master, not a member) - confirms members 1..15 never include the master.
+        // The only CC6 on ch16 is the MCM's CC6=memberCount(15); the member RPN
+        // value is bendRange(48), so a CC6=48 on ch16 would mean the master got
+        // treated as a member.
+        const bool masterHasMemberBend = indexOf(onMsgs, [bendRange] (const Msg& m)
+            { return m.status == kCC && m.channel == 16 && m.d1 == 6 && m.d2 == bendRange; }) >= 0;
+        expect(! masterHasMemberBend,
+               "Upper zone: master ch16 receives no per-member RPN (member range excludes master)");
+
+        // ---- note allocates to a member channel in 1..15, pitchWheel before noteOn ----
+        const int noteOnIdx = indexOf(onMsgs, [] (const Msg& m)
+            { return m.status == kNoteOn && m.channel >= 1 && m.channel <= 15 && m.d2 > 0; });
+        expect(noteOnIdx >= 0,
+               "Upper zone: note-on emitted on an MPE member channel (1..15)");
+
+        const int memberCh = noteOnIdx >= 0 ? onMsgs[(size_t) noteOnIdx].channel : -1;
+        expect(memberCh >= 1 && memberCh <= 15 && memberCh != 16,
+               "Upper zone: member channel is in 1..15 and is not the master (16)");
+
+        const int bendIdx = indexOf(onMsgs, [memberCh] (const Msg& m)
+            { return m.status == kBend && m.channel == memberCh; });
+        expect(bendIdx >= 0 && noteOnIdx >= 0 && bendIdx < noteOnIdx,
+               "Upper zone: pitchWheel precedes noteOn on the member channel");
+
+        expect(mpe.getActiveMpeVoices() == 1,
+               "Upper zone: one active MPE voice after the note-on");
+
+        // ---- note-off resets on the member channel ----
+        juce::MidiBuffer offBuffer;
+        const auto off = noteOff(0);
+        mpe.render(config, &off, 1, offBuffer, 64);
+        const auto offMsgs = decode(offBuffer);
+
+        const bool hasNoteOff = indexOf(offMsgs, [memberCh] (const Msg& m)
+            { return m.status == kNoteOff && m.channel == memberCh; }) >= 0;
+        const bool hasPressureZero = indexOf(offMsgs, [memberCh] (const Msg& m)
+            { return m.status == kPressure && m.channel == memberCh && m.d1 == 0; }) >= 0;
+        const bool hasBendCenter = indexOf(offMsgs, [memberCh] (const Msg& m)
+            { return m.status == kBend && m.channel == memberCh && pitchWheelValue(m) == 8192; }) >= 0;
+
+        expect(hasNoteOff, "Upper zone: note-off emits a note-off on the member channel");
+        expect(hasPressureZero, "Upper zone: note-off emits channel pressure 0 on the member channel");
+        expect(hasBendCenter, "Upper zone: note-off recenters pitch wheel to 8192 on the member channel");
+        expect(mpe.getActiveMpeVoices() == 0,
+               "Upper zone: voice released after note-off");
     }
 
     std::cout << "\nSummary: " << (g_failed == 0 ? "ok" : "failed") << "\n";

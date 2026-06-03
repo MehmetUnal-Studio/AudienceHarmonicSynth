@@ -67,20 +67,29 @@ void MpeMidiOutput::sendPitchBendRangeRpn (juce::MidiBuffer& midiMessages, int s
 
 void MpeMidiOutput::sendMpeSetupIfNeeded (const MpeConfig& config, juce::MidiBuffer& midiMessages, int sampleOffset)
 {
-    if (! mpeSetupDirty)
+    // B24: atomic read+clear. Relaxed is fine - the flag only gates re-emission of
+    // the idempotent MPE setup; render() reads+clears on the audio thread while
+    // markSetupDirty() sets it on the message thread.
+    if (! mpeSetupDirty.load(std::memory_order_relaxed))
         return;
 
     if (config.outputType != 2
         || ! config.sendSetupMessages)
     {
-        mpeSetupDirty = false;
+        mpeSetupDirty.store(false, std::memory_order_relaxed);
         return;
     }
 
     const int master = juce::jlimit(1, 16, config.masterChannel);
-    const int first = juce::jlimit(2, 16, config.memberFirst);
+    // B8: member channels are now zone-derived; the Upper zone uses ch1 as a
+    // member, so the lower clamp is relaxed from 2 to 1 (was jlimit(2,16,...)).
+    const int first = juce::jlimit(1, 16, config.memberFirst);
     const int last = juce::jlimit(first, 16, config.memberLast);
     const int bendRange = bendRangeFromChoice(config.pitchBendRangeChoice);
+
+    // The zone guarantees the member range never includes the master channel
+    // (Lower: master1 / members2-16; Upper: master16 / members1-15).
+    jassert (master < first || master > last);
 
     const int memberCount = juce::jlimit(0, 15, last - first + 1);
     midiMessages.addEvent(juce::MidiMessage::controllerEvent(master, 101, 0), sampleOffset);
@@ -93,7 +102,7 @@ void MpeMidiOutput::sendMpeSetupIfNeeded (const MpeConfig& config, juce::MidiBuf
     for (int ch = first; ch <= last; ++ch)
         sendPitchBendRangeRpn(midiMessages, sampleOffset, ch, bendRange);
 
-    mpeSetupDirty = false;
+    mpeSetupDirty.store(false, std::memory_order_relaxed);
 }
 
 void MpeMidiOutput::sendAllMidiNotesOff (juce::MidiBuffer& midiMessages, int sampleOffset)
@@ -384,8 +393,10 @@ void MpeMidiOutput::render (const MpeConfig& config,
 {
     // Clamp the member range exactly as AudienceProcessor::processBlock did when
     // it derived mpeFirst/mpeLast (memberLast is clamped to be >= memberFirst), so
-    // the channel-allocation range matches the historical behaviour byte-for-byte.
-    memberFirst = juce::jlimit(2, 16, config.memberFirst);
+    // the channel-allocation range matches the processor byte-for-byte. B8: the
+    // lower clamp is relaxed from 2 to 1 so the zone-derived Upper range (members
+    // 1..15) is honoured; Lower (2..16) is unaffected.
+    memberFirst = juce::jlimit(1, 16, config.memberFirst);
     memberLast = juce::jlimit(memberFirst, 16, config.memberLast);
 
     const int outputType = config.outputType;

@@ -444,7 +444,13 @@ if(NOT ANDROID)
     endforeach()
 endif()
 
-if(APPLE AND NOT ANDROID)
+# B15: the macOS auto-install (clean copy) of the AudienceHarmonicSynth VST3
+# into the user plug-ins folder is a local-dev convenience. Default ON preserves
+# the current behaviour; configure with -DAUDIENCE_SYNTH_AUTO_INSTALL=OFF (e.g. on
+# CI or other machines) to build the VST3 without installing/copying it.
+option(AUDIENCE_SYNTH_AUTO_INSTALL "Auto-install (clean copy) the VST3 to the user plug-ins folder after build (macOS dev convenience)" ON)
+
+if(AUDIENCE_SYNTH_AUTO_INSTALL AND APPLE AND NOT ANDROID)
     add_custom_command(TARGET AudienceHarmonicSynth_VST3 POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf
             "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience Harmonic Synth.vst3"
