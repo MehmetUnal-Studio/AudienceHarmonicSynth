@@ -1,4 +1,5 @@
 #include "DebugPanel.h"
+#include "UiText.h"
 
 namespace
 {
@@ -87,9 +88,8 @@ void DebugPanel::timerCallback()
       << proc.engine.getActiveVoiceCount() << " voices / "
       << proc.engine.getRegisteredSeatCount() << " seats\n";
     const int lastMidiNote = proc.getLastExternalMidiNote();
-    static const char* midiNames[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
     const juce::String lastMidiName = lastMidiNote >= 0
-        ? juce::String(midiNames[((lastMidiNote % 12) + 12) % 12]) + juce::String(lastMidiNote / 12 - 1)
+        ? UiText::midiNoteName(lastMidiNote)
         : juce::String("--");
     s << "external MIDI: "
       << proc.getExternalMidiPitchModeName()

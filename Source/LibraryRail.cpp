@@ -11,6 +11,22 @@ namespace
     const juce::Colour kText2       { 0xffb8bac6 };
     const juce::Colour kText3       { 0xff7c7d8a };
     const juce::Colour kAccent      { 0xff5fd7d0 };
+
+    // Element->scaleMode mapping anchor.
+    //
+    // The "scaleMode" choice parameter lists the musical scales first, then one
+    // "<Element> Spectrum" entry per spectral element, in element order. So
+    // selecting spectral element N must select scaleMode (firstSpectrumIndex + N),
+    // where firstSpectrumIndex is the position of the first (Hydrogen) spectrum.
+    //
+    // The authoritative way to find that index is to look up the anchor entry by
+    // name (kSpectralScaleAnchorName) - that stays correct even if scales are
+    // reordered or inserted. kBaseMusicalScaleCount is the documented expected
+    // value (number of non-spectral scales that precede the spectra) and is used
+    // only as a fallback if the parameter is missing or not a choice parameter,
+    // replacing what used to be a bare, unexplained literal 7.
+    const juce::String kSpectralScaleAnchorName { "Hydrogen Spectrum" };
+    constexpr int      kBaseMusicalScaleCount = 7;
 }
 
 LibraryRail::LibraryRail (AudienceProcessor& p) : proc(p)
@@ -241,9 +257,26 @@ void LibraryRail::setChoiceParameter (const juce::String& parameterId, int choic
 int LibraryRail::spectralScaleStartIndex() const
 {
     if (auto* scales = dynamic_cast<juce::AudioParameterChoice*> (proc.apvts.getParameter("scaleMode")))
-        return juce::jmax(0, scales->choices.indexOf("Hydrogen Spectrum"));
+    {
+        const int anchor = scales->choices.indexOf(kSpectralScaleAnchorName);
 
-    return 7;
+        // If the anchor entry is missing the list is malformed; fall back to the
+        // documented base-scale count rather than silently mapping every element
+        // to index 0 (which would mis-select the first musical scale).
+        if (anchor < 0)
+        {
+            jassertfalse;
+            return kBaseMusicalScaleCount;
+        }
+
+        // The spectra are expected to start exactly after the base musical scales.
+        // A mismatch means the scale list and this UI mapping have drifted apart;
+        // flag it in debug builds while still honouring the live list at runtime.
+        jassert (anchor == kBaseMusicalScaleCount);
+        return anchor;
+    }
+
+    return kBaseMusicalScaleCount;
 }
 
 void LibraryRail::paint (juce::Graphics& g)
