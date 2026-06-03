@@ -9,6 +9,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Fail fast if the committed Source/ElementSpectralData.cpp has drifted from
+      # its generator (tools/generate_element_spectral_data.py) or the data/*.txt
+      # inputs. The script regenerates to a temp dir and diffs — it never writes to
+      # Source/. Re-run `python3 tools/generate_element_spectral_data.py` and commit
+      # the result to fix any drift.
+      - name: Check generated spectral data is in sync
+        run: bash tools/check_generated_data.sh
+
       # Cache the JUCE FetchContent download so it is not re-cloned every run.
       # Key includes the JUCE GIT_TAG (8.0.4) pinned in CMakeLists.txt; bump it
       # there and this cache will naturally miss and refetch.

@@ -117,6 +117,26 @@ python3 trim_silence.py "Samples/Piano Dream"
 python3 split_voice.py Sources/HumanVoices/HumanVoice.wav Samples/HumanLive C1 D1 E1 F1 G1 A1 B1
 ```
 
+## `Source/` vs `Sources/`
+
+Two top-level directories differ by a single trailing `s`. They are unrelated and
+must not be confused:
+
+- **`Source/`** (singular) — the C++/JUCE plugin source code (`PluginProcessor.cpp`,
+  `PartialEngine.cpp`, the generated `ElementSpectralData.cpp`, etc.). This is what
+  `CMakeLists.txt` compiles.
+- **`Sources/`** (plural) — raw, unprocessed source recordings used as **input** to
+  the Python prep tools, not loaded by the plugin at runtime. It currently holds
+  `Lyre.wav` and `HumanVoices/HumanVoice.wav` (plus `.orig` backups and an Ableton
+  `.asd` analysis sidecar).
+
+The prep tools (`trim_silence.py`, `split_voice.py`) read raw audio from `Sources/`
+and write playable, root-note-named libraries into `Samples/`. At runtime the plugin
+only ever scans `Samples/` (the `AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH` baked into the
+build), never `Sources/`.
+
+Do not rename `Sources/`: tool invocations and local asset paths reference it by name.
+
 ## Simulator
 
 The editor includes a fake audience for testing without UDP traffic:
