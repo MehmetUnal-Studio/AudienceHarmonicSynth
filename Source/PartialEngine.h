@@ -156,7 +156,7 @@ public:
     std::atomic<int>   engineSource   { 0 };           // Sample Library / Element Spectral Synth
     std::atomic<int>   samplePlaybackMode { 0 };       // Direct Sample Player / Granular
     std::atomic<int>   spectralElement { 1 };          // H..Zn, with Nitrogen omitted until a matching dataset is available
-    std::atomic<int>   spectralPartialCount { 9 };
+    std::atomic<int>   spectralPartialCount { MAX_ELEMENT_PARTIALS };
     std::atomic<int>   spectralPartialSolo { 0 };       // Audition one raw spectral line.
     std::atomic<float> spectralStretch { 0.0f };
     std::atomic<int>   atomicScaleMode { 1 };          // Core / Extended / Microtonal / Scientific / Raw

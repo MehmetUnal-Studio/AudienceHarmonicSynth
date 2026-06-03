@@ -10,6 +10,20 @@ namespace
     constexpr float kPi    = 3.14159265358979323846f;
     constexpr float kTwoPi = 6.28318530717958647692f;
 
+    // Shared, read-only sine wavetable for the additive partial oscillator.
+    // Built ONCE at static-init time (not on the audio thread, not per voice).
+    // Guard entry [kSineTableSize] == [0] enables branch-free linear interpolation.
+    // Linear interp on a 4096-point table is ~-78 dB error (inaudible).
+    constexpr int kSineTableSize = 4096;
+    static const std::array<float, kSineTableSize + 1> kSineTable = []
+    {
+        std::array<float, kSineTableSize + 1> table {};
+        for (int i = 0; i < kSineTableSize; ++i)
+            table[(size_t) i] = (float) std::sin(kTwoPi * (double) i / (double) kSineTableSize);
+        table[(size_t) kSineTableSize] = table[0];
+        return table;
+    }();
+
 	    struct ScaleDef
 	    {
 	        const char* name;
@@ -3657,7 +3671,7 @@ void PartialEngine::renderVoices (float* L, float* R, int n)
                                                      spectralPartialCount.load(std::memory_order_relaxed) - 1);
             const int partials = partialSolo ? 1
                                              : juce::jlimit(1, juce::jmin(lineCount, MAX_ELEMENT_PARTIALS),
-                                                           v.elementPartials);
+                                                           spectralPartialCount.load(std::memory_order_relaxed));
             const float stretch = juce::jlimit(-0.35f, 0.35f, spectralStretch.load(std::memory_order_relaxed));
             const float bright = juce::jlimit(0.0f, 1.0f,
                                               brightness.load() * 0.52f
@@ -3717,7 +3731,17 @@ void PartialEngine::renderVoices (float* L, float* R, int n)
                     const float amp = partialAmps[(size_t) pi];
 
                     float& phase = v.elementPhase[(size_t) partialIndex];
-                    mono += std::sin(phase) * amp;
+                    // Linearly-interpolated sine LUT lookup; phase stays in radians [0, 2*pi).
+                    // Mask the integer index to [0, kSineTableSize-1] (power-of-two table) so a
+                    // float-rounding edge where t rounds up to kSineTableSize (phase ~= 2*pi)
+                    // can never read past the table. idx+1 then stays within the guard slot.
+                    const float t = phase * (float) (kSineTableSize / kTwoPi);
+                    const int   ti = (int) t;
+                    const float frac = t - (float) ti;
+                    const int   idx = ti & (kSineTableSize - 1);
+                    const float s0 = kSineTable[(size_t) idx];
+                    const float s1 = kSineTable[(size_t) idx + 1];
+                    mono += (s0 + frac * (s1 - s0)) * amp;
                     phase += (float) (kTwoPi * partialHz / sampleRate);
                     while (phase >= kTwoPi) phase -= kTwoPi;
                     while (phase < 0.0f) phase += kTwoPi;
