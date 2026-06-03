@@ -1,0 +1,40 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build-test:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Cache the JUCE FetchContent download so it is not re-cloned every run.
+      # Key includes the JUCE GIT_TAG (8.0.4) pinned in CMakeLists.txt; bump it
+      # there and this cache will naturally miss and refetch.
+      - name: Cache JUCE (FetchContent)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: ${{ runner.os }}-juce-8.0.4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DAUDIENCE_SYNTH_BUILD_TESTS=ON
+
+      # Build only the test harnesses (not the VST3/Standalone plugins) to keep CI fast.
+      - name: Build test targets
+        run: >-
+          cmake --build build --config Release -j
+          --target AudienceSignalFlowTests
+          AudienceMidiMappingTests
+          AudienceMidiScaleModuleTests
+          AudienceMidiPitchTests
+          AudienceOscBridgeTests
+          AudienceAtomicScaleBuilderTests
+          AudiencePerformanceSmokeTests
+
+      # NOTE: AudienceSignalFlowTests and AudiencePerformanceSmokeTests use the
+      # AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH sample data, which may be absent on CI
+      # (backlog B10). They are intentionally NOT skipped here.
+      - name: Run tests
+        run: ctest --test-dir build -C Release --output-on-failure
