@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <array>
+#include <memory>
 #include <juce_core/juce_core.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
@@ -56,6 +57,13 @@
     Signature modes, granular controls, wet/dry blend, tape saturation, and a
     peak limiter sit at the output so dense crowd input remains playable.
 */
+
+// Opaque, engine-owned cache of every (element x scale mode) atomic-scale build.
+// Defined in PartialEngine.cpp; populated once on the message thread (engine
+// construction). The audio thread only ever *reads* it, so no allocation can
+// occur on any audio-thread path. See PartialEngine.cpp for the layout.
+struct AtomicScaleCache;
+
 class PartialEngine : public SeatEventSink
 {
 public:
@@ -92,6 +100,7 @@ public:
     static constexpr int HANN_LUT_SIZE        = 512;
 
     PartialEngine();
+    ~PartialEngine() override;
 
     void prepare (double sampleRate, int blockSize = 512);
     void reset();
@@ -365,6 +374,23 @@ private:
     std::array<SeatState, MAX_SEATS>  seats;
     std::array<KeyboardState, MAX_KEYBOARD_SLOTS> keyboardSlots;
 
+    // ---- active-voice index list (audio-thread only) ----
+    // Lets renderVoices() iterate only live voices instead of sweeping all
+    // MAX_VOICES every block. Kept sorted ascending by voice index so render
+    // order is byte-for-byte identical to the old full sweep. Fixed-size, so no
+    // allocation ever occurs in the hot path.
+    //   activeVoiceList[0 .. activeVoiceCountRT-1] = active voice indices, ascending.
+    //   activeVoiceSlot[v] = position of voice v in activeVoiceList, or -1 if inactive.
+    // Mutated only by addActiveVoice()/removeActiveVoice() (from allocateVoice /
+    // freeVoice) and cleared by clearActiveVoiceList() (reset / clearAllVoices).
+    std::array<int, MAX_VOICES> activeVoiceList {};
+    std::array<int, MAX_VOICES> activeVoiceSlot {};
+    int activeVoiceCountRT = 0;
+
+    void addActiveVoice    (int idx) noexcept;
+    void removeActiveVoice (int idx) noexcept;
+    void clearActiveVoiceList() noexcept;
+
     juce::CriticalSection                     eventWriteLock;
     juce::AbstractFifo                        eventFifo { EVENT_QUEUE_SIZE };
     std::array<VoiceEvent, EVENT_QUEUE_SIZE>  eventBuffer;
@@ -395,15 +421,17 @@ private:
     float limGain = 1.0f;
     int voiceSearchHint = 0;
 
-    // Library-derived C-major scale table.  buildScaleTable() runs on the
-    // message thread after each loadFromDirectory; the audio thread reads
-    // it via the atomic count (release/acquire pair).
-    std::array<int, 128> scaleTable {};
-    std::atomic<int>     scaleTableCount { 0 };
-    void buildScaleTable();
-
     // Granular helpers
     juce::Random rngVoice;                            // audio-thread only
     std::array<std::array<float, HANN_LUT_SIZE>, 4> envelopeLuts {};
     void initEnvelopeLuts();
+
+    // Explicitly-owned cache of every (element x scale mode) atomic-scale build
+    // (29 elements x 5 modes = 145 results). Built ONCE on the message thread by
+    // ensureAtomicScaleCache(), which is invoked from the constructor (before the
+    // object is reachable by any thread) and again from prepare(). The audio
+    // thread only dereferences this pointer to read results, so no scale build /
+    // std::vector allocation ever happens on an audio-thread path.
+    std::unique_ptr<AtomicScaleCache> atomicScaleCache;
+    void ensureAtomicScaleCache();
 };
