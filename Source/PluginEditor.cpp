@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "UiText.h"
 #include <algorithm>
 #include <cmath>
 
@@ -96,13 +97,6 @@ namespace
         'A','S','D','F','G','H','J','K','L',
         'Z','X','C','V','B','N','M'
     }};
-
-    juce::String midiName (int midi)
-    {
-        static const char* names[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
-        const int oct = midi / 12 - 1;
-        return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(oct);
-    }
 
     bool computerKeyIsDown (char key)
     {
@@ -1674,7 +1668,7 @@ juce::String AudienceEditor::keyboardStepLabel (int scaleStep) const
     if (midi < 0)
         return "-";
 
-    return midiName(midi);
+    return UiText::midiNoteName(midi);
 }
 
 int AudienceEditor::keyboardStepAt (juce::Point<int> p) const

@@ -58,6 +58,7 @@ private:
     void resetRemap();
 
     juce::Point<float> projectSeat (int row, int col, juce::Rectangle<float> venue) const;
+    void layoutScaleCardHitTargets();
     void drawShell (juce::Graphics&);
     void drawTitleBar (juce::Graphics&);
     void drawHeader (juce::Graphics&);

@@ -1,4 +1,5 @@
 #include "AuroraComponent.h"
+#include "UiText.h"
 #include <cmath>
 
 namespace
@@ -35,12 +36,6 @@ namespace
             }
         }
         return juce::Colours::white;
-    }
-
-    juce::String midiName (int midi)
-    {
-        static const char* names[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
-        return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
     }
 
     juce::Colour wavelengthColour (double wavelengthNm)
@@ -371,10 +366,13 @@ void AuroraComponent::paint (juce::Graphics& g)
 
         const int loMidi = n > 0 ? engine.getScaleMidi(0) : -1;
 
-        std::array<float, 128> midiEnergy {};
-        // Only clear the [0, n) range we actually index, instead of memset-ing
+        // midiEnergy/stepEnergy are reused members (see header) rather than
+        // per-paint stack arrays. Clear them to match the previous semantics:
+        // midiEnergy is fully zeroed (every entry is accumulated and read), while
+        // stepEnergy only needs its [0, n) range cleared - that is the only range
+        // ever read, so stale values beyond n are harmless and we skip zeroing
         // all 8192 floats (32 KB) on every paint.
-        std::array<float, 8192> stepEnergy;
+        midiEnergy.fill(0.0f);
         std::fill_n(stepEnergy.begin(), (size_t) juce::jmin(n, (int) stepEnergy.size()), 0.0f);
         for (int i = 0; i < engine.getMaxVoices(); ++i)
         {
@@ -658,7 +656,7 @@ void AuroraComponent::paint (juce::Graphics& g)
                 g.drawLine(x, (float) noteAxis.getY(), x, (float) noteAxis.getY() + 4.0f, 1.0f);
                 g.setColour(juce::Colour(0xff6b717c));
                 g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 8.0f, juce::Font::plain)));
-                g.drawText(midiName(midi), (int) (x - 18.0f), noteAxis.getY() + 3, 36, 10,
+                g.drawText(UiText::midiNoteName(midi), (int) (x - 18.0f), noteAxis.getY() + 3, 36, 10,
                            juce::Justification::centred);
             }
         }
@@ -675,7 +673,7 @@ void AuroraComponent::paint (juce::Graphics& g)
             const float x = xForT(t);
             g.setColour(juce::Colour(0xffffc266));
             g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 9.0f, juce::Font::plain)).boldened());
-            g.drawText("DOM " + midiName(dominantMidi), (int) (x - 32.0f), lines.getY() + 2, 64, 12,
+            g.drawText("DOM " + UiText::midiNoteName(dominantMidi), (int) (x - 32.0f), lines.getY() + 2, 64, 12,
                        juce::Justification::centred);
             g.drawLine(x, (float) lines.getY() + 15.0f, x, (float) lines.getY() + 21.0f, 1.0f);
         }
