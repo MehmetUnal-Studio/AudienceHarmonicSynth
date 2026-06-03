@@ -56,6 +56,7 @@ endif()
 
 target_sources(AudienceHarmonicSynth PRIVATE
     Source/PluginProcessor.cpp
+    Source/MpeMidiOutput.cpp
     Source/PluginEditor.cpp
     Source/AuroraComponent.cpp
     Source/LibraryRail.cpp
@@ -311,6 +312,25 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     )
 
     add_test(NAME AudienceMidiPitchTests COMMAND AudienceMidiPitchTests)
+
+    add_executable(AudienceMpeOutputTests
+        Tests/MpeOutputTests.cpp
+        Source/MpeMidiOutput.cpp
+    )
+
+    target_compile_definitions(AudienceMpeOutputTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceMpeOutputTests PRIVATE
+        juce::juce_audio_basics
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceMpeOutputTests COMMAND AudienceMpeOutputTests)
 
     add_executable(AudienceOscBridgeTests
         Tests/OscBridgeTests.cpp

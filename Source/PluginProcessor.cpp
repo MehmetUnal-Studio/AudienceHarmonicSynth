@@ -3,6 +3,15 @@
 #include <cmath>
 #include <limits>
 
+// AUTHORITATIVE capacity guard. MpeMidiOutput.h/.cpp are kept free of
+// PartialEngine.h so the lightweight MPE test target stays decoupled, which
+// means MpeMidiOutput::kMaxMidiSources is a hand-maintained mirror of the real
+// PartialEngine seat + keyboard count. This static_assert (here, where both
+// PartialEngine.h and MpeMidiOutput.h are visible) breaks the build if those
+// two ever drift again.
+static_assert (MpeMidiOutput::kMaxMidiSources == PartialEngine::MAX_SEATS + PartialEngine::MAX_KEYBOARD_SLOTS,
+               "MpeMidiOutput seat capacity must match PartialEngine seat+keyboard count");
+
 #ifndef AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH
 #define AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH ""
 #endif
@@ -49,7 +58,7 @@ AudienceProcessor::AudienceProcessor()
     keyboardSlotToMidiKey.fill(-1);
     for (auto& key : keyboardDebugKeys)
         key.store(-1, std::memory_order_relaxed);
-    resetMidiOutputState();
+    mpeOut.reset();
     setUdpPort(udpPort);
     startTimerHz(60);
 
@@ -301,7 +310,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
                       "Iron", "Cobalt", "Nickel", "Copper", "Zinc" }, 1));
 
     layout.add (std::make_unique<AudioParameterInt>(
-        ParameterID ("spectralPartialCount", 1), "Element Partial", 1, PartialEngine::MAX_ELEMENT_PARTIALS, 1));
+        ParameterID ("spectralPartialCount", 1), "Element Partial", 1, PartialEngine::MAX_ELEMENT_PARTIALS, PartialEngine::MAX_ELEMENT_PARTIALS));
 
     layout.add (std::make_unique<AudioParameterBool>(
         ParameterID ("spectralPartialSolo", 1), "Partial Solo", false));
@@ -397,8 +406,8 @@ void AudienceProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     monoScratch.setSize(2, juce::jmax(samplesPerBlock, realtimeScratchBlockSize), false, false, true);
     midiRenderScratch.ensureSize(realtimeMidiBufferReserveBytes);
     midiRenderScratchLoanedToHost = false;
-    resetMidiOutputState();
-    mpeSetupDirty = true;
+    mpeOut.reset();
+    mpeOut.markSetupDirty();
 }
 
 void AudienceProcessor::releaseResources() {}
@@ -453,7 +462,7 @@ void AudienceProcessor::pullParams()
     engine.engineSource  .store(engineSource);
     engine.samplePlaybackMode.store(samplePlaybackMode);
     engine.spectralElement.store(spectralElement);
-    engine.spectralPartialCount.store(rawParamInt(rawParams.spectralPartialCount, 1));
+    engine.spectralPartialCount.store(rawParamInt(rawParams.spectralPartialCount, PartialEngine::MAX_ELEMENT_PARTIALS));
     engine.spectralPartialSolo.store(rawParamBool(rawParams.spectralPartialSolo) ? 1 : 0);
     engine.spectralStretch.store(rawParamValue(rawParams.spectralStretch));
     engine.atomicScaleMode.store(atomicScaleMode);
@@ -495,7 +504,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     const int midiType = rawParamInt(rawParams.midiOutputType);
     const bool renderAudio = outputMode != 1 && ! muted.load();
     const bool renderMidi = outputMode != 0 && midiType != 0;
-    const int bendRange = bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
+    const int bendRange = MpeMidiOutput::bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
     const int mpeFirst = juce::jlimit(2, 16, rawParamInt(rawParams.mpeMemberFirstChannel, 2));
     const int mpeLast = juce::jlimit(mpeFirst, 16, rawParamInt(rawParams.mpeMemberLastChannel, 16));
     const int setupEnabled = rawParamBool(rawParams.mpeSendSetupMessages, true) ? 1 : 0;
@@ -516,8 +525,13 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     lastMpeMemberLast = mpeLast;
     lastMpeSetupEnabled = setupEnabled;
 
+    // Mirror the just-computed member range into the MPE output engine before any
+    // reset below, matching the old ordering where lastMpeMemberFirst/Last were
+    // assigned ahead of resetMidiOutputState (so availableMpeChannels is correct).
+    mpeOut.setMemberRange(mpeFirst, mpeLast);
+
     if (midiConfigChanged)
-        mpeSetupDirty = true;
+        mpeOut.markSetupDirty();
 
     if (midiRenderScratchLoanedToHost)
     {
@@ -532,12 +546,12 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     auto& outputMidi = midiRenderScratch;
     if (needsSafetyAllOff)
     {
-        sendMidiResetMessages(outputMidi, 0);
-        resetMidiOutputState();
+        mpeOut.emitSafetyReset(outputMidi, 0);
+        mpeOut.reset();
     }
     else if (midiConfigChanged)
     {
-        resetMidiOutputState();
+        mpeOut.reset();
     }
 
     if (renderAudio && buffer.getNumChannels() < 2)
@@ -571,10 +585,10 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     else
     {
         (void) engine.drainMidiSourceEvents(midiSourceScratch.data(), (int) midiSourceScratch.size());
-        resetMidiOutputState();
+        mpeOut.reset();
     }
 
-    recordOutgoingMidiDebugEvents(outputMidi);
+    mpeOut.recordOutgoingMidiDebugEvents(outputMidi);
     queueMidiToExternalOutput(outputMidi);
     midiMessages.swapWith(midiRenderScratch);
     midiRenderScratchLoanedToHost = true;
@@ -816,22 +830,6 @@ void AudienceProcessor::releaseAllMidiKeyboardNotes()
     activeExternalMidiKeys.store(0, std::memory_order_relaxed);
 }
 
-int AudienceProcessor::bendRangeFromChoice (int choice) noexcept
-{
-    static constexpr int ranges[] { 2, 12, 24, 48 };
-    return ranges[juce::jlimit(0, 3, choice)];
-}
-
-int AudienceProcessor::velocityFromUnit (float value) noexcept
-{
-    return juce::jlimit(1, 127, (int) std::round(juce::jlimit(0.0f, 1.0f, value) * 127.0f));
-}
-
-int AudienceProcessor::pressureFromUnit (float value) noexcept
-{
-    return juce::jlimit(0, 127, (int) std::round(juce::jlimit(0.0f, 1.0f, value) * 127.0f));
-}
-
 juce::String AudienceProcessor::getExternalMidiPitchModeName() const
 {
     switch (juce::jlimit(0, 2, externalMidiPitchModeSnapshot.load(std::memory_order_relaxed)))
@@ -842,362 +840,52 @@ juce::String AudienceProcessor::getExternalMidiPitchModeName() const
     }
 }
 
-void AudienceProcessor::resetMidiOutputState() noexcept
+MpeMidiOutput::MpeConfig AudienceProcessor::buildMpeConfig() const
 {
-    for (auto& state : midiOutVoices)
-        state = {};
-
-    for (auto& state : midiVoiceDebug)
-    {
-        state.active.store(0, std::memory_order_relaxed);
-        state.sourceId.store(-1, std::memory_order_relaxed);
-        state.channel.store(0, std::memory_order_relaxed);
-        state.note.store(-1, std::memory_order_relaxed);
-        state.pitchBend.store(8192, std::memory_order_relaxed);
-        state.age.store(0, std::memory_order_relaxed);
-    }
-
-    mpeChannelOwner.fill(-1);
-    midiVoiceAgeCounter = 0;
-    midiNotesSent.store(0, std::memory_order_relaxed);
-    activeMpeVoices.store(0, std::memory_order_relaxed);
-    availableMpeChannels.store(juce::jmax(0, lastMpeMemberLast - lastMpeMemberFirst + 1),
-                               std::memory_order_relaxed);
-}
-
-void AudienceProcessor::sendPitchBendRangeRpn (juce::MidiBuffer& midiMessages, int sampleOffset,
-                                               int channel, int semitones)
-{
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(channel, 101, 0), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(channel, 100, 0), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(channel, 6, juce::jlimit(0, 127, semitones)), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(channel, 38, 0), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(channel, 101, 127), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(channel, 100, 127), sampleOffset);
-}
-
-void AudienceProcessor::sendMpeSetupIfNeeded (juce::MidiBuffer& midiMessages, int sampleOffset)
-{
-    if (! mpeSetupDirty)
-        return;
-
-    if (rawParamInt(rawParams.midiOutputType) != 2
-        || ! rawParamBool(rawParams.mpeSendSetupMessages, true))
-    {
-        mpeSetupDirty = false;
-        return;
-    }
-
-    const int master = juce::jlimit(1, 16, rawParamInt(rawParams.mpeMasterChannel, 1));
-    const int first = juce::jlimit(2, 16, rawParamInt(rawParams.mpeMemberFirstChannel, 2));
-    const int last = juce::jlimit(first, 16, rawParamInt(rawParams.mpeMemberLastChannel, 16));
-    const int bendRange = bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
-
-    const int memberCount = juce::jlimit(0, 15, last - first + 1);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(master, 101, 0), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(master, 100, 6), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(master, 6, memberCount), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(master, 38, 0), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(master, 101, 127), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::controllerEvent(master, 100, 127), sampleOffset);
-
-    for (int ch = first; ch <= last; ++ch)
-        sendPitchBendRangeRpn(midiMessages, sampleOffset, ch, bendRange);
-
-    mpeSetupDirty = false;
-}
-
-void AudienceProcessor::sendAllMidiNotesOff (juce::MidiBuffer& midiMessages, int sampleOffset)
-{
-    for (int ch = 1; ch <= 16; ++ch)
-    {
-        midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 123, 0), sampleOffset);
-        midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 120, 0), sampleOffset);
-        midiMessages.addEvent(juce::MidiMessage::channelPressureChange(ch, 0), sampleOffset);
-        midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, 8192), sampleOffset);
-    }
-}
-
-void AudienceProcessor::sendMidiResetMessages (juce::MidiBuffer& midiMessages, int sampleOffset)
-{
-    for (const auto& state : midiOutVoices)
-    {
-        if (! state.active || state.note < 0)
-            continue;
-
-        const int ch = juce::jlimit(1, 16, state.channel);
-        midiMessages.addEvent(juce::MidiMessage::noteOff(ch, state.note), sampleOffset);
-    }
-
-    sendAllMidiNotesOff(midiMessages, sampleOffset);
-}
-
-void AudienceProcessor::releaseMpeChannelForSource (int sourceId) noexcept
-{
-    for (int ch = 1; ch <= 16; ++ch)
-        if (mpeChannelOwner[(size_t) ch] == sourceId)
-            mpeChannelOwner[(size_t) ch] = -1;
-
-    int active = 0;
-    for (const auto& state : midiOutVoices)
-        if (state.active && state.channel >= lastMpeMemberFirst && state.channel <= lastMpeMemberLast)
-            ++active;
-
-    activeMpeVoices.store(active, std::memory_order_relaxed);
-    availableMpeChannels.store(juce::jmax(0, lastMpeMemberLast - lastMpeMemberFirst + 1 - active),
-                               std::memory_order_relaxed);
-}
-
-void AudienceProcessor::sendNoteOffForSource (int sourceId, juce::MidiBuffer& midiMessages, int sampleOffset)
-{
-    if (sourceId < 0 || sourceId >= (int) midiOutVoices.size())
-        return;
-
-    auto& state = midiOutVoices[(size_t) sourceId];
-    if (! state.active || state.note < 0)
-        return;
-
-    const int ch = juce::jlimit(1, 16, state.channel);
-    midiMessages.addEvent(juce::MidiMessage::noteOff(ch, state.note), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::channelPressureChange(ch, 0), sampleOffset);
-
-    if (rawParamInt(rawParams.midiOutputType) == 2)
-        midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, 8192), sampleOffset);
-
-    // Release the MPE member channel unconditionally. If the output type was
-    // switched away from MPE while this note was held, gating the release on
-    // type==2 leaked the channel, so the member pool shrank over time.
-    state.active = false;
-    releaseMpeChannelForSource(sourceId);
-
-    state = {};
-    auto& debug = midiVoiceDebug[(size_t) sourceId];
-    debug.active.store(0, std::memory_order_relaxed);
-    debug.sourceId.store(sourceId, std::memory_order_relaxed);
-    debug.channel.store(0, std::memory_order_relaxed);
-    debug.note.store(-1, std::memory_order_relaxed);
-    debug.pitchBend.store(8192, std::memory_order_relaxed);
-    debug.age.store(0, std::memory_order_relaxed);
-}
-
-int AudienceProcessor::allocateMpeChannelForSource (int sourceId, juce::MidiBuffer& midiMessages, int sampleOffset)
-{
-    if (sourceId >= 0 && sourceId < (int) midiOutVoices.size())
-    {
-        const auto& state = midiOutVoices[(size_t) sourceId];
-        if (state.active && state.channel >= lastMpeMemberFirst && state.channel <= lastMpeMemberLast)
-            return state.channel;
-    }
-
-    for (int ch = lastMpeMemberFirst; ch <= lastMpeMemberLast; ++ch)
-    {
-        if (mpeChannelOwner[(size_t) ch] < 0)
-        {
-            mpeChannelOwner[(size_t) ch] = sourceId;
-            return ch;
-        }
-    }
-
-    int oldestSource = -1;
-    uint32_t oldestAge = std::numeric_limits<uint32_t>::max();
-    for (const auto& state : midiOutVoices)
-    {
-        if (! state.active || state.channel < lastMpeMemberFirst || state.channel > lastMpeMemberLast)
-            continue;
-
-        if (state.age < oldestAge)
-        {
-            oldestAge = state.age;
-            oldestSource = state.sourceId;
-        }
-    }
-
-    if (oldestSource >= 0)
-    {
-        const int stolenChannel = midiOutVoices[(size_t) oldestSource].channel;
-        sendNoteOffForSource(oldestSource, midiMessages, sampleOffset);
-        mpeChannelOwner[(size_t) stolenChannel] = sourceId;
-        return stolenChannel;
-    }
-
-    return lastMpeMemberFirst;
-}
-
-void AudienceProcessor::sendExpressionForSource (int sourceId, const PartialEngine::MidiSourceEvent& event,
-                                                 juce::MidiBuffer& midiMessages, int sampleOffset, bool force)
-{
-    if (sourceId < 0 || sourceId >= (int) midiOutVoices.size())
-        return;
-
-    auto& state = midiOutVoices[(size_t) sourceId];
-    if (! state.active)
-        return;
-
-    const int type = rawParamInt(rawParams.midiOutputType);
-    const int ch = juce::jlimit(1, 16, state.channel);
-    const int pressure = pressureFromUnit(event.y);
-    const int timbre = pressureFromUnit(juce::jlimit(0.0f, 1.0f,
-        event.x * 0.68f + rawParamValue(rawParams.motionMacro, 0.5f) * 0.32f));
-    const int expression = pressureFromUnit(juce::jlimit(0.0f, 1.0f,
-        event.y * 0.70f + rawParamValue(rawParams.energy, 0.5f) * 0.30f));
-
-    if (type == 2)
-    {
-        const int bendRange = bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
-        const auto pitch = convertFrequencyToMidiPitch(event.frequencyHz, bendRange);
-        if (force || std::abs(pitch.pitchBend14Bit - state.pitchBend) > 1)
-        {
-            midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, pitch.pitchBend14Bit), sampleOffset);
-            state.pitchBend = pitch.pitchBend14Bit;
-            state.frequencyHz = pitch.targetFrequencyHz;
-            midiVoiceDebug[(size_t) sourceId].pitchBend.store(state.pitchBend, std::memory_order_relaxed);
-        }
-
-        if (force || std::abs(pressure - state.pressure) > 1)
-        {
-            midiMessages.addEvent(juce::MidiMessage::channelPressureChange(ch, pressure), sampleOffset);
-            state.pressure = pressure;
-        }
-    }
-
-    if (force || std::abs(timbre - state.timbre) > 1)
-    {
-        midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 74, timbre), sampleOffset);
-        state.timbre = timbre;
-    }
-
-    if (force || std::abs(expression - state.expression) > 1)
-    {
-        midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 11, expression), sampleOffset);
-        state.expression = expression;
-    }
-}
-
-void AudienceProcessor::handleMidiSourceEvent (const PartialEngine::MidiSourceEvent& event,
-                                               juce::MidiBuffer& midiMessages, int sampleOffset)
-{
-    if (event.type == PartialEngine::MidiSourceEvent::AllNotesOff)
-    {
-        sendMidiResetMessages(midiMessages, sampleOffset);
-        resetMidiOutputState();
-        return;
-    }
-
-    const int sourceId = event.sourceId;
-    if (sourceId < 0 || sourceId >= (int) midiOutVoices.size())
-        return;
-
-    if (event.type == PartialEngine::MidiSourceEvent::NoteOff)
-    {
-        sendNoteOffForSource(sourceId, midiMessages, sampleOffset);
-        return;
-    }
-
-    if (event.type == PartialEngine::MidiSourceEvent::Expression)
-    {
-        sendExpressionForSource(sourceId, event, midiMessages, sampleOffset, false);
-        return;
-    }
-
-    const int outputType = rawParamInt(rawParams.midiOutputType);
-    const int bendRange = bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
-    const auto pitch = convertFrequencyToMidiPitch(event.frequencyHz, bendRange);
-    const int velocity = velocityFromUnit(event.velocity);
-
-    auto& state = midiOutVoices[(size_t) sourceId];
-
-    if (outputType == 2
-        && state.active
-        && state.note == pitch.noteNumber
-        && std::abs(pitch.pitchBend14Bit - state.pitchBend) <= 1)
-    {
-        sendExpressionForSource(sourceId, event, midiMessages, sampleOffset, true);
-        return;
-    }
-
-    if (outputType == 2
-        && rawParamInt(rawParams.mpePitchMode) == 1
-        && state.active
-        && state.note == pitch.noteNumber)
-    {
-        sendExpressionForSource(sourceId, event, midiMessages, sampleOffset, true);
-        return;
-    }
-
-    sendNoteOffForSource(sourceId, midiMessages, sampleOffset);
-
-    state.active = true;
-    state.sourceId = sourceId;
-    state.note = outputType == 2 ? pitch.noteNumber : pitch.noteNumber;
-    state.frequencyHz = pitch.targetFrequencyHz;
-    state.age = ++midiVoiceAgeCounter;
-
-    if (outputType == 2)
-    {
-        sendMpeSetupIfNeeded(midiMessages, sampleOffset);
-        const int ch = allocateMpeChannelForSource(sourceId, midiMessages, sampleOffset);
-        state.channel = ch;
-        state.pitchBend = pitch.pitchBend14Bit;
-        mpeChannelOwner[(size_t) ch] = sourceId;
-
-        midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, pitch.pitchBend14Bit), sampleOffset);
-        const int timbre = pressureFromUnit(juce::jlimit(0.0f, 1.0f,
-            event.x * 0.68f + rawParamValue(rawParams.motionMacro, 0.5f) * 0.32f));
-        const int expression = pressureFromUnit(juce::jlimit(0.0f, 1.0f,
-            event.y * 0.70f + rawParamValue(rawParams.energy, 0.5f) * 0.30f));
-        const int pressure = pressureFromUnit(event.y);
-        midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 74, timbre), sampleOffset);
-        midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 11, expression), sampleOffset);
-        midiMessages.addEvent(juce::MidiMessage::noteOn(ch, pitch.noteNumber, (juce::uint8) velocity), sampleOffset);
-        midiMessages.addEvent(juce::MidiMessage::channelPressureChange(ch, pressure), sampleOffset);
-        state.pressure = pressure;
-        state.timbre = timbre;
-        state.expression = expression;
-        auto& debug = midiVoiceDebug[(size_t) sourceId];
-        debug.sourceId.store(sourceId, std::memory_order_relaxed);
-        debug.channel.store(ch, std::memory_order_relaxed);
-        debug.note.store(state.note, std::memory_order_relaxed);
-        debug.pitchBend.store(state.pitchBend, std::memory_order_relaxed);
-        debug.age.store((int) state.age, std::memory_order_relaxed);
-        debug.active.store(1, std::memory_order_release);
-        int active = 0;
-        for (const auto& voiceState : midiOutVoices)
-            if (voiceState.active && voiceState.channel >= lastMpeMemberFirst && voiceState.channel <= lastMpeMemberLast)
-                ++active;
-        activeMpeVoices.store(active, std::memory_order_relaxed);
-        availableMpeChannels.store(juce::jmax(0, lastMpeMemberLast - lastMpeMemberFirst + 1 - active),
-                                   std::memory_order_relaxed);
-    }
-    else
-    {
-        const int ch = juce::jlimit(1, 16, rawParamInt(rawParams.normalMidiChannel, 0) + 1);
-        state.channel = ch;
-        state.pitchBend = 8192;
-        midiMessages.addEvent(juce::MidiMessage::noteOn(ch, state.note, (juce::uint8) velocity), sampleOffset);
-        sendExpressionForSource(sourceId, event, midiMessages, sampleOffset, true);
-        auto& debug = midiVoiceDebug[(size_t) sourceId];
-        debug.sourceId.store(sourceId, std::memory_order_relaxed);
-        debug.channel.store(ch, std::memory_order_relaxed);
-        debug.note.store(state.note, std::memory_order_relaxed);
-        debug.pitchBend.store(state.pitchBend, std::memory_order_relaxed);
-        debug.age.store((int) state.age, std::memory_order_relaxed);
-        debug.active.store(1, std::memory_order_release);
-    }
-
-    midiNotesSent.fetch_add(1, std::memory_order_relaxed);
+    MpeMidiOutput::MpeConfig config;
+    config.outputType           = rawParamInt(rawParams.midiOutputType);
+    config.masterChannel        = rawParamInt(rawParams.mpeMasterChannel, 1);
+    config.memberFirst          = rawParamInt(rawParams.mpeMemberFirstChannel, 2);
+    config.memberLast           = rawParamInt(rawParams.mpeMemberLastChannel, 16);
+    config.pitchBendRangeChoice = rawParamInt(rawParams.mpePitchBendRange, 3);
+    config.normalMidiChannel    = rawParamInt(rawParams.normalMidiChannel, 0);
+    config.sendSetupMessages    = rawParamBool(rawParams.mpeSendSetupMessages, true);
+    config.pitchMode            = rawParamInt(rawParams.mpePitchMode);
+    config.motionMacro          = rawParamValue(rawParams.motionMacro, 0.5f);
+    config.energy               = rawParamValue(rawParams.energy, 0.5f);
+    return config;
 }
 
 void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples)
 {
-    const int outputType = rawParamInt(rawParams.midiOutputType);
-    if (outputType == 2)
-        sendMpeSetupIfNeeded(midiMessages, 0);
+    const auto config = buildMpeConfig();
 
     const int maxEvents = (int) midiSourceScratch.size();
     const int count = engine.drainMidiSourceEvents(midiSourceScratch.data(), maxEvents);
-    const int sampleOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1), 0);
+
+    // Convert PartialEngine::MidiSourceEvent -> MpeMidiOutput::NoteEvent (trivial
+    // field copy + event-type enum mapping). midiNoteEventScratch mirrors the
+    // size of midiSourceScratch so the conversion is allocation-free.
     for (int i = 0; i < count; ++i)
-        handleMidiSourceEvent(midiSourceScratch[(size_t) i], midiMessages, sampleOffset);
+    {
+        const auto& src = midiSourceScratch[(size_t) i];
+        auto& dst = midiNoteEventScratch[(size_t) i];
+        switch (src.type)
+        {
+            case PartialEngine::MidiSourceEvent::NoteOff:     dst.type = MpeMidiOutput::NoteEvent::NoteOff; break;
+            case PartialEngine::MidiSourceEvent::Expression:  dst.type = MpeMidiOutput::NoteEvent::Expression; break;
+            case PartialEngine::MidiSourceEvent::AllNotesOff: dst.type = MpeMidiOutput::NoteEvent::AllNotesOff; break;
+            case PartialEngine::MidiSourceEvent::NoteOn:
+            default:                                          dst.type = MpeMidiOutput::NoteEvent::NoteOn; break;
+        }
+        dst.sourceId    = src.sourceId;
+        dst.frequencyHz = src.frequencyHz;
+        dst.velocity    = src.velocity;
+        dst.x           = src.x;
+        dst.y           = src.y;
+    }
+
+    mpeOut.render(config, midiNoteEventScratch.data(), count, midiMessages, numSamples);
 }
 
 void AudienceProcessor::recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept
@@ -1214,32 +902,6 @@ void AudienceProcessor::recordIncomingMidiDebugEvents (const juce::MidiBuffer& m
 
         const auto seq = incomingMidiDebugWriteCounter.fetch_add(1, std::memory_order_relaxed) + 1;
         auto& slot = incomingMidiDebugEvents[(size_t) ((seq - 1) % midiDebugEventQueueSize)];
-        slot.sequence.store(0, std::memory_order_release);
-        slot.sampleOffset.store(metadata.samplePosition, std::memory_order_relaxed);
-        slot.size.store(rawSize, std::memory_order_relaxed);
-
-        const auto* raw = message.getRawData();
-        slot.byte0.store(rawSize > 0 ? raw[0] : 0, std::memory_order_relaxed);
-        slot.byte1.store(rawSize > 1 ? raw[1] : 0, std::memory_order_relaxed);
-        slot.byte2.store(rawSize > 2 ? raw[2] : 0, std::memory_order_relaxed);
-        slot.sequence.store(seq, std::memory_order_release);
-    }
-}
-
-void AudienceProcessor::recordOutgoingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept
-{
-    if (midiMessages.isEmpty())
-        return;
-
-    for (const auto metadata : midiMessages)
-    {
-        const auto message = metadata.getMessage();
-        const int rawSize = message.getRawDataSize();
-        if (rawSize <= 0 || rawSize > 3)
-            continue;
-
-        const auto seq = midiDebugWriteCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-        auto& slot = midiDebugEvents[(size_t) ((seq - 1) % midiDebugEventQueueSize)];
         slot.sequence.store(0, std::memory_order_release);
         slot.sampleOffset.store(metadata.samplePosition, std::memory_order_relaxed);
         slot.size.store(rawSize, std::memory_order_relaxed);
@@ -1350,7 +1012,7 @@ juce::String AudienceProcessor::getOutgoingMidiDebugText (int maxEvents) const
 
     const int outputMode = rawParamInt(rawParams.audioMidiOutputMode);
     const int midiType = rawParamInt(rawParams.midiOutputType);
-    const int bendRange = bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
+    const int bendRange = MpeMidiOutput::bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
     static const char* outputModeNames[] { "Audio Only", "MIDI Only", "Audio + MIDI" };
     static const char* midiTypeNames[] { "Off", "Normal MIDI", "MPE MIDI" };
 
@@ -1364,8 +1026,8 @@ juce::String AudienceProcessor::getOutgoingMidiDebugText (int maxEvents) const
       << " / available " << getAvailableMpeChannels() << "\n";
     s << "----------------------------------------------\n";
 
-    const auto latest = midiDebugWriteCounter.load(std::memory_order_acquire);
-    const int count = juce::jlimit(0, midiDebugEventQueueSize,
+    const auto latest = mpeOut.getOutgoingDebugLatest();
+    const int count = juce::jlimit(0, MpeMidiOutput::kDebugEventQueueSize,
                                    juce::jmin(maxEvents, (int) latest));
     if (count <= 0)
     {
@@ -1376,16 +1038,15 @@ juce::String AudienceProcessor::getOutgoingMidiDebugText (int maxEvents) const
     const uint32_t firstSeq = latest - (uint32_t) count + 1;
     for (uint32_t seq = firstSeq; seq <= latest; ++seq)
     {
-        const auto& slot = midiDebugEvents[(size_t) ((seq - 1) % midiDebugEventQueueSize)];
-        const auto storedSeq = slot.sequence.load(std::memory_order_acquire);
-        if (storedSeq != seq)
+        MpeMidiOutput::OutgoingDebugEvent slot;
+        if (! mpeOut.readOutgoingDebugSlot(seq, slot))
             continue;
 
-        const int sample = slot.sampleOffset.load(std::memory_order_relaxed);
-        const int size = slot.size.load(std::memory_order_relaxed);
-        const int b0 = slot.byte0.load(std::memory_order_relaxed) & 0xff;
-        const int b1 = slot.byte1.load(std::memory_order_relaxed) & 0xff;
-        const int b2 = slot.byte2.load(std::memory_order_relaxed) & 0xff;
+        const int sample = slot.sampleOffset;
+        const int size = slot.size;
+        const int b0 = slot.b0 & 0xff;
+        const int b1 = slot.b1 & 0xff;
+        const int b2 = slot.b2 & 0xff;
         if (size <= 0)
             continue;
 
@@ -1596,16 +1257,17 @@ juce::String AudienceProcessor::getMidiStateDebugText() const
 
     s << "\nactive MIDI/MPE output voices\n";
     listed = 0;
-    for (const auto& voice : midiVoiceDebug)
+    for (int voiceIndex = 0; voiceIndex < mpeOut.getVoiceDebugCount(); ++voiceIndex)
     {
-        if (voice.active.load(std::memory_order_acquire) == 0)
+        const auto voice = mpeOut.getVoiceDebugSnapshot(voiceIndex);
+        if (voice.active == 0)
             continue;
 
-        const int sourceId = voice.sourceId.load(std::memory_order_relaxed);
-        const int ch = voice.channel.load(std::memory_order_relaxed);
-        const int note = voice.note.load(std::memory_order_relaxed);
-        const int bend = voice.pitchBend.load(std::memory_order_relaxed);
-        const int age = voice.age.load(std::memory_order_relaxed);
+        const int sourceId = voice.sourceId;
+        const int ch = voice.channel;
+        const int note = voice.note;
+        const int bend = voice.pitchBend;
+        const int age = voice.age;
         s << "  src " << juce::String(sourceId).paddedLeft(' ', 4)
           << "  ch " << juce::String(ch).paddedLeft(' ', 2)
           << "  " << noteName(note).paddedRight(' ', 4)
@@ -1718,14 +1380,8 @@ void AudienceProcessor::sendImmediateAllNotesOffToExternal()
     if (midiOutput == nullptr || midiOutputOptionIndex.load(std::memory_order_relaxed) == 0)
         return;
 
-    for (const auto& state : midiOutVoices)
-    {
-        if (! state.active || state.note < 0)
-            continue;
-
-        const int ch = juce::jlimit(1, 16, state.channel);
-        midiOutput->sendMessageNow(juce::MidiMessage::noteOff(ch, state.note));
-    }
+    for (const auto& noteOff : mpeOut.getActiveNoteOffs())
+        midiOutput->sendMessageNow(juce::MidiMessage::noteOff(noteOff.channel, noteOff.note));
 
     for (int ch = 1; ch <= 16; ++ch)
     {
@@ -1735,7 +1391,7 @@ void AudienceProcessor::sendImmediateAllNotesOffToExternal()
         midiOutput->sendMessageNow(juce::MidiMessage::allSoundOff(ch));
     }
 
-    resetMidiOutputState();
+    mpeOut.reset();
 }
 
 void AudienceProcessor::closeMidiOutput()
