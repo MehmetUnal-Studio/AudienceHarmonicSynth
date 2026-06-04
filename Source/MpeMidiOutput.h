@@ -227,7 +227,12 @@ private:
     // offset note landing on a just-freed channel could otherwise be latched with
     // the channel's stale center bend). Initialised to memberLast so the FIRST
     // allocation wraps back to memberFirst, preserving the original first pick.
-    // setMemberRange() resets it to the new memberLast on a zone switch.
+    // setMemberRange() re-arms it to the new memberLast ONLY when the range
+    // actually changes (a zone switch) - it must NOT be reset on the unconditional
+    // per-block same-range calls, or the cursor would be clobbered every block and
+    // round-robin could never advance across audio blocks. reset() (panic/config
+    // change) always re-arms it. The allocator's modulo normalises any cursor value
+    // left out of range, so a stale cursor is always safe.
     int roundRobinCursor = memberLast;
 
     std::atomic<int> midiNotesSent { 0 };

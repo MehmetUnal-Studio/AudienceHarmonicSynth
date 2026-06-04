@@ -915,6 +915,124 @@ int main()
                "round-robin steal: oldest source released and its channel reassigned to the new source");
     }
 
+    // ---- Test 13: ROUND-ROBIN survives the per-block setMemberRange call ----
+    //
+    // Regression for the in-the-wild bug: AudienceProcessor::processBlock calls
+    // mpeOut.setMemberRange(mpeFirst, mpeLast) UNCONDITIONALLY every block. The old
+    // setMemberRange re-armed roundRobinCursor = memberLast every call, so since
+    // sequential notes arrive in SEPARATE blocks, every allocation started its scan
+    // from memberLast and always wrapped back to memberFirst (ch2) - round-robin
+    // never advanced across blocks and "mono notes don't change channels".
+    //
+    // Test 12 missed this because it never re-called setMemberRange between
+    // allocations. This test interleaves a SAME-RANGE setMemberRange(2,16) before
+    // each allocation (simulating the next processBlock). With the BUG that resets
+    // the cursor and every note lands on ch2; with the FIX a same-range call must
+    // NOT re-arm the cursor, so round-robin keeps advancing (ch3, ch4, ...) and
+    // never immediately reuses the just-freed channel. A real range CHANGE still
+    // re-arms (first pick after the change returns the new memberFirst).
+    {
+        MpeMidiOutput mpe;
+        const auto config = mpeConfig(2, 16); // Lower zone: master1, members ch2..16
+
+        // Simulates one processBlock: the unconditional per-block range mirror
+        // followed by the render of that block's events. Allocates `sourceId`,
+        // returns the member channel it landed on.
+        auto blockAllocate = [&] (int sourceId, double freqHz)
+        {
+            mpe.setMemberRange(2, 16);          // <- unconditional per-block call
+            juce::MidiBuffer buffer;
+            const auto ev = noteOn(sourceId, freqHz);
+            mpe.render(config, &ev, 1, buffer, 64);
+            return channelOfSource(mpe, sourceId);
+        };
+
+        auto blockFree = [&] (int sourceId)
+        {
+            mpe.setMemberRange(2, 16);          // <- unconditional per-block call
+            juce::MidiBuffer buffer;
+            const auto ev = noteOff(sourceId);
+            mpe.render(config, &ev, 1, buffer, 64);
+        };
+
+        // Block 1: first allocation wraps to memberFirst (ch2) - the original pick.
+        const int aCh = blockAllocate(0, 220.0);
+        expect(aCh == 2,
+               "per-block RR: first allocation lands on memberFirst (ch2)");
+
+        // Free it (its own block). With the BUG this same-range call resets the
+        // cursor; with the FIX it does not.
+        blockFree(0);
+
+        // Block 2 (separate block, same range): the next note MUST advance to ch3
+        // (round-robin), NOT reuse the just-freed ch2. THIS is what failed in the
+        // wild and what the buggy setMemberRange caused (it would return ch2 here).
+        const int bCh = blockAllocate(1, 277.18);
+        expect(bCh == 3,
+               "per-block RR: after free, next note in a NEW block advances to ch3 (not the just-freed ch2)");
+        expect(bCh != 2,
+               "per-block RR: a just-freed channel (ch2) is NOT immediately reused across blocks");
+
+        // A few more alloc/free cycles, each in its own block (each preceded by the
+        // unconditional setMemberRange): channels must keep advancing and never
+        // immediately reuse the channel freed in the previous block.
+        blockFree(1);                            // frees ch3
+        const int cCh = blockAllocate(2, 329.63);
+        expect(cCh == 4 && cCh != 3,
+               "per-block RR: channel keeps advancing to ch4 (never reuses just-freed ch3)");
+
+        blockFree(2);                            // frees ch4
+        const int dCh = blockAllocate(3, 392.0);
+        expect(dCh == 5 && dCh != 4,
+               "per-block RR: channel keeps advancing to ch5 (never reuses just-freed ch4)");
+
+        blockFree(3);                            // frees ch5
+        const int eCh = blockAllocate(4, 440.0);
+        expect(eCh == 6 && eCh != 5,
+               "per-block RR: channel keeps advancing to ch6 (never reuses just-freed ch5)");
+    }
+
+    // ---- Test 14: a REAL range change DOES re-arm the round-robin cursor ----
+    //
+    // The conditional re-arm must still fire on an actual zone/range change: after
+    // switching the member range, the FIRST allocation should wrap back to the new
+    // memberFirst (the documented zone-switch behaviour), not continue from a stale
+    // cursor left over from the previous range.
+    {
+        MpeMidiOutput mpe;
+
+        // Start in the Lower zone and advance the cursor a couple of channels so a
+        // stale cursor would be clearly distinguishable from memberFirst.
+        {
+            const auto lower = mpeConfig(2, 16); // members ch2..16
+            mpe.setMemberRange(2, 16);
+            juce::MidiBuffer b0;
+            const auto e0 = noteOn(0, 220.0);
+            mpe.render(lower, &e0, 1, b0, 64);   // -> ch2 (cursor now 2)
+            juce::MidiBuffer b1;
+            const auto e1 = noteOn(1, 277.18);
+            mpe.render(lower, &e1, 1, b1, 64);   // -> ch3 (cursor now 3)
+            expect(channelOfSource(mpe, 0) == 2 && channelOfSource(mpe, 1) == 3,
+                   "RR range-change: Lower zone advanced cursor to ch3 before the switch");
+        }
+
+        // Now CHANGE the range to the Upper zone (master16, members ch1..15). This
+        // is a genuine range change, so the cursor MUST be re-armed to the new
+        // memberLast (15) and the first allocation must wrap to the new memberFirst
+        // (ch1) - not continue from the stale Lower-zone cursor (which would give
+        // ch4) and not stick on the old value.
+        const auto upper = mpeConfigUpper(3);    // master16, members ch1..15
+        mpe.setMemberRange(1, 15);               // real range change -> re-arm
+
+        juce::MidiBuffer buffer;
+        const auto ev = noteOn(2, 329.63);
+        mpe.render(upper, &ev, 1, buffer, 64);
+        const int ch = channelOfSource(mpe, 2);
+
+        expect(ch == 1,
+               "RR range-change: first allocation after a real range change wraps to the new memberFirst (ch1)");
+    }
+
     std::cout << "\nSummary: " << (g_failed == 0 ? "ok" : "failed") << "\n";
     return g_failed == 0 ? 0 : 1;
 }

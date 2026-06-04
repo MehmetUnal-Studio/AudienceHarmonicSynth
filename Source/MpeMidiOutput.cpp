@@ -27,13 +27,24 @@ int MpeMidiOutput::pressureFromUnit (float value) noexcept
 
 void MpeMidiOutput::setMemberRange (int first, int last) noexcept
 {
+    // AudienceProcessor::processBlock calls this UNCONDITIONALLY every block, so we
+    // must only re-arm the round-robin cursor when the range ACTUALLY changes.
+    // Otherwise the per-block same-range calls reset the cursor every block, and
+    // because sequential notes arrive in separate blocks every allocation would
+    // start its scan from memberLast and always wrap back to memberFirst (ch2) -
+    // round-robin would never advance across blocks.
+    const bool rangeChanged = (first != memberFirst || last != memberLast);
     memberFirst = first;
     memberLast = last;
 
-    // Reset the round-robin cursor to the (new) last member so a Lower<->Upper
-    // zone switch starts allocation fresh (next pick wraps to memberFirst) and the
-    // cursor is always within the active [memberFirst, memberLast] range.
-    roundRobinCursor = memberLast;
+    // Re-arm the round-robin cursor to the (new) last member ONLY on an actual
+    // zone/range change, so a Lower<->Upper zone switch starts allocation fresh
+    // (next pick wraps to memberFirst) and the cursor stays within the active
+    // [memberFirst, memberLast] range. An out-of-range cursor left over from a
+    // previous range is still safe: allocateMpeChannelForSource normalises any
+    // cursor value via the modulo over the current span.
+    if (rangeChanged)
+        roundRobinCursor = memberLast;
 }
 
 void MpeMidiOutput::reset() noexcept
