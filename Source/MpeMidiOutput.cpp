@@ -29,6 +29,11 @@ void MpeMidiOutput::setMemberRange (int first, int last) noexcept
 {
     memberFirst = first;
     memberLast = last;
+
+    // Reset the round-robin cursor to the (new) last member so a Lower<->Upper
+    // zone switch starts allocation fresh (next pick wraps to memberFirst) and the
+    // cursor is always within the active [memberFirst, memberLast] range.
+    roundRobinCursor = memberLast;
 }
 
 void MpeMidiOutput::reset() noexcept
@@ -47,6 +52,9 @@ void MpeMidiOutput::reset() noexcept
     }
 
     mpeChannelOwner.fill(-1);
+    // Re-arm the round-robin cursor so a freshly reset pool allocates memberFirst
+    // first again (matches the header initialiser and the AllNotesOff/panic path).
+    roundRobinCursor = memberLast;
     midiVoiceAgeCounter = 0;
     midiNotesSent.store(0, std::memory_order_relaxed);
     activeMpeVoices.store(0, std::memory_order_relaxed);
@@ -189,12 +197,24 @@ int MpeMidiOutput::allocateMpeChannelForSource (const MpeConfig& config, int sou
             return state.channel;
     }
 
-    for (int ch = memberFirst; ch <= memberLast; ++ch)
+    // Round-robin free-channel scan: start AFTER the cursor and wrap within
+    // [memberFirst, memberLast]. This still finds ANY free channel, but visits a
+    // just-freed channel LAST, so an immediately following note is not assigned the
+    // channel that was just released. Mitigates a receiver-side per-note
+    // pitch-capture race on immediate channel reuse. The cursor advances to the
+    // channel we hand out.
+    const int span = memberLast - memberFirst + 1;
+    if (span >= 1)
     {
-        if (mpeChannelOwner[(size_t) ch] < 0)
+        for (int i = 1; i <= span; ++i)
         {
-            mpeChannelOwner[(size_t) ch] = sourceId;
-            return ch;
+            const int ch = memberFirst + ((roundRobinCursor - memberFirst + i) % span);
+            if (mpeChannelOwner[(size_t) ch] < 0)
+            {
+                mpeChannelOwner[(size_t) ch] = sourceId;
+                roundRobinCursor = ch;
+                return ch;
+            }
         }
     }
 

@@ -578,6 +578,343 @@ int main()
                "Upper zone: voice released after note-off");
     }
 
+    // ---- Test 11: MPE channel-reuse microtonal re-press (ROUND-ROBIN) ----
+    //
+    // Reproduces the reported "D#2 loses its microtone on re-press" scenario as a
+    // RECEIVER-INDEPENDENT check of OUR emission, now under the round-robin
+    // allocator. Two notes are pressed in a Lower-zone MPE config:
+    //   sourceA: an exact 12-TET frequency  -> bend EXACTLY 8192 (centered root).
+    //   sourceB: a +48-cent microtone       -> bend != 8192 (off-center).
+    // Then BOTH are released (render #2 - channels freed), then BOTH are pressed
+    // again with the same frequencies (render #3 - the re-press the bug report
+    // identifies as the trigger).
+    //
+    // Originally this was a characterization test that documented immediate
+    // "lowest-free" reuse: the re-press landed on the SAME channels just freed in
+    // render #2. The root cause of the in-the-wild bug was that immediate reuse:
+    // an MPE receiver that latches per-note pitch at noteOn could capture a stale
+    // center bend on a channel it just freed, so the offset note (sourceB) lost its
+    // microtone. The fix is round-robin allocation, so a just-freed channel is the
+    // LAST to be reused.
+    //
+    // Under round-robin, the re-press now goes to a FRESH member channel rather than
+    // the just-freed one. This test asserts that NEW behaviour: (a) the re-pressed
+    // offset note (sourceB) still emits the CORRECT pre-noteOn pitch wheel
+    // (== convertFrequencyToMidiPitch(freqB).pitchBend14Bit) BEFORE its noteOn
+    // (byte-correctness, unchanged), AND (b) it does NOT land on the channel it just
+    // freed (no immediate reuse). The raw re-press byte sequence is printed for the
+    // report.
+    {
+        const auto config = mpeConfig(2, 16, 3); // Lower zone: master1, members2-16; bend range 48 st
+        const int bendRange = MpeMidiOutput::bendRangeFromChoice(3);
+
+        const int kSourceA = 0;
+        const int kSourceB = 1;
+
+        // sourceA: A4 = 440 Hz lands EXACTLY on note 69 -> centered bend 8192.
+        const double freqA = kA4;
+        // sourceB: +48 cents above C5 (note 72). Off a 12-TET note by a microtone
+        // that the converter turns into a non-centered 14-bit bend.
+        const double c5 = kA4 * std::pow(2.0, 3.0 / 12.0);          // note 72
+        const double freqB = c5 * std::pow(2.0, 48.0 / 1200.0);     // +48 cents
+
+        const auto pitchA = convertFrequencyToMidiPitch(freqA, bendRange);
+        const auto pitchB = convertFrequencyToMidiPitch(freqB, bendRange);
+
+        // Sanity on the chosen frequencies: A is centered, B is not.
+        expect(pitchA.pitchBend14Bit == 8192,
+               "char/re-press: sourceA frequency is exact 12-TET (bend == 8192, centered root)");
+        expect(pitchB.pitchBend14Bit != 8192,
+               "char/re-press: sourceB frequency is a non-center microtone (bend != 8192)");
+
+        MpeMidiOutput mpe;
+
+        // ---- render #1: press both notes ----
+        juce::MidiBuffer buf1;
+        {
+            const MpeMidiOutput::NoteEvent evs[] {
+                noteOn(kSourceA, freqA),
+                noteOn(kSourceB, freqB),
+            };
+            mpe.render(config, evs, 2, buf1, 64);
+        }
+        const auto msgs1 = decode(buf1);
+
+        // Member channels chosen on the first press.
+        int chA1 = -1, chB1 = -1;
+        for (const auto& m : msgs1)
+            if (m.status == kNoteOn && m.d2 > 0)
+            {
+                if (m.d1 == pitchA.noteNumber && chA1 < 0) chA1 = m.channel;
+                else if (m.d1 == pitchB.noteNumber && chB1 < 0) chB1 = m.channel;
+            }
+        expect(chA1 >= 2 && chB1 >= 2 && chA1 != chB1,
+               "char/re-press: first press puts A and B on distinct member channels");
+
+        // ---- render #2: release both notes ----
+        juce::MidiBuffer buf2;
+        {
+            const MpeMidiOutput::NoteEvent evs[] {
+                noteOff(kSourceA),
+                noteOff(kSourceB),
+            };
+            mpe.render(config, evs, 2, buf2, 64);
+        }
+        const auto msgs2 = decode(buf2);
+
+        // Does note-off recenter each channel's bend to 8192? (state reset probe)
+        const bool offRecentersA = indexOf(msgs2, [chA1] (const Msg& m)
+            { return m.status == kBend && m.channel == chA1 && pitchWheelValue(m) == 8192; }) >= 0;
+        const bool offRecentersB = indexOf(msgs2, [chB1] (const Msg& m)
+            { return m.status == kBend && m.channel == chB1 && pitchWheelValue(m) == 8192; }) >= 0;
+        expect(offRecentersA && offRecentersB,
+               "char/re-press: note-off (render #2) recenters BOTH channels' bend to 8192");
+
+        // ---- render #3: RE-PRESS both notes (same frequencies) ----
+        juce::MidiBuffer buf3;
+        {
+            const MpeMidiOutput::NoteEvent evs[] {
+                noteOn(kSourceA, freqA),
+                noteOn(kSourceB, freqB),
+            };
+            mpe.render(config, evs, 2, buf3, 64);
+        }
+        const auto msgs3 = decode(buf3);
+
+        // Channels chosen on the re-press.
+        int chA3 = -1, chB3 = -1;
+        for (const auto& m : msgs3)
+            if (m.status == kNoteOn && m.d2 > 0)
+            {
+                if (m.d1 == pitchA.noteNumber && chA3 < 0) chA3 = m.channel;
+                else if (m.d1 == pitchB.noteNumber && chB3 < 0) chB3 = m.channel;
+            }
+
+        // Allocation strategy probe: under round-robin the re-press channel must
+        // NOT be the one just freed in render #2 (no immediate reuse).
+        const bool aReusedSameChannel = (chA3 == chA1);
+        const bool bReusedSameChannel = (chB3 == chB1);
+
+        // Per-channel ordered byte dump for the re-press (the report's centrepiece).
+        auto dumpChannel = [&msgs3] (int ch, const char* label)
+        {
+            std::cout << "  [re-press bytes] " << label << " (channel " << ch << "): ";
+            bool any = false;
+            for (const auto& m : msgs3)
+            {
+                if (m.channel != ch) continue;
+                any = true;
+                std::cout << "{";
+                switch (m.status)
+                {
+                    case kNoteOn:   std::cout << "noteOn n=" << m.d1 << " v=" << m.d2; break;
+                    case kNoteOff:  std::cout << "noteOff n=" << m.d1; break;
+                    case kCC:       std::cout << "cc" << m.d1 << "=" << m.d2; break;
+                    case kPressure: std::cout << "pressure=" << m.d1; break;
+                    case kBend:     std::cout << "bend=" << pitchWheelValue(m); break;
+                    default:        std::cout << "status=0x" << std::hex << m.status << std::dec; break;
+                }
+                std::cout << "} ";
+            }
+            if (! any) std::cout << "(no messages)";
+            std::cout << "\n";
+        };
+
+        std::cout << "\n  ---- Test 11 report (MPE re-press, round-robin) ----\n";
+        std::cout << "  allocation strategy: round-robin free-channel (a just-freed channel is reused LAST);"
+                     " oldest-age (LRU) stealing only when the member pool is full\n";
+        std::cout << "  sourceA: note=" << pitchA.noteNumber
+                  << " expectedBend=" << pitchA.pitchBend14Bit << " (centered)"
+                  << " ch(press#1)=" << chA1 << " ch(re-press)=" << chA3
+                  << " reusedSameChannel=" << (aReusedSameChannel ? "yes" : "no") << "\n";
+        std::cout << "  sourceB: note=" << pitchB.noteNumber
+                  << " expectedBend=" << pitchB.pitchBend14Bit << " (NON-center)"
+                  << " ch(press#1)=" << chB1 << " ch(re-press)=" << chB3
+                  << " reusedSameChannel=" << (bReusedSameChannel ? "yes" : "no") << "\n";
+        dumpChannel(chA3, "sourceA");
+        dumpChannel(chB3, "sourceB");
+        std::cout << "  -------------------------------------------------------\n";
+
+        // ROUND-ROBIN: the re-press must NOT reuse the just-freed channels. This is
+        // the fix: a just-freed channel is the LAST to be reused, so the offset note
+        // (sourceB) cannot land on a channel a receiver just freed and latch its
+        // stale center bend. Both notes advance to fresh member channels.
+        expect(chA3 >= 2 && chA3 != chA1,
+               "re-press (round-robin): sourceA does NOT reuse its just-freed channel");
+        expect(chB3 >= 2 && chB3 != chB1,
+               "re-press (round-robin): sourceB does NOT reuse its just-freed channel");
+        expect(chA3 != chB3,
+               "re-press (round-robin): the two re-pressed notes land on distinct member channels");
+
+        // ---- sourceB (NON-center note) re-press emission, on its member channel ----
+        const int bBendIdx3 = indexOf(msgs3, [chB3] (const Msg& m)
+            { return m.status == kBend && m.channel == chB3; });
+        const int bNoteOnIdx3 = indexOf(msgs3, [chB3, &pitchB] (const Msg& m)
+            { return m.status == kNoteOn && m.channel == chB3 && m.d1 == pitchB.noteNumber && m.d2 > 0; });
+
+        expect(bBendIdx3 >= 0 && bNoteOnIdx3 >= 0 && bBendIdx3 < bNoteOnIdx3,
+               "re-press: sourceB emits a pitchWheel BEFORE its noteOn on the fresh (round-robin) channel");
+
+        // The bend that precedes the noteOn carries the CORRECT non-center value.
+        int bBendValueBeforeNoteOn = -1;
+        for (int i = 0; i < (int) msgs3.size() && (bNoteOnIdx3 < 0 || i < bNoteOnIdx3); ++i)
+            if (msgs3[(size_t) i].status == kBend && msgs3[(size_t) i].channel == chB3)
+                bBendValueBeforeNoteOn = pitchWheelValue(msgs3[(size_t) i]);
+        expect(bBendValueBeforeNoteOn == pitchB.pitchBend14Bit,
+               "re-press: sourceB's pre-noteOn pitchWheel equals convertFrequencyToMidiPitch(freqB).pitchBend14Bit (CORRECT microtone)");
+
+        // ---- sourceA (centered root) re-press emission, on its member channel ----
+        const int aBendIdx3 = indexOf(msgs3, [chA3] (const Msg& m)
+            { return m.status == kBend && m.channel == chA3; });
+        const int aNoteOnIdx3 = indexOf(msgs3, [chA3, &pitchA] (const Msg& m)
+            { return m.status == kNoteOn && m.channel == chA3 && m.d1 == pitchA.noteNumber && m.d2 > 0; });
+
+        expect(aBendIdx3 >= 0 && aNoteOnIdx3 >= 0 && aBendIdx3 < aNoteOnIdx3,
+               "re-press: sourceA emits a pitchWheel BEFORE its noteOn on the fresh (round-robin) channel");
+
+        int aBendValueBeforeNoteOn = -1;
+        for (int i = 0; i < (int) msgs3.size() && (aNoteOnIdx3 < 0 || i < aNoteOnIdx3); ++i)
+            if (msgs3[(size_t) i].status == kBend && msgs3[(size_t) i].channel == chA3)
+                aBendValueBeforeNoteOn = pitchWheelValue(msgs3[(size_t) i]);
+        expect(aBendValueBeforeNoteOn == 8192 && pitchA.pitchBend14Bit == 8192,
+               "re-press: sourceA's pre-noteOn pitchWheel is 8192 (centered root, as expected)");
+
+        // Voice accounting unchanged after the cycle: two voices active again.
+        expect(mpe.getActiveMpeVoices() == 2,
+               "re-press: two MPE voices active again after the re-press");
+    }
+
+    // ---- Test 12: ROUND-ROBIN allocation - just-freed channel is reused LAST ----
+    //
+    // Locks the round-robin allocator: from a fresh state three distinct sources
+    // take consecutive member channels (memberFirst, +1, +2 = ch2,3,4); after ALL
+    // three are freed, a NEW note must NOT reuse the just-freed LOWEST channel (ch2)
+    // - it advances round-robin to the next channel (ch5) so a just-freed channel is
+    // the LAST to be reused. Two more notes keep advancing to distinct channels.
+    // Finally, when the member pool is FULL, voice-stealing still steals the OLDEST
+    // (unchanged). Together this proves no immediate channel reuse + intact stealing.
+
+    // Reads the member channel currently owned by `sourceId` from the voice-debug
+    // snapshots (the same accessor Test 4 uses), or -1 if not active.
+    auto channelOfSource = [] (const MpeMidiOutput& mpe, int sourceId)
+    {
+        for (int i = 0; i < mpe.getVoiceDebugCount(); ++i)
+        {
+            const auto v = mpe.getVoiceDebugSnapshot(i);
+            if (v.active && v.sourceId == sourceId)
+                return v.channel;
+        }
+        return -1;
+    };
+
+    {
+        MpeMidiOutput mpe;
+        const auto config = mpeConfig(2, 16); // Lower zone: members ch2..16
+
+        // ---- allocate three distinct sources from a fresh pool ----
+        {
+            juce::MidiBuffer buffer;
+            const MpeMidiOutput::NoteEvent evs[] {
+                noteOn(0, 220.0),
+                noteOn(1, 277.18),
+                noteOn(2, 329.63),
+            };
+            mpe.render(config, evs, 3, buffer, 64);
+        }
+
+        const int ch0 = channelOfSource(mpe, 0);
+        const int ch1 = channelOfSource(mpe, 1);
+        const int ch2 = channelOfSource(mpe, 2);
+
+        expect(ch0 == 2 && ch1 == 3 && ch2 == 4,
+               "round-robin: three fresh sources take consecutive member channels (ch2, ch3, ch4)");
+        expect(ch0 != ch1 && ch0 != ch2 && ch1 != ch2,
+               "round-robin: the three fresh channels are distinct");
+
+        // ---- free ALL three ----
+        {
+            juce::MidiBuffer buffer;
+            const MpeMidiOutput::NoteEvent evs[] {
+                noteOff(0),
+                noteOff(1),
+                noteOff(2),
+            };
+            mpe.render(config, evs, 3, buffer, 64);
+        }
+        expect(mpe.getActiveMpeVoices() == 0,
+               "round-robin: all three voices released before the re-allocation probe");
+
+        // ---- a NEW note must NOT reuse the just-freed LOWEST channel (ch2) ----
+        {
+            juce::MidiBuffer buffer;
+            const auto ev = noteOn(3, 392.0);
+            mpe.render(config, &ev, 1, buffer, 64);
+        }
+        const int ch3 = channelOfSource(mpe, 3);
+
+        expect(ch3 == 5,
+               "round-robin: after freeing ch2/3/4, the next note advances to ch5 (not the just-freed ch2)");
+        expect(ch3 != 2,
+               "round-robin: a just-freed channel (ch2) is NOT immediately reused");
+
+        // ---- two more notes keep advancing to distinct channels ----
+        {
+            juce::MidiBuffer buffer;
+            const MpeMidiOutput::NoteEvent evs[] {
+                noteOn(4, 440.0),
+                noteOn(5, 523.25),
+            };
+            mpe.render(config, evs, 2, buffer, 64);
+        }
+        const int ch4 = channelOfSource(mpe, 4);
+        const int ch5 = channelOfSource(mpe, 5);
+
+        expect(ch4 == 6 && ch5 == 7,
+               "round-robin: subsequent notes keep advancing (ch6, ch7)");
+        expect(ch3 != ch4 && ch3 != ch5 && ch4 != ch5,
+               "round-robin: the advancing channels are distinct");
+    }
+
+    // ---- voice-stealing is UNCHANGED under round-robin: steal the OLDEST ----
+    {
+        const int first = 2, last = 4; // only 3 member channels -> pool fills fast
+        MpeMidiOutput mpe;
+        mpe.setMemberRange(first, last);
+        const auto config = mpeConfig(first, last);
+
+        // Fill all three channels (sources 0,1,2).
+        {
+            juce::MidiBuffer warmup;
+            const MpeMidiOutput::NoteEvent evs[] {
+                noteOn(0, 220.0),
+                noteOn(1, 277.18),
+                noteOn(2, 329.63),
+            };
+            mpe.render(config, evs, 3, warmup, 64);
+        }
+
+        const int oldestChannel = channelOfSource(mpe, 0); // source 0 is the oldest
+        expect(oldestChannel >= first && oldestChannel <= last,
+               "round-robin steal: oldest source (0) holds a valid member channel before the pool is full");
+
+        // A fourth source with the pool full must STEAL the oldest channel (not pick
+        // any free one - there are none), exactly as before the round-robin change.
+        juce::MidiBuffer buffer;
+        const auto ev = noteOn(3, 392.0);
+        mpe.render(config, &ev, 1, buffer, 64);
+        const auto msgs = decode(buffer);
+
+        const int stolenNoteOffIdx = indexOf(msgs, [oldestChannel] (const Msg& m)
+            { return m.status == kNoteOff && m.channel == oldestChannel; });
+        const int newNoteOnIdx = indexOf(msgs, [oldestChannel] (const Msg& m)
+            { return m.status == kNoteOn && m.channel == oldestChannel && m.d2 > 0; });
+
+        expect(stolenNoteOffIdx >= 0 && newNoteOnIdx >= 0 && stolenNoteOffIdx < newNoteOnIdx,
+               "round-robin steal: full pool steals the OLDEST channel (note-off precedes the reusing note-on)");
+        expect(channelOfSource(mpe, 0) == -1 && channelOfSource(mpe, 3) == oldestChannel,
+               "round-robin steal: oldest source released and its channel reassigned to the new source");
+    }
+
     std::cout << "\nSummary: " << (g_failed == 0 ? "ok" : "failed") << "\n";
     return g_failed == 0 ? 0 : 1;
 }

@@ -219,6 +219,17 @@ private:
     int memberFirst = 2;
     int memberLast = 16;
 
+    // Round-robin allocation cursor: allocateMpeChannelForSource scans for a free
+    // member channel starting AFTER this cursor and wrapping within
+    // [memberFirst, memberLast], then sets the cursor to the channel it returns.
+    // This makes a just-freed channel the LAST to be reused, which mitigates a
+    // receiver-side per-note pitch-capture race on immediate channel reuse (an
+    // offset note landing on a just-freed channel could otherwise be latched with
+    // the channel's stale center bend). Initialised to memberLast so the FIRST
+    // allocation wraps back to memberFirst, preserving the original first pick.
+    // setMemberRange() resets it to the new memberLast on a zone switch.
+    int roundRobinCursor = memberLast;
+
     std::atomic<int> midiNotesSent { 0 };
     std::atomic<int> activeMpeVoices { 0 };
     std::atomic<int> availableMpeChannels { 15 };
