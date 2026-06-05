@@ -792,7 +792,9 @@ void AudienceProcessor::processIncomingMidiKeyboard (const juce::MidiBuffer& mid
         // produced a Note Off/On storm that destabilised polyphonic per-note pitch bends
         // (the receiver collapsed to 12-TET). Holding a key is a single press, so any
         // further Note On with no intervening Note Off is redundant -> keep the voice.
-        // Real re-strikes still work: they send Note Off first, which frees the slot.
+        // Re-strikes across blocks still work: the Note Off in an earlier block frees
+        // the slot, so the later Note On allocates fresh. (A same-block NoteOff+NoteOn
+        // collapses into pendingAction, so a re-strike within one block is dropped.)
         if (alreadyActive && pendingForcedOff[(size_t) key] == 0)
         {
             refreshActiveKeyCount();
@@ -1434,6 +1436,16 @@ void AudienceProcessor::sendImmediateAllNotesOffToExternal()
     if (midiOutput == nullptr || midiOutputOptionIndex.load(std::memory_order_relaxed) == 0)
         return;
 
+    // This runs on the message thread but reads (getActiveNoteOffs) and then
+    // mutates (reset) the non-atomic MPE voice state that the audio thread also
+    // touches in mpeOut.render(). Halt the audio thread for the whole read+mutate
+    // window so the two threads never touch that state concurrently - same pattern
+    // as setSampleDirectory wrapping engine.loadSampleLibrary. None of the callers
+    // (setMidiOutputOptionIndex, panic, closeMidiOutput, the destructor, the
+    // setStateInformation timer path) are themselves inside a suspendProcessing
+    // block, so this does not nest / resume the audio thread prematurely.
+    suspendProcessing(true);
+
     for (const auto& noteOff : mpeOut.getActiveNoteOffs())
         midiOutput->sendMessageNow(juce::MidiMessage::noteOff(noteOff.channel, noteOff.note));
 
@@ -1446,6 +1458,8 @@ void AudienceProcessor::sendImmediateAllNotesOffToExternal()
     }
 
     mpeOut.reset();
+
+    suspendProcessing(false);
 }
 
 void AudienceProcessor::closeMidiOutput()

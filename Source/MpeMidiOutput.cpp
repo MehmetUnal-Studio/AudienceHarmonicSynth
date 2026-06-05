@@ -217,9 +217,17 @@ int MpeMidiOutput::allocateMpeChannelForSource (const MpeConfig& config, int sou
     const int span = memberLast - memberFirst + 1;
     if (span >= 1)
     {
+        // Normalise the cursor offset into [0, span) BEFORE scanning. C++ `%` keeps
+        // the sign of the dividend, so if roundRobinCursor is ever left out of range
+        // (< memberFirst), the raw (cursor - memberFirst + i) % span could be
+        // negative and place ch below memberFirst (even on the master channel). For
+        // an in-range cursor off == (cursor - memberFirst), so the computed channels
+        // are byte-identical to before; for any out-of-range cursor off is clamped
+        // into [0, span) so ch always stays within [memberFirst, memberLast].
+        const int off = (((roundRobinCursor - memberFirst) % span) + span) % span;
         for (int i = 1; i <= span; ++i)
         {
-            const int ch = memberFirst + ((roundRobinCursor - memberFirst + i) % span);
+            const int ch = memberFirst + ((off + i) % span);
             if (mpeChannelOwner[(size_t) ch] < 0)
             {
                 mpeChannelOwner[(size_t) ch] = sourceId;
@@ -359,7 +367,7 @@ void MpeMidiOutput::handleMidiSourceEvent (const MpeConfig& config, const NoteEv
 
     state.active = true;
     state.sourceId = sourceId;
-    state.note = outputType == 2 ? pitch.noteNumber : pitch.noteNumber;
+    state.note = pitch.noteNumber;
     state.frequencyHz = pitch.targetFrequencyHz;
     state.age = ++midiVoiceAgeCounter;
 

@@ -184,7 +184,7 @@ private:
     // to re-send the MPE setup / issue a safety all-notes-off.
     int lastAudioMidiOutputMode = 0;
     int lastMidiOutputType = 0;
-    int lastMpeBendRange = 48;
+    int lastMpeBendRange = 2;
     // B8: zone-derived MPE channel trackers. Defaults match the Lower zone
     // (master 1, members 2..16) so the first block with the default zone detects
     // no spurious change. A Lower<->Upper switch changes master/first/last and is

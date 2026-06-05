@@ -276,7 +276,6 @@ private:
         int    sourceMode = 0;
         int    playbackMode = 0;
         int    elementIndex = 0;
-        int    elementPartials = 0;
         std::array<float, MAX_ELEMENT_PARTIALS> elementPhase {};
 
         // per-voice slow LFOs (Hz already encoded as phase increment in rad/sample)

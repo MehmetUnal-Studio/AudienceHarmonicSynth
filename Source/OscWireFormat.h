@@ -151,7 +151,14 @@ namespace osc_wire
         while (*p >= '0' && *p <= '9')
         {
             hasCol = true;
-            col = col * 10 + (*p - '0');
+            // Once col reaches maxCols it will be rejected below regardless of its
+            // exact value, so clamp it there instead of continuing to grow it. A
+            // pathological all-digit column would otherwise signed-overflow int
+            // (UB). Valid columns (< maxCols) accumulate exactly as before.
+            if (col < maxCols)
+                col = col * 10 + (*p - '0');
+            if (col > maxCols)
+                col = maxCols;
             ++p;
         }
 

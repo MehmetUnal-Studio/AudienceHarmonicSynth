@@ -2144,7 +2144,6 @@ void PartialEngine::reset()
             v.sourceMode = kEngineSampleLibrary;
             v.playbackMode = kSamplePlaybackDirect;
             v.elementIndex = kElementHelium;
-            v.elementPartials = 0;
             v.elementPhase.fill(0.0f);
         v.pitchLfoPhase = v.pitchLfoInc = v.pitchLfoDepth = 0.0f;
         v.ampLfoPhase   = v.ampLfoInc   = v.ampLfoDepth   = 0.0f;
@@ -2737,7 +2736,6 @@ void PartialEngine::clearAllVoices()
             v.sourceMode = kEngineSampleLibrary;
             v.playbackMode = kSamplePlaybackDirect;
             v.elementIndex = kElementHelium;
-            v.elementPartials = 0;
             v.elementPhase.fill(0.0f);
         for (auto& g : v.grains)
         {
@@ -3479,8 +3477,6 @@ int PartialEngine::allocateVoice (int row, int col, int midi,
                                   samplePlaybackMode.load(std::memory_order_relaxed));
     v.elementIndex = juce::jlimit(kElementHydrogen, kLastElement,
                                   spectralElement.load(std::memory_order_relaxed));
-    v.elementPartials = juce::jlimit(1, MAX_ELEMENT_PARTIALS,
-                                     elementLineCount(atomicScaleCache->sets, v.elementIndex));
     for (auto& phase : v.elementPhase)
         phase = rngVoice.nextFloat() * kTwoPi;
 
@@ -3591,7 +3587,6 @@ void PartialEngine::freeVoice (int idx)
         v.sourceMode = kEngineSampleLibrary;
         v.playbackMode = kSamplePlaybackDirect;
         v.elementIndex = kElementHelium;
-        v.elementPartials = 0;
         v.elementPhase.fill(0.0f);
     for (auto& g : v.grains)
     {

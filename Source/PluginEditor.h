@@ -28,8 +28,6 @@ private:
     void timerCallback() override;
     void paintBrandMark (juce::Graphics&, juce::Rectangle<float>);
     void paintWindowDots (juce::Graphics&, juce::Rectangle<int>);
-    void paintBedPanel  (juce::Graphics&, juce::Rectangle<int>);
-    void paintParticlePanel (juce::Graphics&, juce::Rectangle<int>);
     void paintModulePanel (juce::Graphics&, juce::Rectangle<int>);
     void paintMacroPanel (juce::Graphics&, juce::Rectangle<int>);
     void paintScaleKeyboard (juce::Graphics&, juce::Rectangle<int>);

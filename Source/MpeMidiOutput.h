@@ -231,8 +231,11 @@ private:
     // actually changes (a zone switch) - it must NOT be reset on the unconditional
     // per-block same-range calls, or the cursor would be clobbered every block and
     // round-robin could never advance across audio blocks. reset() (panic/config
-    // change) always re-arms it. The allocator's modulo normalises any cursor value
-    // left out of range, so a stale cursor is always safe.
+    // change) always re-arms it. Before scanning, the allocator normalises the
+    // cursor offset to a non-negative value in [0, span) ((((cursor - memberFirst)
+    // % span) + span) % span), so even a cursor left out of range (below
+    // memberFirst) cannot produce a channel below memberFirst - a stale cursor is
+    // always safe.
     int roundRobinCursor = memberLast;
 
     std::atomic<int> midiNotesSent { 0 };
