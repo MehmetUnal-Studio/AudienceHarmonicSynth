@@ -27,6 +27,28 @@ namespace
     // replacing what used to be a bare, unexplained literal 7.
     const juce::String kSpectralScaleAnchorName { "Hydrogen Spectrum" };
     constexpr int      kBaseMusicalScaleCount = 7;
+
+    // Visible-spectrum nm -> RGB (CIE-ish approximation), matching the mapping the
+    // audience map / wavelength wheel use, so the Element Spectra selection is
+    // tinted by the same element-identity hue (FIX 8). Returns mid-grey outside
+    // the visible band so callers can simply blend toward it.
+    juce::Colour wavelengthColourNm (double nm)
+    {
+        double r = 0.0, gg = 0.0, b = 0.0;
+        if      (nm >= 380.0 && nm < 440.0) { r = -(nm - 440.0) / 60.0; b = 1.0; }
+        else if (nm >= 440.0 && nm < 490.0) { gg = (nm - 440.0) / 50.0; b = 1.0; }
+        else if (nm >= 490.0 && nm < 510.0) { gg = 1.0; b = -(nm - 510.0) / 20.0; }
+        else if (nm >= 510.0 && nm < 580.0) { r = (nm - 510.0) / 70.0; gg = 1.0; }
+        else if (nm >= 580.0 && nm < 645.0) { r = 1.0; gg = -(nm - 645.0) / 65.0; }
+        else if (nm >= 645.0 && nm <= 750.0) { r = 1.0; }
+        else return juce::Colour(0xff8a8f99);
+
+        double f = 1.0;
+        if      (nm >= 380.0 && nm < 420.0) f = 0.3 + 0.7 * (nm - 380.0) / 40.0;
+        else if (nm >= 645.0 && nm <= 750.0) f = 0.3 + 0.7 * (750.0 - nm) / 105.0;
+        return juce::Colour::fromFloatRGBA ((float) (r * f), (float) (gg * f), (float) (b * f), 1.0f)
+                   .withBrightness(0.85f);
+    }
 }
 
 LibraryRail::LibraryRail (AudienceProcessor& p) : proc(p)
@@ -193,11 +215,32 @@ void LibraryRail::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bo
         && row < elementIndices.size())
         selected = elementIndices[row] == (int) proc.apvts.getRawParameterValue("spectralElement")->load();
 
+    // Tint the *selected* Element Spectra row by the active element's reference
+    // wavelength so its identity colour matches the audience map (FIX 8). Sample
+    // libraries keep the original teal accent unchanged.
+    juce::Colour selFill   = kRowSelected;
+    juce::Colour selStroke = kAccent;
+    if (selected && railMode == RailMode::Elements)
+    {
+        const auto ec = wavelengthColourNm(proc.engine.getSpectralElementRootWavelengthNm());
+        selFill   = kRowSelected.interpolatedWith(ec, 0.30f);
+        selStroke = kAccent.interpolatedWith(ec, 0.55f);
+    }
+
     auto bounds = juce::Rectangle<float>(2.0f, 2.0f, (float) w - 4.0f, (float) h - 4.0f);
-    g.setColour(selected ? kRowSelected : juce::Colours::transparentBlack);
+    g.setColour(selected ? selFill : juce::Colours::transparentBlack);
     g.fillRoundedRectangle(bounds, 4.0f);
-    g.setColour(selected ? kAccent.withAlpha(0.6f) : kHairline);
+    g.setColour(selected ? selStroke.withAlpha(0.6f) : kHairline);
     g.drawRoundedRectangle(bounds, 4.0f, selected ? 1.0f : 0.5f);
+
+    // A slim identity swatch at the row's leading edge reinforces the element
+    // colour without disturbing the existing text layout.
+    if (selected && railMode == RailMode::Elements)
+    {
+        g.setColour(selStroke);
+        g.fillRoundedRectangle(bounds.getX() + 3.0f, bounds.getY() + 5.0f, 3.0f,
+                               bounds.getHeight() - 10.0f, 1.5f);
+    }
 
     const auto rowCount = railMode == RailMode::Samples ? libraryNames.size() : elementNames.size();
     if (row < 0 || row >= rowCount) return;

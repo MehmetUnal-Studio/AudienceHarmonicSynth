@@ -129,6 +129,24 @@ juce::Colour AuroraComponent::bandColour (float t) const
     return juce::Colour::fromHSV(200.0f / 360.0f, 0.6f, L, 1.0f);
 }
 
+bool AuroraComponent::elementTint (juce::Colour& out) const
+{
+    // Only the Element Spectral engine carries an "element identity"; Sample
+    // Library playback keeps the neutral spectrum palette unchanged (FIX 8).
+    if (engine.engineSource.load(std::memory_order_relaxed) != 1)
+        return false;
+
+    const double nm = engine.getSpectralElementRootWavelengthNm();
+    if (nm < 360.0 || nm > 780.0)
+        return false;
+
+    // Reuse the same visible-spectrum nm->RGB mapping used by the wavelength
+    // wheel so the tint matches the readout the user already sees elsewhere.
+    // Lift the brightness so it reads as a hue rather than a near-black colour.
+    out = wavelengthColour(nm).withBrightness(0.85f);
+    return true;
+}
+
 void AuroraComponent::resized() {}
 
 void AuroraComponent::timerCallback()
@@ -179,6 +197,9 @@ void AuroraComponent::timerCallback()
                 p.decay  = 0.4f + rng.nextFloat() * 0.6f;
                 p.radius = 1.0f + rng.nextFloat() * 1.8f;
                 p.colour = bandColour(ti).interpolatedWith(juce::Colours::white, 0.4f);
+                juce::Colour pTint;
+                if (elementTint(pTint))
+                    p.colour = p.colour.interpolatedWith(pTint, 0.35f);
                 particles.push_back(p);
             }
         }
@@ -200,6 +221,13 @@ void AuroraComponent::paint (juce::Graphics& g)
     const float W = (float) getWidth();
     const float H = (float) getHeight();
     if (W <= 0 || H <= 0) return;
+
+    // Active-element identity tint (FIX 8). When set, the audience seats and the
+    // scale-strip beams are nudged toward the element's reference-wavelength hue
+    // so the whole visualization reads as "this element". Sample mode -> no tint.
+    juce::Colour elementCol;
+    const bool   tinted = elementTint(elementCol);
+    const float  tintAmt = tinted ? 0.42f : 0.0f;
 
     // ---- background ----
     juce::ColourGradient bg(juce::Colour(0xff0b0f16), W * 0.5f, H * 0.0f,
@@ -279,7 +307,9 @@ void AuroraComponent::paint (juce::Graphics& g)
 
                 const float xNorm = engine.getSeatX(row, col);
                 const float amp = juce::jlimit(0.0f, 1.0f, engine.getSeatY(row, col));
-                const auto colr = bandColour(xNorm).interpolatedWith(juce::Colour(0xffeff7ff), 0.16f);
+                auto colr = bandColour(xNorm).interpolatedWith(juce::Colour(0xffeff7ff), 0.16f);
+                if (tinted)
+                    colr = colr.interpolatedWith(elementCol, tintAmt);
                 const float activeR = activeBaseR * (0.82f + amp * 0.5f);
 
                 // soft outer glow
@@ -302,6 +332,30 @@ void AuroraComponent::paint (juce::Graphics& g)
         g.drawText("LOW PITCH / STAGE", map.getX() + 8, map.getY() + 6, 140, 12, juce::Justification::left);
         g.drawText("MID", map.getCentreX() - 28, map.getY() + 6, 56, 12, juce::Justification::centred);
         g.drawText("HIGH PITCH / STAGE", map.getRight() - 142, map.getY() + 6, 134, 12, juce::Justification::right);
+
+        // ---- empty-state hint (FIX 4) ----
+        // No audience and nothing sounding: tell the operator the engine is
+        // waiting and on which UDP port it's listening for OSC. Kept dim and
+        // centred so a live audience never sees it (it vanishes once seats or
+        // voices appear).
+        if (engine.getRegisteredSeatCount() == 0 && engine.getActiveVoiceCount() == 0)
+        {
+            auto hint = map.reduced(24, 0);
+            const int cy = map.getCentreY();
+
+            g.setColour(juce::Colour(0xff6f7783).withAlpha(0.92f));
+            g.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+            g.drawText("Waiting for audience",
+                       hint.getX(), cy - 26, hint.getWidth(), 22, juce::Justification::centred);
+
+            const juce::String sub = listening
+                ? ("Listening for OSC on UDP " + juce::String(listenPort))
+                : (listenPort > 0 ? ("OSC port " + juce::String(listenPort) + " unavailable")
+                                  : juce::String("OSC bridge offline"));
+            g.setColour((listening ? juce::Colour(0xff5b636f) : juce::Colour(0xff7a5b5b)).withAlpha(0.92f));
+            g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 11.0f, juce::Font::plain)));
+            g.drawText(sub, hint.getX(), cy + 2, hint.getWidth(), 16, juce::Justification::centred);
+        }
     }
 
     // ---- bottom spectral scale strip ----
@@ -584,7 +638,9 @@ void AuroraComponent::paint (juce::Graphics& g)
                                         ? midiEnergy[(size_t) midi] : 0.0f);
             const float activeNorm = maxScaleEnergy > 0.0f ? juce::jlimit(0.0f, 1.0f, activity / maxScaleEnergy)
                                                            : 0.0f;
-            const auto col = interpStops(1.0f - t);
+            auto col = interpStops(1.0f - t);
+            if (tinted)
+                col = col.interpolatedWith(elementCol, tintAmt * 0.7f);
             const bool active = activity > 0.015f;
             const float alpha = active ? 0.62f + activeNorm * 0.34f : 0.24f;
             const float lineW = active ? 1.8f + activeNorm * 2.6f : 1.25f;
