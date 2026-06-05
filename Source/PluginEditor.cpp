@@ -355,6 +355,8 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     for (int i = 0; i < bendRanges.size(); ++i) mpeBendRangeCombo.addItem(bendRanges[i], i + 1);
     const juce::StringArray mpePitchModes { "Retrig", "Glide" };
     for (int i = 0; i < mpePitchModes.size(); ++i) mpePitchModeCombo.addItem(mpePitchModes[i], i + 1);
+    const juce::StringArray mpeZones { "Lower", "Upper" };
+    for (int i = 0; i < mpeZones.size(); ++i) mpeZoneCombo.addItem(mpeZones[i], i + 1);
     styleCombo(rootCombo);
     styleCombo(rootOctaveCombo);
     styleCombo(scaleCombo);
@@ -365,22 +367,27 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     styleCombo(normalMidiChannelCombo);
     styleCombo(mpeBendRangeCombo);
     styleCombo(mpePitchModeCombo);
+    styleCombo(mpeZoneCombo);
     styleCombo(midiOutputDeviceCombo);
     styleKnob(octavesSlider, cs::accBlue);
     octavesSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     octavesSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 42, 20);
     octavesSlider.setTextValueSuffix(" oct");
-    styleLabel(rootLabel,    "ROOT");
-    styleLabel(rootOctaveLabel, "OCT");
-    styleLabel(scaleLabel,   "SCALE");
-    styleLabel(octavesLabel, "RANGE");
-    styleLabel(polyphonyLabel, "POLY");
-    styleLabel(audioMidiOutputModeLabel, "OUTPUT MODE");
-    styleLabel(midiOutputTypeLabel, "MIDI OUT");
-    styleLabel(externalMidiPitchModeLabel, "MIDI IN");
-    styleLabel(normalMidiChannelLabel, "CH");
-    styleLabel(mpeBendRangeLabel, "BEND");
-    styleLabel(mpePitchModeLabel, "MPE PITCH");
+    // FIX D: the scale + MPE/MIDI output-row key labels are the most cramped and
+    // sat at the dim cs::text3. Bump them to the higher-contrast cs::text2 (colour
+    // only — no size change — so the 12px-tall label bounds can never clip).
+    styleLabel(rootLabel,    "ROOT", cs::text2);
+    styleLabel(rootOctaveLabel, "OCT", cs::text2);
+    styleLabel(scaleLabel,   "SCALE", cs::text2);
+    styleLabel(octavesLabel, "RANGE", cs::text2);
+    styleLabel(polyphonyLabel, "POLY", cs::text2);
+    styleLabel(audioMidiOutputModeLabel, "OUTPUT MODE", cs::text2);
+    styleLabel(midiOutputTypeLabel, "MIDI OUT", cs::text2);
+    styleLabel(externalMidiPitchModeLabel, "MIDI IN", cs::text2);
+    styleLabel(normalMidiChannelLabel, "CH", cs::text2);
+    styleLabel(mpeBendRangeLabel, "BEND", cs::text2);
+    styleLabel(mpePitchModeLabel, "MPE PITCH", cs::text2);
+    styleLabel(mpeZoneLabel, "ZONE", cs::text2);
     styleLabel(midiOutputDeviceLabel, "MIDI OUTPUT", cs::accBlue);
     midiOutputStatusLabel.setJustificationType(juce::Justification::centredLeft);
     midiOutputStatusLabel.setColour(juce::Label::textColourId, cs::text3);
@@ -408,6 +415,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     addAndMakeVisible(normalMidiChannelCombo);
     addAndMakeVisible(mpeBendRangeCombo);
     addAndMakeVisible(mpePitchModeCombo);
+    addAndMakeVisible(mpeZoneCombo);
     addAndMakeVisible(midiOutputDeviceCombo);
     addAndMakeVisible(mpeSetupToggle);
     addAndMakeVisible(midiOutputRefreshBtn);
@@ -423,6 +431,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     addAndMakeVisible(normalMidiChannelLabel);
     addAndMakeVisible(mpeBendRangeLabel);
     addAndMakeVisible(mpePitchModeLabel);
+    addAndMakeVisible(mpeZoneLabel);
     addAndMakeVisible(midiOutputDeviceLabel);
     addAndMakeVisible(midiOutputStatusLabel);
     addAndMakeVisible(midiActivityLabel);
@@ -475,6 +484,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     normalMidiChannelAttach = std::make_unique<CA>(proc.apvts, "normalMidiChannel", normalMidiChannelCombo);
     mpeBendRangeAttach = std::make_unique<CA>(proc.apvts, "mpePitchBendRange", mpeBendRangeCombo);
     mpePitchModeAttach = std::make_unique<CA>(proc.apvts, "mpePitchMode", mpePitchModeCombo);
+    mpeZoneAttach = std::make_unique<CA>(proc.apvts, "mpeZone", mpeZoneCombo);
     mpeSetupAttach = std::make_unique<BA>(proc.apvts, "mpeSendSetupMessages", mpeSetupToggle);
     freezeAttach      = std::make_unique<BA>(proc.apvts, "freeze", freezeToggle);
 
@@ -564,6 +574,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     normalMidiChannelCombo.setTooltip("Single channel used by Normal MIDI output.");
     mpeBendRangeCombo.setTooltip("Pitch-bend range for MPE member channels. The receiving synth must match this value.");
     mpePitchModeCombo.setTooltip("Retrigger sends a new MPE note for changed degrees; Glide updates pitch bend when possible.");
+    mpeZoneCombo.setTooltip("MPE zone: Lower = master ch1 + members ch2-16; Upper = master ch16 + members ch1-15. Match this to your receiver's MPE zone.");
     mpeSetupToggle.setTooltip("Sends MPE zone and pitch-bend-range setup RPN messages when MPE is enabled.");
     panicBtn         .setTooltip("Immediately clears simulated/live seats and stops voices, delay, and reverb.");
     simClearBtn      .setTooltip("Clears all simulated/live seats and immediately stops voices, delay, and reverb.");
@@ -571,6 +582,23 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     performanceToggle.setTooltip("Large stage-readable overlay for live use.");
     debugToggle      .setTooltip("Show raw OSC seat and scale diagnostics.");
     audioSettingsBtn .setTooltip("Open Android audio device settings for sample rate, buffer size, and current bit depth.");
+
+    // Remaining ambiguous controls that previously had no tooltip.
+    pitchSlider      .setTooltip("Global transpose for all voices, +/- 12 semitones.");
+    layerMixSlider   .setTooltip("Blend of the sample layers within each voice.");
+    reverbSlider     .setTooltip("Reverb send amount for the wet return.");
+    delaySlider      .setTooltip("Cross-delay send amount for the wet return.");
+    masterSlider     .setTooltip("Master output level before the safety limiter.");
+    attackSlider     .setTooltip("Voice amplitude attack time as seats become active.");
+    releaseSlider    .setTooltip("Voice amplitude release time after seats leave.");
+    brightnessSlider .setTooltip("Opens the voice filter for a brighter, more present tone.");
+    movementSlider   .setTooltip("Adds organic per-voice motion; drives grain wander in Granular mode.");
+    simAddBtn        .setTooltip("Drops one simulated participant onto a free seat.");
+    simCrowdBtn      .setTooltip("Adds 25 simulated participants at once.");
+    simRemoveBtn     .setTooltip("Ends one simulated participant.");
+    simMoveBtn       .setTooltip("Continuously drifts every active participant's position for testing.");
+    portEditor       .setTooltip("UDP port the plugin listens on for incoming OSC seat data.");
+    portApplyBtn     .setTooltip("Apply the UDP port and restart the OSC listener.");
 
    #if JUCE_ANDROID
     startTimerHz(10);
@@ -623,10 +651,13 @@ void AudienceEditor::refreshMidiOutputCombo()
 void AudienceEditor::updateOutputModeVisibility()
 {
     auto audioVisible = [] (juce::Component& c) { c.setVisible(true); };
+    // A disabled control is both made non-interactive (so JUCE greys its text /
+    // arrow / thumb) and visibly dimmed, so an inert control in the current mode
+    // reads as clearly inactive rather than just slightly faint.
     auto setActive = [] (juce::Component& c, bool active)
     {
         c.setEnabled(active);
-        c.setAlpha(active ? 1.0f : 0.36f);
+        c.setAlpha(active ? 1.0f : 0.28f);
     };
 
     audioVisible(pitchSlider); audioVisible(layerMixSlider); audioVisible(wetDrySlider); audioVisible(reverbSlider);
@@ -654,6 +685,7 @@ void AudienceEditor::updateOutputModeVisibility()
     audioVisible(normalMidiChannelCombo); audioVisible(normalMidiChannelLabel);
     audioVisible(mpeBendRangeCombo); audioVisible(mpeBendRangeLabel);
     audioVisible(mpePitchModeCombo); audioVisible(mpePitchModeLabel);
+    audioVisible(mpeZoneCombo); audioVisible(mpeZoneLabel);
     audioVisible(mpeSetupToggle);
     audioVisible(midiOutputDeviceCombo); audioVisible(midiOutputDeviceLabel);
     audioVisible(midiOutputStatusLabel); audioVisible(midiOutputRefreshBtn);
@@ -709,6 +741,8 @@ void AudienceEditor::updateOutputModeVisibility()
     setActive(mpeBendRangeLabel, mpeMidi);
     setActive(mpePitchModeCombo, mpeMidi);
     setActive(mpePitchModeLabel, mpeMidi);
+    setActive(mpeZoneCombo, mpeMidi);
+    setActive(mpeZoneLabel, mpeMidi);
     setActive(mpeSetupToggle, mpeMidi);
     midiOutputDeviceCombo.setEnabled(true);
     midiOutputDeviceCombo.setAlpha(1.0f);
@@ -1061,7 +1095,9 @@ void AudienceEditor::paintRibbon (juce::Graphics& g, juce::Rectangle<int> r)
     g.setColour(cs::hairline);
     g.drawRoundedRectangle(r.toFloat(), 8.0f, 1.0f);
 
-    g.setColour(cs::text4);
+    // FIX D: lift the two ribbon section headers off the dimmest text4 onto the
+    // more legible text3 (colour only; the bounds easily fit these short words).
+    g.setColour(cs::text3);
     g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain)));
     g.drawText("NETWORK",   r.getX() + 22,  r.getY() + 5, 100, 12, juce::Justification::left);
     g.drawText("SIMULATOR", r.getX() + 222, r.getY() + 5, 120, 12, juce::Justification::left);
@@ -1386,17 +1422,21 @@ void AudienceEditor::resized()
     const bool compactMidi = innerW < 520;
     const bool showBend = innerW >= 470;
     const bool showRefresh = innerW >= 650;
-    const bool showAdvancedMpe = innerW >= 760;
+    // Advanced MPE controls (pitch-mode, zone, setup) only appear once the row is
+    // wide enough to host them AND keep the MIDI-output device combo above its
+    // 160px floor, so they never collide with / overflow the device selector.
+    const bool showAdvancedMpe = innerW >= 880;
     const int modeW = compactMidi ? 94 : 104;
     const int typeW = compactMidi ? 92 : 98;
     const int inputModeW = compactMidi ? 76 : 88;
     const int channelW = compactMidi ? 42 : 46;
     const int bendW = showBend ? 62 : 0;
     const int pitchModeW = showAdvancedMpe ? 72 : 0;
+    const int zoneW = showAdvancedMpe ? 64 : 0;
     const int setupW = showAdvancedMpe ? 58 : 0;
     const int refreshW = showRefresh ? 54 : 0;
-    const int fixedW = modeW + typeW + inputModeW + channelW + bendW + pitchModeW + setupW + refreshW
-                     + midiGap * (4 + (showBend ? 1 : 0) + (showAdvancedMpe ? 2 : 0) + (showRefresh ? 1 : 0));
+    const int fixedW = modeW + typeW + inputModeW + channelW + bendW + pitchModeW + zoneW + setupW + refreshW
+                     + midiGap * (4 + (showBend ? 1 : 0) + (showAdvancedMpe ? 3 : 0) + (showRefresh ? 1 : 0));
     const int deviceW = juce::jmax(compactMidi ? 92 : 160, innerW - fixedW);
     int midiX = midiInner.getX();
 
@@ -1433,6 +1473,9 @@ void AudienceEditor::resized()
         mpePitchModeLabel.setBounds(midiX, labelY, pitchModeW, 12);
         mpePitchModeCombo.setBounds(midiX, controlY, pitchModeW, 24);
         midiX += pitchModeW + midiGap;
+        mpeZoneLabel.setBounds(midiX, labelY, zoneW, 12);
+        mpeZoneCombo.setBounds(midiX, controlY, zoneW, 24);
+        midiX += zoneW + midiGap;
         mpeSetupToggle.setBounds(midiX, controlY, setupW, 24);
         midiX += setupW + midiGap;
     }
@@ -1440,6 +1483,8 @@ void AudienceEditor::resized()
     {
         mpePitchModeLabel.setBounds({});
         mpePitchModeCombo.setBounds({});
+        mpeZoneLabel.setBounds({});
+        mpeZoneCombo.setBounds({});
         mpeSetupToggle.setBounds({});
     }
 

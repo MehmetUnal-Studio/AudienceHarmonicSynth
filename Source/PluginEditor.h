@@ -81,12 +81,12 @@ private:
     juce::ComboBox rootCombo, rootOctaveCombo, scaleCombo;
     juce::ComboBox polyphonyCombo;
     juce::ComboBox audioMidiOutputModeCombo, midiOutputTypeCombo, externalMidiPitchModeCombo;
-    juce::ComboBox normalMidiChannelCombo, mpeBendRangeCombo, mpePitchModeCombo;
+    juce::ComboBox normalMidiChannelCombo, mpeBendRangeCombo, mpePitchModeCombo, mpeZoneCombo;
     juce::ComboBox midiOutputDeviceCombo;
     juce::Slider octavesSlider;
     juce::Label rootLabel, rootOctaveLabel, scaleLabel, octavesLabel, polyphonyLabel;
     juce::Label audioMidiOutputModeLabel, midiOutputTypeLabel, externalMidiPitchModeLabel;
-    juce::Label normalMidiChannelLabel, mpeBendRangeLabel, mpePitchModeLabel;
+    juce::Label normalMidiChannelLabel, mpeBendRangeLabel, mpePitchModeLabel, mpeZoneLabel;
     juce::Label midiOutputDeviceLabel, midiOutputStatusLabel, midiActivityLabel;
     juce::ToggleButton mpeSetupToggle { "Setup" };
     juce::TextButton midiOutputRefreshBtn { "Rescan" };
@@ -132,7 +132,7 @@ private:
     std::unique_ptr<CA> soundModeAttach, engineSourceAttach, samplePlaybackAttach, spectralElementAttach, atomicScaleModeAttach;
     std::unique_ptr<CA> rootAttach, rootOctaveAttach, scaleAttach, grainShapeAttach, polyphonyAttach;
     std::unique_ptr<CA> audioMidiOutputModeAttach, midiOutputTypeAttach, externalMidiPitchModeAttach;
-    std::unique_ptr<CA> normalMidiChannelAttach, mpeBendRangeAttach, mpePitchModeAttach;
+    std::unique_ptr<CA> normalMidiChannelAttach, mpeBendRangeAttach, mpePitchModeAttach, mpeZoneAttach;
     std::unique_ptr<BA> reverseAttach, freezeAttach, partialSoloAttach, mpeSetupAttach;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceEditor)
