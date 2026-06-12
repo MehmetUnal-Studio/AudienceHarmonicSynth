@@ -78,7 +78,7 @@ folder directly.
 | Audio MIDI Output Mode | 3 choices | Audio Only | Renders internal audio only, MIDI only, or audio plus outgoing MIDI |
 | MIDI Output Type | 3 choices | Off | Sends no MIDI, normal MIDI notes, or MPE per-note pitch-bend output |
 | Normal MIDI Channel | 1..16 | 1 | Channel used when MIDI Output Type is Normal MIDI |
-| MPE Pitch Bend Range | 4 choices | 48 st | Pitch-bend range for MPE member channels; the receiving synth must match |
+| MPE Pitch Bend Range | 4 choices | 2 st | Pitch-bend range for MPE member channels; the receiving synth must match. 2 st is the universal MPE default and comfortably covers the <= +/-50 cent microtonal offsets |
 | MPE Send Setup | on/off | on | Sends MPE lower-zone and bend-range RPN setup messages when needed |
 | MPE Pitch Mode | 2 choices | Retrigger | Retrigger degree changes or glide by updating per-note pitch bend when possible |
 
