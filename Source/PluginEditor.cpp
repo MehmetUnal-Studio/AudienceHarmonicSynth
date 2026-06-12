@@ -1,4 +1,5 @@
 #include "PluginEditor.h"
+#include "UiText.h"
 #include <algorithm>
 #include <cmath>
 
@@ -9,21 +10,63 @@
 
 namespace cs
 {
-    const juce::Colour bg           { 0xff06090d };
-    const juce::Colour bg2          { 0xff0d1118 };
-    const juce::Colour panel        { 0xff10151c };
-    const juce::Colour panel2       { 0xff151a22 };
-    const juce::Colour hairline     { 0xff222a33 };
-    const juce::Colour text         { 0xfff1f2f6 };
-    const juce::Colour text2        { 0xffb8bac6 };
-    const juce::Colour text3        { 0xff7c7d8a };
-    const juce::Colour text4        { 0xff575864 };
-    const juce::Colour accGreen     { 0xff5ae37d };
-    const juce::Colour accBlue      { 0xff5fbcff };
-    const juce::Colour accAmber     { 0xffffc266 };
-    const juce::Colour accViolet    { 0xffc98aff };
-    const juce::Colour accTeal      { 0xff6fd9d4 };
-    const juce::Colour accRed       { 0xffd86b5a };
+    // SpektraSynth "Spektra Performance" palette.
+    // Single interactive accent (accBlue = cyan); the other accents are an
+    // intentional, harmonious set rather than six unrelated hues. accRed is
+    // reserved for panic/warnings. Text tuned for WCAG-AA contrast on bg.
+    const juce::Colour bg           { 0xff0b0d12 };
+    const juce::Colour bg2          { 0xff0e1218 };
+    const juce::Colour panel        { 0xff0e1116 };
+    const juce::Colour panel2       { 0xff141a22 };
+    const juce::Colour hairline     { 0xff1c2530 };
+    const juce::Colour text         { 0xffeef2f7 };
+    const juce::Colour text2        { 0xffcdd6e0 };
+    const juce::Colour text3        { 0xff8a93a0 };
+    const juce::Colour text4        { 0xff5a6470 };
+    const juce::Colour accGreen     { 0xff22d3a8 };
+    const juce::Colour accBlue      { 0xff5ec8ff };   // primary interactive accent
+    const juce::Colour accAmber     { 0xffe8d44d };
+    const juce::Colour accViolet    { 0xffb06bff };
+    const juce::Colour accTeal      { 0xff22d3a8 };
+    const juce::Colour accRed       { 0xffe23d52 };
+
+    // Spectral wavelength ramp (short -> long). Used to colour-code emission
+    // lines, element tags and active seats by pitch.
+    inline juce::Colour spectral (float t) noexcept
+    {
+        t = juce::jlimit (0.0f, 1.0f, t);
+        static const juce::Colour stops[] = {
+            juce::Colour (0xff6a2cf5), juce::Colour (0xff3f6bff),
+            juce::Colour (0xff22b8d8), juce::Colour (0xff22d3a8),
+            juce::Colour (0xff9be84d), juce::Colour (0xffe8d44d),
+            juce::Colour (0xffff9a3d), juce::Colour (0xffff4d5e)
+        };
+        constexpr int n = (int) (sizeof (stops) / sizeof (stops[0]));
+        const float scaled = t * (float) (n - 1);
+        const int   i = juce::jlimit (0, n - 2, (int) scaled);
+        return stops[i].interpolatedWith (stops[i + 1], scaled - (float) i);
+    }
+
+    // Visible-spectrum nm -> RGB (matches the aurora wavelength wheel), used to
+    // theme the Element Spectral readouts by the active element's identity hue.
+    // Mid-grey outside the visible band so callers can blend toward it safely.
+    inline juce::Colour wavelengthColour (double nm) noexcept
+    {
+        double r = 0.0, gg = 0.0, b = 0.0;
+        if      (nm >= 380.0 && nm < 440.0) { r = -(nm - 440.0) / 60.0; b = 1.0; }
+        else if (nm >= 440.0 && nm < 490.0) { gg = (nm - 440.0) / 50.0; b = 1.0; }
+        else if (nm >= 490.0 && nm < 510.0) { gg = 1.0; b = -(nm - 510.0) / 20.0; }
+        else if (nm >= 510.0 && nm < 580.0) { r = (nm - 510.0) / 70.0; gg = 1.0; }
+        else if (nm >= 580.0 && nm < 645.0) { r = 1.0; gg = -(nm - 645.0) / 65.0; }
+        else if (nm >= 645.0 && nm <= 750.0) { r = 1.0; }
+        else return juce::Colour (0xff8a8f99);
+
+        double f = 1.0;
+        if      (nm >= 380.0 && nm < 420.0)  f = 0.3 + 0.7 * (nm - 380.0) / 40.0;
+        else if (nm >= 645.0 && nm <= 750.0) f = 0.3 + 0.7 * (750.0 - nm) / 105.0;
+        return juce::Colour::fromFloatRGBA ((float) (r * f), (float) (gg * f), (float) (b * f), 1.0f)
+                   .withBrightness (0.82f);
+    }
 }
 
 static void styleKnob (juce::Slider& s, juce::Colour accent)
@@ -75,13 +118,6 @@ namespace
         'A','S','D','F','G','H','J','K','L',
         'Z','X','C','V','B','N','M'
     }};
-
-    juce::String midiName (int midi)
-    {
-        static const char* names[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
-        const int oct = midi / 12 - 1;
-        return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(oct);
-    }
 
     bool computerKeyIsDown (char key)
     {
@@ -340,6 +376,8 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     for (int i = 0; i < bendRanges.size(); ++i) mpeBendRangeCombo.addItem(bendRanges[i], i + 1);
     const juce::StringArray mpePitchModes { "Retrig", "Glide" };
     for (int i = 0; i < mpePitchModes.size(); ++i) mpePitchModeCombo.addItem(mpePitchModes[i], i + 1);
+    const juce::StringArray mpeZones { "Lower", "Upper" };
+    for (int i = 0; i < mpeZones.size(); ++i) mpeZoneCombo.addItem(mpeZones[i], i + 1);
     styleCombo(rootCombo);
     styleCombo(rootOctaveCombo);
     styleCombo(scaleCombo);
@@ -350,22 +388,27 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     styleCombo(normalMidiChannelCombo);
     styleCombo(mpeBendRangeCombo);
     styleCombo(mpePitchModeCombo);
+    styleCombo(mpeZoneCombo);
     styleCombo(midiOutputDeviceCombo);
     styleKnob(octavesSlider, cs::accBlue);
     octavesSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     octavesSlider.setTextBoxStyle(juce::Slider::TextBoxRight, false, 42, 20);
     octavesSlider.setTextValueSuffix(" oct");
-    styleLabel(rootLabel,    "ROOT");
-    styleLabel(rootOctaveLabel, "OCT");
-    styleLabel(scaleLabel,   "SCALE");
-    styleLabel(octavesLabel, "RANGE");
-    styleLabel(polyphonyLabel, "POLY");
-    styleLabel(audioMidiOutputModeLabel, "OUTPUT MODE");
-    styleLabel(midiOutputTypeLabel, "MIDI OUT");
-    styleLabel(externalMidiPitchModeLabel, "MIDI IN");
-    styleLabel(normalMidiChannelLabel, "CH");
-    styleLabel(mpeBendRangeLabel, "BEND");
-    styleLabel(mpePitchModeLabel, "MPE PITCH");
+    // FIX D: the scale + MPE/MIDI output-row key labels are the most cramped and
+    // sat at the dim cs::text3. Bump them to the higher-contrast cs::text2 (colour
+    // only — no size change — so the 12px-tall label bounds can never clip).
+    styleLabel(rootLabel,    "ROOT", cs::text2);
+    styleLabel(rootOctaveLabel, "OCT", cs::text2);
+    styleLabel(scaleLabel,   "SCALE", cs::text2);
+    styleLabel(octavesLabel, "RANGE", cs::text2);
+    styleLabel(polyphonyLabel, "POLY", cs::text2);
+    styleLabel(audioMidiOutputModeLabel, "OUTPUT MODE", cs::text2);
+    styleLabel(midiOutputTypeLabel, "MIDI OUT", cs::text2);
+    styleLabel(externalMidiPitchModeLabel, "MIDI IN", cs::text2);
+    styleLabel(normalMidiChannelLabel, "CH", cs::text2);
+    styleLabel(mpeBendRangeLabel, "BEND", cs::text2);
+    styleLabel(mpePitchModeLabel, "MPE PITCH", cs::text2);
+    styleLabel(mpeZoneLabel, "ZONE", cs::text2);
     styleLabel(midiOutputDeviceLabel, "MIDI OUTPUT", cs::accBlue);
     midiOutputStatusLabel.setJustificationType(juce::Justification::centredLeft);
     midiOutputStatusLabel.setColour(juce::Label::textColourId, cs::text3);
@@ -393,6 +436,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     addAndMakeVisible(normalMidiChannelCombo);
     addAndMakeVisible(mpeBendRangeCombo);
     addAndMakeVisible(mpePitchModeCombo);
+    addAndMakeVisible(mpeZoneCombo);
     addAndMakeVisible(midiOutputDeviceCombo);
     addAndMakeVisible(mpeSetupToggle);
     addAndMakeVisible(midiOutputRefreshBtn);
@@ -408,6 +452,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     addAndMakeVisible(normalMidiChannelLabel);
     addAndMakeVisible(mpeBendRangeLabel);
     addAndMakeVisible(mpePitchModeLabel);
+    addAndMakeVisible(mpeZoneLabel);
     addAndMakeVisible(midiOutputDeviceLabel);
     addAndMakeVisible(midiOutputStatusLabel);
     addAndMakeVisible(midiActivityLabel);
@@ -460,6 +505,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     normalMidiChannelAttach = std::make_unique<CA>(proc.apvts, "normalMidiChannel", normalMidiChannelCombo);
     mpeBendRangeAttach = std::make_unique<CA>(proc.apvts, "mpePitchBendRange", mpeBendRangeCombo);
     mpePitchModeAttach = std::make_unique<CA>(proc.apvts, "mpePitchMode", mpePitchModeCombo);
+    mpeZoneAttach = std::make_unique<CA>(proc.apvts, "mpeZone", mpeZoneCombo);
     mpeSetupAttach = std::make_unique<BA>(proc.apvts, "mpeSendSetupMessages", mpeSetupToggle);
     freezeAttach      = std::make_unique<BA>(proc.apvts, "freeze", freezeToggle);
 
@@ -549,6 +595,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     normalMidiChannelCombo.setTooltip("Single channel used by Normal MIDI output.");
     mpeBendRangeCombo.setTooltip("Pitch-bend range for MPE member channels. The receiving synth must match this value.");
     mpePitchModeCombo.setTooltip("Retrigger sends a new MPE note for changed degrees; Glide updates pitch bend when possible.");
+    mpeZoneCombo.setTooltip("MPE zone: Lower = master ch1 + members ch2-16; Upper = master ch16 + members ch1-15. Match this to your receiver's MPE zone.");
     mpeSetupToggle.setTooltip("Sends MPE zone and pitch-bend-range setup RPN messages when MPE is enabled.");
     panicBtn         .setTooltip("Immediately clears simulated/live seats and stops voices, delay, and reverb.");
     simClearBtn      .setTooltip("Clears all simulated/live seats and immediately stops voices, delay, and reverb.");
@@ -556,6 +603,23 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     performanceToggle.setTooltip("Large stage-readable overlay for live use.");
     debugToggle      .setTooltip("Show raw OSC seat and scale diagnostics.");
     audioSettingsBtn .setTooltip("Open Android audio device settings for sample rate, buffer size, and current bit depth.");
+
+    // Remaining ambiguous controls that previously had no tooltip.
+    pitchSlider      .setTooltip("Global transpose for all voices, +/- 12 semitones.");
+    layerMixSlider   .setTooltip("Blend of the sample layers within each voice.");
+    reverbSlider     .setTooltip("Reverb send amount for the wet return.");
+    delaySlider      .setTooltip("Cross-delay send amount for the wet return.");
+    masterSlider     .setTooltip("Master output level before the safety limiter.");
+    attackSlider     .setTooltip("Voice amplitude attack time as seats become active.");
+    releaseSlider    .setTooltip("Voice amplitude release time after seats leave.");
+    brightnessSlider .setTooltip("Opens the voice filter for a brighter, more present tone.");
+    movementSlider   .setTooltip("Adds organic per-voice motion; drives grain wander in Granular mode.");
+    simAddBtn        .setTooltip("Drops one simulated participant onto a free seat.");
+    simCrowdBtn      .setTooltip("Adds 25 simulated participants at once.");
+    simRemoveBtn     .setTooltip("Ends one simulated participant.");
+    simMoveBtn       .setTooltip("Continuously drifts every active participant's position for testing.");
+    portEditor       .setTooltip("UDP port the plugin listens on for incoming OSC seat data.");
+    portApplyBtn     .setTooltip("Apply the UDP port and restart the OSC listener.");
 
    #if JUCE_ANDROID
     startTimerHz(10);
@@ -565,6 +629,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& p)
     refreshMidiOutputCombo();
     updatePerformanceVisibility();
     updateOutputModeVisibility();
+    aurora.setListeningInfo(proc.udpPort, proc.osc.isRunning());
 }
 
 AudienceEditor::~AudienceEditor() { stopTimer(); }
@@ -608,10 +673,13 @@ void AudienceEditor::refreshMidiOutputCombo()
 void AudienceEditor::updateOutputModeVisibility()
 {
     auto audioVisible = [] (juce::Component& c) { c.setVisible(true); };
+    // A disabled control is both made non-interactive (so JUCE greys its text /
+    // arrow / thumb) and visibly dimmed, so an inert control in the current mode
+    // reads as clearly inactive rather than just slightly faint.
     auto setActive = [] (juce::Component& c, bool active)
     {
         c.setEnabled(active);
-        c.setAlpha(active ? 1.0f : 0.36f);
+        c.setAlpha(active ? 1.0f : 0.28f);
     };
 
     audioVisible(pitchSlider); audioVisible(layerMixSlider); audioVisible(wetDrySlider); audioVisible(reverbSlider);
@@ -639,6 +707,7 @@ void AudienceEditor::updateOutputModeVisibility()
     audioVisible(normalMidiChannelCombo); audioVisible(normalMidiChannelLabel);
     audioVisible(mpeBendRangeCombo); audioVisible(mpeBendRangeLabel);
     audioVisible(mpePitchModeCombo); audioVisible(mpePitchModeLabel);
+    audioVisible(mpeZoneCombo); audioVisible(mpeZoneLabel);
     audioVisible(mpeSetupToggle);
     audioVisible(midiOutputDeviceCombo); audioVisible(midiOutputDeviceLabel);
     audioVisible(midiOutputStatusLabel); audioVisible(midiOutputRefreshBtn);
@@ -694,6 +763,8 @@ void AudienceEditor::updateOutputModeVisibility()
     setActive(mpeBendRangeLabel, mpeMidi);
     setActive(mpePitchModeCombo, mpeMidi);
     setActive(mpePitchModeLabel, mpeMidi);
+    setActive(mpeZoneCombo, mpeMidi);
+    setActive(mpeZoneLabel, mpeMidi);
     setActive(mpeSetupToggle, mpeMidi);
     midiOutputDeviceCombo.setEnabled(true);
     midiOutputDeviceCombo.setAlpha(1.0f);
@@ -847,7 +918,7 @@ void AudienceEditor::paintLivePill (juce::Graphics& g, juce::Rectangle<int> boun
                bounds.getHeight(), juce::Justification::centredLeft);
 }
 
-void AudienceEditor::paintBedPanel (juce::Graphics& g, juce::Rectangle<int> r)
+void AudienceEditor::paintModulePanel (juce::Graphics& g, juce::Rectangle<int> r)
 {
     juce::ColourGradient bg(cs::panel.withAlpha(0.7f),  r.toFloat().getCentre().translated(0.0f, -100.0f),
                             cs::panel2.withAlpha(0.7f), r.toFloat().getCentre().translated(0.0f, (float) r.getHeight() * 0.6f),
@@ -857,81 +928,32 @@ void AudienceEditor::paintBedPanel (juce::Graphics& g, juce::Rectangle<int> r)
     g.setColour(cs::hairline);
     g.drawRoundedRectangle(r.toFloat(), 8.0f, 1.0f);
 
-    auto headerArea = r.reduced(12, 8).removeFromTop(30);
-    g.setColour(cs::text3);
-    g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.5f, juce::Font::plain)));
-    g.drawText("01", headerArea.removeFromLeft(24), juce::Justification::centredLeft);
+    auto drawTab = [&] (juce::Rectangle<int> tb, const juce::String& label, bool active)
+    {
+        if (active)
+        {
+            g.setColour(cs::accBlue.withAlpha(0.16f));
+            g.fillRoundedRectangle(tb.toFloat(), 5.0f);
+            g.setColour(cs::accBlue);
+            g.fillRect((float) tb.getX() + 6.0f, (float) tb.getBottom() - 2.0f, (float) tb.getWidth() - 12.0f, 2.0f);
+        }
+        g.setColour(active ? cs::text : cs::text3);
+        g.setFont(juce::Font(juce::FontOptions(13.0f, active ? juce::Font::bold : juce::Font::plain)));
+        g.drawText(label, tb, juce::Justification::centred);
+    };
+    drawTab(textureTabBounds, "TEXTURE", moduleTab == 0);
+    drawTab(voicesTabBounds,  "VOICES",  moduleTab == 1);
 
-    g.setColour(cs::text);
-    g.setFont(juce::Font(juce::FontOptions(15.5f)));
-    g.drawText("TEXTURE", headerArea.removeFromLeft(132), juce::Justification::centredLeft);
-
-    g.setColour(cs::text3);
-    g.setFont(juce::Font(juce::FontOptions(11.5f)));
     const bool elementSynth = proc.engine.engineSource.load(std::memory_order_relaxed) == 1;
-    juce::String subtitle = elementSynth
-        ? (proc.engine.getSpectralElementName() + " root "
-           + juce::String(proc.engine.getSpectralElementRootWavelengthNm(), 3) + " nm")
-        : (proc.librariesStatus.isEmpty()
-            ? juce::String("global mix / pitch / space")
-            : proc.librariesStatus);
-    g.drawText(subtitle, headerArea.removeFromLeft(420), juce::Justification::centredLeft);
-
-    auto pill = r.reduced(12, 8).removeFromTop(30).removeFromRight(84);
-    g.setColour(cs::panel.withAlpha(0.6f));
-    g.fillRoundedRectangle(pill.toFloat(), 999.0f);
-    g.setColour(cs::hairline);
-    g.drawRoundedRectangle(pill.toFloat(), 999.0f, 1.0f);
-    g.setColour(cs::accBlue);
-    g.fillEllipse((float) pill.getX() + 10.0f, (float) pill.getCentreY() - 3.0f, 6.0f, 6.0f);
-    g.setColour(cs::text2);
-    g.setFont(juce::Font(juce::FontOptions(11.5f)));
-    g.drawText("global", pill.withTrimmedLeft(22), juce::Justification::centredLeft);
-
-    const int divX = r.getRight() - 12 - 70 - 12;
-    g.setColour(cs::hairline);
-    g.drawLine((float) divX, (float) r.getY() + 60.0f,
-               (float) divX, (float) r.getBottom() - 18.0f, 1.0f);
-}
-
-void AudienceEditor::paintParticlePanel (juce::Graphics& g, juce::Rectangle<int> r)
-{
-    juce::ColourGradient bg(cs::panel.withAlpha(0.7f),  r.toFloat().getCentre().translated(0.0f, -100.0f),
-                            cs::panel2.withAlpha(0.7f), r.toFloat().getCentre().translated(0.0f, (float) r.getHeight() * 0.6f),
-                            false);
-    g.setGradientFill(bg);
-    g.fillRoundedRectangle(r.toFloat(), 8.0f);
-    g.setColour(cs::hairline);
-    g.drawRoundedRectangle(r.toFloat(), 8.0f, 1.0f);
-
-    auto headerArea = r.reduced(12, 8).removeFromTop(30);
+    const juce::String subtitle = moduleTab == 0
+        ? (elementSynth ? (proc.engine.getSpectralElementName() + " root "
+                           + juce::String(proc.engine.getSpectralElementRootWavelengthNm(), 3) + " nm")
+                        : (proc.librariesStatus.isEmpty() ? juce::String("global mix / pitch / space")
+                                                          : proc.librariesStatus))
+        : juce::String("element partial oscillator bank");
     g.setColour(cs::text3);
-    g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.5f, juce::Font::plain)));
-    g.drawText("02", headerArea.removeFromLeft(24), juce::Justification::centredLeft);
-
-    g.setColour(cs::text);
-    g.setFont(juce::Font(juce::FontOptions(15.5f)));
-    g.drawText("VOICES", headerArea.removeFromLeft(132), juce::Justification::centredLeft);
-
-    g.setColour(cs::text3);
-    g.setFont(juce::Font(juce::FontOptions(11.5f)));
-    const bool elementSynth = proc.engine.engineSource.load(std::memory_order_relaxed) == 1;
-    g.drawText(elementSynth
-                    ? "element partial oscillator bank"
-                    : ("sample library / " + proc.engine.getSamplePlaybackModeName()),
-               headerArea.removeFromLeft(360),
-               juce::Justification::centredLeft);
-
-    auto pill = r.reduced(12, 8).removeFromTop(30).removeFromRight(94);
-    g.setColour(cs::panel.withAlpha(0.6f));
-    g.fillRoundedRectangle(pill.toFloat(), 999.0f);
-    g.setColour(cs::hairline);
-    g.drawRoundedRectangle(pill.toFloat(), 999.0f, 1.0f);
-    g.setColour(cs::accGreen);
-    g.fillEllipse((float) pill.getX() + 10.0f, (float) pill.getCentreY() - 3.0f, 6.0f, 6.0f);
-    g.setColour(cs::text2);
-    g.setFont(juce::Font(juce::FontOptions(11.5f)));
-    g.drawText("emergent", pill.withTrimmedLeft(22), juce::Justification::centredLeft);
+    g.setFont(juce::Font(juce::FontOptions(11.0f)));
+    g.drawText(subtitle, r.getRight() - 332, r.getY() + 11, 320, 18, juce::Justification::centredRight);
 }
 
 void AudienceEditor::paintMacroPanel (juce::Graphics& g, juce::Rectangle<int> r)
@@ -944,15 +966,8 @@ void AudienceEditor::paintMacroPanel (juce::Graphics& g, juce::Rectangle<int> r)
     g.setColour(cs::hairline);
     g.drawRoundedRectangle(r.toFloat(), 8.0f, 1.0f);
 
-    auto title = r.reduced(12, 8).removeFromLeft(128);
-    g.setColour(cs::text3);
-    g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain)));
-    g.drawText("LIVE MACROS", title.removeFromTop(14), juce::Justification::left);
-   #if ! JUCE_ANDROID
-    g.setColour(cs::text);
-    g.setFont(juce::Font(juce::FontOptions(15.5f)));
-    g.drawText("Performance", title.removeFromTop(24), juce::Justification::left);
-   #endif
+    // (Old "LIVE MACROS" / "Performance" section title removed — it overlapped the
+    //  ENGINE and SOUND MODE controls that resized() places in this top-left region.)
     g.setColour(cs::text3);
     g.setFont(juce::Font(juce::FontOptions(10.5f)));
 
@@ -961,6 +976,48 @@ void AudienceEditor::paintMacroPanel (juce::Graphics& g, juce::Rectangle<int> r)
     const int outputX = r.getRight() - outputZoneW;
     const int scaleX = outputX - scaleZoneW - 16;
     const int macroDividerX = scaleX - 16;
+
+    // FIX 3: give the four performance macro knobs (ENERGY/MOTION/TONE/SPACE) a
+    // subtle highlighted backing so they read as the primary live controls. The
+    // bounds are derived from the EXACT constants resized() uses to place them
+    // (knobs at getX()+150 + i*76, label row getY()+15, slider 72x68 below), then
+    // clamped so the backing never crosses the scale-zone divider or the engine
+    // combos. Drawn here in the panel layer, so the real knob children sit on top.
+    {
+        const int knobMx     = r.getX() + 150;          // resized(): mx
+        const int blockLeft  = knobMx - 4;               // == energy slider left edge
+        const int blockRight = juce::jmin(knobMx + 3 * 76 + 72, macroDividerX - 6);
+        const int blockTop   = r.getY() + 12;
+        const int blockBot   = r.getY() + 100;
+        if (blockRight - blockLeft > 40)
+        {
+            juce::Rectangle<float> backing((float) blockLeft, (float) blockTop,
+                                           (float) (blockRight - blockLeft),
+                                           (float) (blockBot - blockTop));
+            g.setColour(cs::accAmber.withAlpha(0.05f));
+            g.fillRoundedRectangle(backing, 8.0f);
+            g.setColour(cs::accAmber.withAlpha(0.20f));
+            g.drawRoundedRectangle(backing, 8.0f, 1.0f);
+            // thin accent cap along the top edge to anchor the group visually
+            g.setColour(cs::accAmber.withAlpha(0.40f));
+            g.fillRoundedRectangle(backing.getX() + 8.0f, backing.getY() + 1.0f,
+                                   backing.getWidth() - 16.0f, 2.0f, 1.0f);
+        }
+    }
+
+   #if ! JUCE_ANDROID
+    // FIX 3: faint backing behind the ENGINE / SOUND MODE combo stack (left zone)
+    // so the source-selection controls read as one group. Bounds match resized():
+    // combos at getX()+12, y getY()+12 and getY()+60, 132x24.
+    {
+        juce::Rectangle<float> engineGroup((float) r.getX() + 8.0f, (float) r.getY() + 8.0f,
+                                           137.0f, 96.0f);
+        g.setColour(cs::bg.withAlpha(0.40f));
+        g.fillRoundedRectangle(engineGroup, 8.0f);
+        g.setColour(cs::hairline.withAlpha(0.8f));
+        g.drawRoundedRectangle(engineGroup, 8.0f, 1.0f);
+    }
+   #endif
     const int rangeX = r.getX() + 166;
     const int rangeW = juce::jmax(120, macroDividerX - rangeX - 12);
     g.drawText(proc.engine.getScaleRangeName(),
@@ -1013,9 +1070,11 @@ void AudienceEditor::paintScaleKeyboard (juce::Graphics& g, juce::Rectangle<int>
     const int maxByWidth = juce::jmax(1, inner.getWidth() / 22);
     const int keys = juce::jlimit(1, total, maxByWidth);
 
-    g.setColour(cs::text3);
-    g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain)));
-    g.drawText("SCALE KEYBOARD", header.removeFromLeft(118), juce::Justification::centredLeft);
+    // FIX 3: strengthen the section header (brighter + slightly larger/bold) so
+    // it reads clearly as the panel title above the dimmer body text.
+    g.setColour(cs::text2);
+    g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.5f, juce::Font::bold)));
+    g.drawText("SCALE KEYBOARD", header.removeFromLeft(128), juce::Justification::centredLeft);
 
     g.setColour(cs::text2);
     g.setFont(juce::Font(juce::FontOptions(10.5f)));
@@ -1072,9 +1131,26 @@ void AudienceEditor::paintScaleKeyboard (juce::Graphics& g, juce::Rectangle<int>
         }
         if (engineHeld)
         {
-            const float glowAlpha = 0.22f + engineNorm * 0.34f;
+            // FIX 6: make the currently-SOUNDING scale step(s) unmistakable. A
+            // soft accent halo just inside the key plus a white core outline (both
+            // fading with the live voice amplitude) lift active degrees clearly
+            // above merely computer-held keys, so the operator sees which
+            // microtonal degrees are ringing.
+            g.setColour(accent.withAlpha(0.30f + engineNorm * 0.40f));
+            g.drawRoundedRectangle(key.reduced(0.6f), 5.0f, 2.2f + engineNorm * 2.4f);
+            const float glowAlpha = 0.30f + engineNorm * 0.42f;
             g.setColour(juce::Colours::white.withAlpha(glowAlpha));
-            g.drawRoundedRectangle(key.reduced(1.0f), 4.0f, 1.4f + engineNorm * 1.0f);
+            g.drawRoundedRectangle(key.reduced(1.6f), 4.0f, 1.2f + engineNorm * 1.1f);
+
+            // Accent underline pinned inside the key, length/strength tracking amp.
+            const float ulInset = 4.0f;
+            const float ulH = 2.4f + engineNorm * 1.6f;
+            juce::Rectangle<float> underline(key.getX() + ulInset,
+                                             key.getBottom() - ulInset - ulH,
+                                             juce::jmax(2.0f, key.getWidth() - ulInset * 2.0f),
+                                             ulH);
+            g.setColour(accent.brighter(0.4f).withAlpha(0.7f + engineNorm * 0.3f));
+            g.fillRoundedRectangle(underline, ulH * 0.5f);
         }
         g.setColour(down ? accent.brighter(0.28f) : cs::hairline);
         g.drawRoundedRectangle(key, 5.0f, 1.0f);
@@ -1102,8 +1178,11 @@ void AudienceEditor::paintRibbon (juce::Graphics& g, juce::Rectangle<int> r)
     g.setColour(cs::hairline);
     g.drawRoundedRectangle(r.toFloat(), 8.0f, 1.0f);
 
-    g.setColour(cs::text4);
-    g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain)));
+    // FIX D / FIX 3: lift the two ribbon section headers onto the more legible
+    // text2 and bold them so they read as section titles (colour/weight only; the
+    // bounds easily fit these short words and the control positions are unchanged).
+    g.setColour(cs::text2);
+    g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::bold)));
     g.drawText("NETWORK",   r.getX() + 22,  r.getY() + 5, 100, 12, juce::Justification::left);
     g.drawText("SIMULATOR", r.getX() + 222, r.getY() + 5, 120, 12, juce::Justification::left);
 
@@ -1172,9 +1251,25 @@ void AudienceEditor::paintPerformanceOverlay (juce::Graphics& g, juce::Rectangle
                overlay.getX() + 26, overlay.getY() + 90, overlay.getWidth() - 52, 24,
                juce::Justification::left);
 
+    // FIX 7: fill the previously-empty lower region with a wider live readout.
+    // Layout (all paint-only, computed from the overlay rect): a wider/taller row
+    // of metric cards at the bottom, a live aurora-band strip just above them,
+    // and the audience map taking the remaining space. Everything is clamped so
+    // the regions never overlap regardless of window size.
+    const int elementMode = proc.engine.engineSource.load(std::memory_order_relaxed); // 1 = element
+    const bool tinted = elementMode == 1;
+    const auto elementCol = cs::wavelengthColour(proc.engine.getSpectralElementRootWavelengthNm());
+
+    const int cardsH   = 96;
+    const int cardsY   = overlay.getBottom() - 24 - cardsH;
+    const int stripH   = 30;
+    const int stripY   = cardsY - 12 - stripH;
+    const int mapTop    = overlay.getY() + 126;
+    const int mapBottom = juce::jmax(mapTop + 70, stripY - 12);
+
     auto map = overlay.reduced(24, 0);
-    map.setY(overlay.getY() + 126);
-    map.setHeight(juce::jmax(76, overlay.getBottom() - 118 - map.getY()));
+    map.setY(mapTop);
+    map.setHeight(mapBottom - mapTop);
     g.setColour(juce::Colour(0xaa111625));
     g.fillRoundedRectangle(map.toFloat(), 12.0f);
     g.setColour(cs::hairline);
@@ -1203,7 +1298,9 @@ void AudienceEditor::paintPerformanceOverlay (juce::Graphics& g, juce::Rectangle
             const float x = (float) grid.getX() + ((float) col + 0.5f) * cellW;
             const float y = (float) grid.getY() + ((float) row + 0.5f) * cellH;
             const float amp = juce::jlimit(0.0f, 1.0f, proc.engine.getSeatY(row, col));
-            const auto colr = cs::accGreen.interpolatedWith(cs::accAmber, proc.engine.getSeatX(row, col));
+            auto colr = cs::accGreen.interpolatedWith(cs::accAmber, proc.engine.getSeatX(row, col));
+            if (tinted)
+                colr = colr.interpolatedWith(elementCol, 0.42f);
             const float rDot = 2.0f + amp * 3.0f;
             g.setColour(colr.withAlpha(0.28f));
             g.fillEllipse(x - rDot * 1.8f, y - rDot * 1.8f, rDot * 3.6f, rDot * 3.6f);
@@ -1212,29 +1309,71 @@ void AudienceEditor::paintPerformanceOverlay (juce::Graphics& g, juce::Rectangle
         }
     }
 
-    const int boxW = (overlay.getWidth() - 72) / 3;
-    const int y = overlay.getBottom() - 106;
-    auto drawMetric = [&] (int x, const juce::String& label, const juce::String& value, juce::Colour accent)
+    // ---- live aurora-band strip (reuses engine.getAuroraBand) ----
     {
-        juce::Rectangle<int> box(x, y, boxW, 78);
+        juce::Rectangle<int> strip(overlay.getX() + 24, stripY, overlay.getWidth() - 48, stripH);
+        g.setColour(juce::Colour(0xaa0c1018));
+        g.fillRoundedRectangle(strip.toFloat(), 8.0f);
+        g.setColour(cs::hairline);
+        g.drawRoundedRectangle(strip.toFloat(), 8.0f, 1.0f);
+
+        auto bars = strip.reduced(8, 6);
+        constexpr int nBands = PartialEngine::AURORA_BANDS;
+        const float bw = (float) bars.getWidth() / (float) nBands;
+        for (int i = 0; i < nBands; ++i)
+        {
+            const float t = nBands > 1 ? (float) i / (float) (nBands - 1) : 0.0f;
+            const float lvl = juce::jlimit(0.0f, 1.0f, proc.engine.getAuroraBand(i) * 3.0f);
+            auto col = cs::spectral(1.0f - t);
+            if (tinted)
+                col = col.interpolatedWith(elementCol, 0.55f);
+            const float h = juce::jmax(1.0f, lvl * (float) bars.getHeight());
+            g.setColour(col.withAlpha(0.30f + lvl * 0.65f));
+            g.fillRect((float) bars.getX() + (float) i * bw + 0.5f,
+                       (float) bars.getBottom() - h, juce::jmax(1.0f, bw - 1.0f), h);
+        }
+        g.setColour(cs::text4);
+        g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 8.5f, juce::Font::plain)));
+        g.drawText("SPECTRUM", strip.getX() + 6, strip.getY() - 13, 120, 12, juce::Justification::left);
+    }
+
+    // ---- metric cards: five wider/taller cards across the bottom ----
+    const int nCards = 5;
+    const int cardGap = 12;
+    const int boxW = (overlay.getWidth() - 48 - cardGap * (nCards - 1)) / nCards;
+    const int y = cardsY;
+    auto drawMetric = [&] (int slot, const juce::String& label, const juce::String& value,
+                           juce::Colour accent, float valueFontPx)
+    {
+        juce::Rectangle<int> box(overlay.getX() + 24 + slot * (boxW + cardGap), y, boxW, cardsH);
         g.setColour(juce::Colour(0xaa111625));
         g.fillRoundedRectangle(box.toFloat(), 10.0f);
         g.setColour(accent.withAlpha(0.6f));
         g.drawRoundedRectangle(box.toFloat(), 10.0f, 1.0f);
         g.setColour(cs::text3);
         g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain)));
-        g.drawText(label, box.reduced(16, 10).removeFromTop(14), juce::Justification::left);
+        g.drawText(label, box.reduced(16, 12).removeFromTop(14), juce::Justification::left);
         g.setColour(accent);
-        g.setFont(juce::Font(juce::FontOptions(30.0f)).boldened());
-        g.drawText(value, box.reduced(16, 18), juce::Justification::centredLeft);
+        g.setFont(juce::Font(juce::FontOptions(valueFontPx)).boldened());
+        g.drawText(value, box.reduced(16, 0).withTrimmedTop(30).withTrimmedBottom(10),
+                   juce::Justification::centredLeft);
     };
-    drawMetric(overlay.getX() + 24,               "ACTIVE SEATS",  juce::String(seats),  cs::accBlue);
-    drawMetric(overlay.getX() + 24 + boxW + 12, "ACTIVE VOICES",
+
+    drawMetric(0, "ACTIVE SEATS", juce::String(seats), cs::accBlue, 34.0f);
+    drawMetric(1, "ACTIVE VOICES",
                juce::String(voices) + "/" + juce::String(proc.engine.getVoiceLimit()),
-               cs::accGreen);
-    drawMetric(overlay.getX() + 24 + (boxW + 12) * 2, "DOMINANT",
-               proc.engine.getDominantSampleName(),
-               cs::accAmber);
+               cs::accGreen, 30.0f);
+    if (tinted)
+        drawMetric(2, "ELEMENT",
+                   proc.engine.getSpectralElementName() + "  "
+                   + juce::String(proc.engine.getSpectralElementRootWavelengthNm(), 0) + " nm",
+                   elementCol.withBrightness(0.95f), 17.0f);
+    else
+        drawMetric(2, "PLAYBACK", proc.engine.getSamplePlaybackModeName(), cs::accViolet, 17.0f);
+    drawMetric(3, "SCALE / ZONE",
+               proc.engine.getScaleName() + "  " + proc.engine.getScaleRangeName(),
+               cs::accTeal, 15.0f);
+    drawMetric(4, "DOMINANT", proc.engine.getDominantSampleName(), cs::accAmber, 17.0f);
 
     if (proc.isMuted())
     {
@@ -1265,7 +1404,7 @@ void AudienceEditor::paint (juce::Graphics& g)
                                               (float) header.getY() + 8.0f, 24.0f, 24.0f));
     g.setColour(cs::text);
     g.setFont(juce::Font(juce::FontOptions(11.5f)).boldened());
-    g.drawText("Audience Harmonic Synth", header.getX() + 34, header.getY() + 5, 170, 14,
+    g.drawText("SpektraSynth", header.getX() + 34, header.getY() + 5, 170, 14,
                juce::Justification::left);
     g.setColour(cs::text3);
     g.setFont(juce::Font(juce::FontOptions(9.0f)));
@@ -1323,8 +1462,7 @@ void AudienceEditor::paint (juce::Graphics& g)
     tryPill(122, "DOM",    proc.engine.getDominantSampleName(), cs::hairline.brighter(0.5f), false);
     tryPill(104, "UDP",    proc.osc.isRunning() ? juce::String(proc.udpPort) : "busy", proc.osc.isRunning() ? cs::accGreen : cs::accRed, false);
 
-    paintBedPanel(g, bedPanelBounds);
-    paintParticlePanel(g, particlePanelBounds);
+    paintModulePanel(g, bedPanelBounds);
     paintMacroPanel(g, macroPanelBounds);
     paintScaleKeyboard(g, keyboardPanelBounds);
     paintRibbon(g, ribbonBounds);
@@ -1428,17 +1566,21 @@ void AudienceEditor::resized()
     const bool compactMidi = innerW < 520;
     const bool showBend = innerW >= 470;
     const bool showRefresh = innerW >= 650;
-    const bool showAdvancedMpe = innerW >= 760;
+    // Advanced MPE controls (pitch-mode, zone, setup) only appear once the row is
+    // wide enough to host them AND keep the MIDI-output device combo above its
+    // 160px floor, so they never collide with / overflow the device selector.
+    const bool showAdvancedMpe = innerW >= 880;
     const int modeW = compactMidi ? 94 : 104;
     const int typeW = compactMidi ? 92 : 98;
     const int inputModeW = compactMidi ? 76 : 88;
     const int channelW = compactMidi ? 42 : 46;
     const int bendW = showBend ? 62 : 0;
     const int pitchModeW = showAdvancedMpe ? 72 : 0;
+    const int zoneW = showAdvancedMpe ? 64 : 0;
     const int setupW = showAdvancedMpe ? 58 : 0;
     const int refreshW = showRefresh ? 54 : 0;
-    const int fixedW = modeW + typeW + inputModeW + channelW + bendW + pitchModeW + setupW + refreshW
-                     + midiGap * (4 + (showBend ? 1 : 0) + (showAdvancedMpe ? 2 : 0) + (showRefresh ? 1 : 0));
+    const int fixedW = modeW + typeW + inputModeW + channelW + bendW + pitchModeW + zoneW + setupW + refreshW
+                     + midiGap * (4 + (showBend ? 1 : 0) + (showAdvancedMpe ? 3 : 0) + (showRefresh ? 1 : 0));
     const int deviceW = juce::jmax(compactMidi ? 92 : 160, innerW - fixedW);
     int midiX = midiInner.getX();
 
@@ -1475,6 +1617,9 @@ void AudienceEditor::resized()
         mpePitchModeLabel.setBounds(midiX, labelY, pitchModeW, 12);
         mpePitchModeCombo.setBounds(midiX, controlY, pitchModeW, 24);
         midiX += pitchModeW + midiGap;
+        mpeZoneLabel.setBounds(midiX, labelY, zoneW, 12);
+        mpeZoneCombo.setBounds(midiX, controlY, zoneW, 24);
+        midiX += zoneW + midiGap;
         mpeSetupToggle.setBounds(midiX, controlY, setupW, 24);
         midiX += setupW + midiGap;
     }
@@ -1482,6 +1627,8 @@ void AudienceEditor::resized()
     {
         mpePitchModeLabel.setBounds({});
         mpePitchModeCombo.setBounds({});
+        mpeZoneLabel.setBounds({});
+        mpeZoneCombo.setBounds({});
         mpeSetupToggle.setBounds({});
     }
 
@@ -1498,59 +1645,86 @@ void AudienceEditor::resized()
     midiActivityLabel.setBounds(midiOutputPanelBounds.getRight() - 132, statusY, 122, 12);
 
     y += macroH + gap;
-    const int bedW     = (int) ((float) mainW * 0.46f);
-    const int partW    = mainW - bedW - gap;
-    bedPanelBounds      = { mainX,                y, bedW,  moduleH };
-    particlePanelBounds = { mainX + bedW + gap,   y, partW, moduleH };
+    // Bottom module is now tabbed: TEXTURE and VOICES share the full-width panel
+    // and only the active tab's controls are laid out (the other is hidden).
+    bedPanelBounds      = { mainX, y, mainW, moduleH };
+    particlePanelBounds = bedPanelBounds;
+
+    const int tabY = y + 7;
+    textureTabBounds = { mainX + 12,       tabY, 104, 24 };
+    voicesTabBounds  = { mainX + 12 + 110, tabY, 104, 24 };
 
     auto layoutKnob = [&] (juce::Slider& s, juce::Label& l, int x, int yy, int w)
     {
         l.setBounds(x, yy, w, 12);
         s.setBounds(x, yy + 14, w, 74);
     };
+    auto hideCtl = [] (juce::Component& c) { c.setBounds({}); };
 
-    // Texture panel: Pitch | Layer Mix | Wet/Dry | Reverb | Delay | Tape | Master
-    const int bedY = bedPanelBounds.getY() + 42;
-    const int bedX = bedPanelBounds.getX() + 12;
-    const int bedStep = (bedPanelBounds.getWidth() - 24) / 4;
-    const int bedKnobW = juce::jlimit(54, 70, bedStep - 4);
-    layoutKnob(pitchSlider,     pitchLabel,     bedX + 0 * bedStep, bedY, bedKnobW);
-    layoutKnob(layerMixSlider,  layerMixLabel,  bedX + 1 * bedStep, bedY, bedKnobW);
-    layoutKnob(wetDrySlider,    wetDryLabel,    bedX + 2 * bedStep, bedY, bedKnobW);
-    layoutKnob(reverbSlider,    reverbLabel,    bedX + 3 * bedStep, bedY, bedKnobW);
-    layoutKnob(delaySlider,     delayLabel,     bedX + 0 * bedStep, bedY + 88, bedKnobW);
-    layoutKnob(tapeDriveSlider, tapeDriveLabel, bedX + 1 * bedStep, bedY + 88, bedKnobW);
-    layoutKnob(masterSlider,    masterLabel,    bedX + 2 * bedStep, bedY + 88, bedKnobW);
-    layoutKnob(spectralStretchSlider, spectralStretchLabel, bedX + 3 * bedStep, bedY + 88, bedKnobW);
+    const int contentY = y + 42;            // below the tab bar
+    const int colsX    = mainX + 14;
+    const int contentW = mainW - 28;
 
-    // Voices panel: core envelope row + granular detail row.
-    const int partY = particlePanelBounds.getY() + 42;
-    const int partX = particlePanelBounds.getX() + 12;
-    const int partStep = (particlePanelBounds.getWidth() - 24) / 6;
-    const int partKnobW = juce::jlimit(50, 66, partStep - 4);
-    layoutKnob(attackSlider,       attackLabel,       partX + 0 * partStep, partY, partKnobW);
-    layoutKnob(releaseSlider,      releaseLabel,      partX + 1 * partStep, partY, partKnobW);
-    layoutKnob(brightnessSlider,   brightnessLabel,   partX + 2 * partStep, partY, partKnobW);
-    layoutKnob(movementSlider,     movementLabel,     partX + 3 * partStep, partY, partKnobW);
-    layoutKnob(grainSizeSlider,    grainSizeLabel,    partX + 4 * partStep, partY, partKnobW);
-    layoutKnob(grainDensitySlider, grainDensityLabel, partX + 5 * partStep, partY, partKnobW);
+    if (moduleTab == 0)
+    {
+        // TEXTURE — 4 columns x 2 rows across the full width.
+        const int step  = contentW / 4;
+        const int knobW = juce::jlimit(60, 96, step - 8);
+        layoutKnob(pitchSlider,     pitchLabel,     colsX + 0 * step, contentY, knobW);
+        layoutKnob(layerMixSlider,  layerMixLabel,  colsX + 1 * step, contentY, knobW);
+        layoutKnob(wetDrySlider,    wetDryLabel,    colsX + 2 * step, contentY, knobW);
+        layoutKnob(reverbSlider,    reverbLabel,    colsX + 3 * step, contentY, knobW);
+        layoutKnob(delaySlider,     delayLabel,     colsX + 0 * step, contentY + 88, knobW);
+        layoutKnob(tapeDriveSlider, tapeDriveLabel, colsX + 1 * step, contentY + 88, knobW);
+        layoutKnob(masterSlider,    masterLabel,    colsX + 2 * step, contentY + 88, knobW);
+        layoutKnob(spectralStretchSlider, spectralStretchLabel, colsX + 3 * step, contentY + 88, knobW);
 
-    const int grainY = partY + 88;
-    layoutKnob(pitchSpreadSlider,   pitchSpreadLabel,   partX + 0 * partStep, grainY, partKnobW);
-    layoutKnob(positionJitterSlider, positionJitterLabel, partX + 1 * partStep, grainY, partKnobW);
-    layoutKnob(stereoSpreadSlider,  stereoSpreadLabel,  partX + 2 * partStep, grainY, partKnobW);
-    grainShapeLabel.setBounds(partX + 3 * partStep, grainY, 82, 12);
-    grainShapeCombo.setBounds(partX + 3 * partStep, grainY + 18, 90, 24);
-    reverseToggle.setBounds(partX + 3 * partStep, grainY + 48, 82, 24);
-    samplePlaybackLabel.setBounds(partX + 4 * partStep, grainY, 112, 12);
-    samplePlaybackCombo.setBounds(partX + 4 * partStep, grainY + 18, 112, 24);
-    spectralElementLabel.setBounds(partX + 4 * partStep, grainY, 90, 12);
-    spectralElementCombo.setBounds(partX + 4 * partStep, grainY + 18, 96, 24);
-    partialSoloToggle.setBounds(partX + 4 * partStep, grainY + 48, 82, 24);
-    atomicScaleModeLabel.setBounds(partX + 5 * partStep, grainY, 96, 12);
-    atomicScaleModeCombo.setBounds(partX + 5 * partStep, grainY + 18, 104, 24);
-    spectralPartialLabel.setBounds(partX + 5 * partStep, grainY + 47, 86, 12);
-    spectralPartialSlider.setBounds(partX + 5 * partStep, grainY + 60, 104, 22);
+        juce::Component* const voiceCtls[] = { &attackSlider, &attackLabel,
+             &releaseSlider, &releaseLabel, &brightnessSlider, &brightnessLabel, &movementSlider, &movementLabel,
+             &grainSizeSlider, &grainSizeLabel, &grainDensitySlider, &grainDensityLabel,
+             &pitchSpreadSlider, &pitchSpreadLabel, &positionJitterSlider, &positionJitterLabel,
+             &stereoSpreadSlider, &stereoSpreadLabel, &grainShapeCombo, &grainShapeLabel, &reverseToggle,
+             &samplePlaybackCombo, &samplePlaybackLabel, &spectralElementCombo, &spectralElementLabel,
+             &partialSoloToggle, &atomicScaleModeCombo, &atomicScaleModeLabel,
+             &spectralPartialSlider, &spectralPartialLabel };
+        for (auto* c : voiceCtls) hideCtl(*c);
+    }
+    else
+    {
+        // VOICES — 6 columns x 2 rows across the full width.
+        const int step  = contentW / 6;
+        const int knobW = juce::jlimit(54, 84, step - 8);
+        const int comboW = juce::jmin(118, step - 6);
+        layoutKnob(attackSlider,       attackLabel,       colsX + 0 * step, contentY, knobW);
+        layoutKnob(releaseSlider,      releaseLabel,      colsX + 1 * step, contentY, knobW);
+        layoutKnob(brightnessSlider,   brightnessLabel,   colsX + 2 * step, contentY, knobW);
+        layoutKnob(movementSlider,     movementLabel,     colsX + 3 * step, contentY, knobW);
+        layoutKnob(grainSizeSlider,    grainSizeLabel,    colsX + 4 * step, contentY, knobW);
+        layoutKnob(grainDensitySlider, grainDensityLabel, colsX + 5 * step, contentY, knobW);
+
+        const int grainY = contentY + 88;
+        layoutKnob(pitchSpreadSlider,    pitchSpreadLabel,    colsX + 0 * step, grainY, knobW);
+        layoutKnob(positionJitterSlider, positionJitterLabel, colsX + 1 * step, grainY, knobW);
+        layoutKnob(stereoSpreadSlider,   stereoSpreadLabel,   colsX + 2 * step, grainY, knobW);
+        grainShapeLabel.setBounds(colsX + 3 * step, grainY, 90, 12);
+        grainShapeCombo.setBounds(colsX + 3 * step, grainY + 18, comboW, 24);
+        reverseToggle.setBounds(colsX + 3 * step, grainY + 48, 90, 22);
+        samplePlaybackLabel.setBounds(colsX + 4 * step, grainY, 120, 12);
+        samplePlaybackCombo.setBounds(colsX + 4 * step, grainY + 18, comboW, 24);
+        spectralElementLabel.setBounds(colsX + 4 * step, grainY, 100, 12);
+        spectralElementCombo.setBounds(colsX + 4 * step, grainY + 18, comboW, 24);
+        partialSoloToggle.setBounds(colsX + 4 * step, grainY + 48, 90, 22);
+        atomicScaleModeLabel.setBounds(colsX + 5 * step, grainY, 100, 12);
+        atomicScaleModeCombo.setBounds(colsX + 5 * step, grainY + 18, comboW, 24);
+        spectralPartialLabel.setBounds(colsX + 5 * step, grainY + 47, 92, 12);
+        spectralPartialSlider.setBounds(colsX + 5 * step, grainY + 60, comboW, 22);
+
+        juce::Component* const texCtls[] = { &pitchSlider, &pitchLabel,
+             &layerMixSlider, &layerMixLabel, &wetDrySlider, &wetDryLabel, &reverbSlider, &reverbLabel,
+             &delaySlider, &delayLabel, &tapeDriveSlider, &tapeDriveLabel, &masterSlider, &masterLabel,
+             &spectralStretchSlider, &spectralStretchLabel };
+        for (auto* c : texCtls) hideCtl(*c);
+    }
     y += moduleH + gap;
     ribbonBounds = { mainX, y, mainW, ribbonH };
 
@@ -1604,7 +1778,7 @@ juce::String AudienceEditor::keyboardStepLabel (int scaleStep) const
     if (midi < 0)
         return "-";
 
-    return midiName(midi);
+    return UiText::midiNoteName(midi);
 }
 
 int AudienceEditor::keyboardStepAt (juce::Point<int> p) const
@@ -1692,6 +1866,22 @@ void AudienceEditor::focusLost (FocusChangeType)
 void AudienceEditor::mouseDown (const juce::MouseEvent& e)
 {
     grabKeyboardFocus();
+
+    const auto pos = e.getPosition();
+    if (textureTabBounds.contains(pos) || voicesTabBounds.contains(pos))
+    {
+        const int newTab = voicesTabBounds.contains(pos) ? 1 : 0;
+        if (newTab != moduleTab)
+        {
+            moduleTab = newTab;
+            lastVisibilityKey = -1;   // force visibility recompute for the newly shown tab
+            resized();
+            updateOutputModeVisibility();
+            repaint();
+        }
+        return;
+    }
+
     const int step = keyboardStepAt(e.getPosition());
     if (step >= 0)
     {
@@ -1726,6 +1916,9 @@ void AudienceEditor::mouseExit (const juce::MouseEvent&)
 void AudienceEditor::timerCallback()
 {
     updateComputerKeyboard();
+    // Keep the audience-map empty-state hint (FIX 4) in sync with the live OSC
+    // port / bridge state, which live on the processor rather than the engine.
+    aurora.setListeningInfo(proc.udpPort, proc.osc.isRunning());
     muteToggle.setToggleState(proc.isMuted(), juce::dontSendNotification);
     const int midiType = (int) proc.apvts.getRawParameterValue("midiOutputType")->load();
     if (midiType == 2)
@@ -1747,6 +1940,17 @@ void AudienceEditor::timerCallback()
    #if JUCE_ANDROID
     audioDeviceStatusLabel.setText(getAudioDeviceStatusText(), juce::dontSendNotification);
    #endif
-    updateOutputModeVisibility();
+    // Visibility/enabled state only depends on these four mode values; recompute
+    // the ~80-component layout pass only when one of them actually changes,
+    // instead of on every timer tick.
+    const int es  = proc.engine.engineSource.load(std::memory_order_relaxed);
+    const int spm = proc.engine.samplePlaybackMode.load(std::memory_order_relaxed);
+    const int om  = (int) proc.apvts.getRawParameterValue("audioMidiOutputMode")->load();
+    const int visKey = ((es & 3) << 12) | ((spm & 3) << 8) | ((midiType & 15) << 4) | (om & 15);
+    if (visKey != lastVisibilityKey)
+    {
+        lastVisibilityKey = visKey;
+        updateOutputModeVisibility();
+    }
     repaint();
 }

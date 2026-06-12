@@ -1,4 +1,5 @@
 #include "MidiGeneratorEditor.h"
+#include "UiText.h"
 
 #include <algorithm>
 #include <cmath>
@@ -102,11 +103,6 @@ namespace
         button.setColour(juce::TextButton::buttonOnColourId, surface3());
         button.setColour(juce::TextButton::textColourOffId, colour);
         button.setColour(juce::TextButton::textColourOnId, colour);
-    }
-
-    juce::String midiName (int midi)
-    {
-        return juce::String(noteNames[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
     }
 }
 
@@ -509,6 +505,68 @@ void AudienceMidiGeneratorEditor::resized()
         incomingMonitor.setBounds({});
         outgoingMonitor.setBounds({});
     }
+
+    layoutScaleCardHitTargets();
+}
+
+// Computes the piano-key / pitch-pad / remap-cell hit-test rectangles once per
+// layout pass. These depend only on scaleCard and the scale-control widget
+// bounds (all set above in resized()), never on runtime parameter values, so the
+// rectangles are stable between paints. The geometry here mirrors exactly what
+// drawScaleCard() uses to render those same elements, keeping hit-testing and
+// drawing in lockstep while avoiding a per-paint recompute.
+void AudienceMidiGeneratorEditor::layoutScaleCardHitTargets()
+{
+    auto r = scaleCard.reduced(18);
+
+    auto piano = juce::Rectangle<int>(r.getX(), r.getY() + 52, r.getWidth(), 44);
+    const int whiteIdx[] = { 0, 2, 4, 5, 7, 9, 11 };
+    const float whiteW = (float) piano.getWidth() / 7.0f;
+    for (int i = 0; i < 7; ++i)
+    {
+        const int pc = whiteIdx[i];
+        auto key = juce::Rectangle<float>((float) piano.getX() + (float) i * whiteW + 2.0f,
+                                          (float) piano.getY() + 4.0f,
+                                          whiteW - 4.0f, (float) piano.getHeight() - 8.0f);
+        rootKeyBounds[(size_t) pc] = key.toNearestInt();
+    }
+    const std::array<std::pair<int, float>, 5> blackKeys { { {1, 0.7f}, {3, 1.7f}, {6, 3.7f}, {8, 4.7f}, {10, 5.7f} } };
+    for (auto [pc, pos] : blackKeys)
+    {
+        auto key = juce::Rectangle<float>((float) piano.getX() + pos * whiteW,
+                                          (float) piano.getY() + 4.0f,
+                                          whiteW * 0.56f, (float) piano.getHeight() * 0.58f);
+        rootKeyBounds[(size_t) pc] = key.toNearestInt();
+    }
+
+    const int stripHeight = scaleCard.getHeight() < 380 ? 42 : 48;
+    const int controlsBottom = juce::jmax(juce::jmax(scaleCombo.getBottom(), transposeSlider.getBottom()),
+                                          juce::jmax(scaleEnableButton.getBottom(), correctionCombo.getBottom()));
+    auto strip = juce::Rectangle<int>(r.getX(), controlsBottom + 18, r.getWidth(), stripHeight);
+    const int gap = 4;
+    const int padW = (strip.getWidth() - gap * 11) / 12;
+    for (int pc = 0; pc < 12; ++pc)
+    {
+        auto pad = juce::Rectangle<int>(strip.getX() + pc * (padW + gap), strip.getY(), padW, strip.getHeight());
+        pitchPadBounds[(size_t) pc] = pad;
+    }
+
+    auto matrix = juce::Rectangle<int>(r.getX(), strip.getBottom() + 14, r.getWidth(),
+                                       juce::jmax(66, r.getBottom() - strip.getBottom() - 14));
+    const int cell = juce::jmax(6, juce::jmin(20, juce::jmin((matrix.getWidth() - 56) / 12,
+                                                             (matrix.getHeight() - 26) / 12)));
+    const int size = juce::jmax(5, cell - 4);
+    const int gridX = matrix.getX() + 34;
+    const int gridY = matrix.getY() + 8;
+    for (int input = 0; input < 12; ++input)
+    {
+        for (int out = 0; out < 12; ++out)
+        {
+            const int row = 11 - out;
+            auto c = juce::Rectangle<int>(gridX + input * cell, gridY + row * cell, size, size).expanded(3);
+            remapCellBounds[(size_t) out][(size_t) input] = c;
+        }
+    }
 }
 
 juce::Point<float> AudienceMidiGeneratorEditor::projectSeat (int row, int col, juce::Rectangle<float> venue) const
@@ -580,7 +638,7 @@ void AudienceMidiGeneratorEditor::drawHeader (juce::Graphics& g)
 
     g.setColour(text());
     g.setFont(sans(24.0f, juce::Font::bold));
-    g.drawText("Audience MIDI Generator", header.getX() + 82, header.getY() + 18, 360, 28, juce::Justification::centredLeft);
+    g.drawText("SpektraSynth MIDI Generator", header.getX() + 82, header.getY() + 18, 360, 28, juce::Justification::centredLeft);
     g.setColour(textDim());
     g.setFont(sans(13.0f));
     g.drawText("UDP audience seats -> scale, remap, channel and MIDI output", header.getX() + 82, header.getY() + 48, 460, 18, juce::Justification::centredLeft);
@@ -670,7 +728,7 @@ void AudienceMidiGeneratorEditor::drawVenue (juce::Graphics& g)
             {
                 g.setFont(mono(7.0f, juce::Font::bold));
                 g.setColour(text());
-                g.drawText(midiName(note), juce::Rectangle<float>(p.x - 16.0f, p.y - 19.0f, 32.0f, 10.0f),
+                g.drawText(UiText::midiNoteName(note), juce::Rectangle<float>(p.x - 16.0f, p.y - 19.0f, 32.0f, 10.0f),
                            juce::Justification::centred);
             }
         }
@@ -767,7 +825,6 @@ void AudienceMidiGeneratorEditor::drawScaleCard (juce::Graphics& g)
         auto key = juce::Rectangle<float>((float) piano.getX() + (float) i * whiteW + 2.0f,
                                           (float) piano.getY() + 4.0f,
                                           whiteW - 4.0f, (float) piano.getHeight() - 8.0f);
-        rootKeyBounds[(size_t) pc] = key.toNearestInt();
         g.setColour(root == pc ? accent() : surface2());
         g.fillRoundedRectangle(key, 4.0f);
         g.setColour(root == pc ? darkOnAccent() : textDim());
@@ -781,7 +838,6 @@ void AudienceMidiGeneratorEditor::drawScaleCard (juce::Graphics& g)
         auto key = juce::Rectangle<float>((float) piano.getX() + pos * whiteW,
                                           (float) piano.getY() + 4.0f,
                                           whiteW * 0.56f, (float) piano.getHeight() * 0.58f);
-        rootKeyBounds[(size_t) pc] = key.toNearestInt();
         g.setColour(root == pc ? accent() : bg());
         g.fillRoundedRectangle(key, 4.0f);
         g.setColour(root == pc ? darkOnAccent() : textDim());
@@ -803,7 +859,6 @@ void AudienceMidiGeneratorEditor::drawScaleCard (juce::Graphics& g)
     for (int pc = 0; pc < 12; ++pc)
     {
         auto pad = juce::Rectangle<int>(strip.getX() + pc * (padW + gap), strip.getY(), padW, strip.getHeight());
-        pitchPadBounds[(size_t) pc] = pad;
         const bool inScale = isPitchClassInScale(pc);
         const int rel = (pc - root + 12) % 12;
         g.setColour(inScale ? accent() : bgDeep());
@@ -841,7 +896,6 @@ void AudienceMidiGeneratorEditor::drawScaleCard (juce::Graphics& g)
         {
             const int row = 11 - out;
             auto c = juce::Rectangle<int>(gridX + input * cell, gridY + row * cell, size, size).expanded(3);
-            remapCellBounds[(size_t) out][(size_t) input] = c;
             const bool selected = mapped == out;
             const bool diag = input == out;
             const bool hotCol = (hotPc == input && juce::Time::getMillisecondCounterHiRes() < hotPcUntilMs) || hoveredRemapColumn == input;

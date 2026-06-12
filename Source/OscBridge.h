@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <juce_core/juce_core.h>
 #include <juce_osc/juce_osc.h>
 #include "SeatEventSink.h"
 
@@ -20,6 +21,10 @@ class OscBridge
 public:
     struct SharedPort;
 
+    // Maximum number of in-process OscBridge clients that may share one UDP
+    // port. Surfaced so callers/tests can reason about the cap (B25).
+    static constexpr int MAX_SHARED_CLIENTS = 16;
+
     explicit OscBridge (SeatEventSink& target);
     ~OscBridge();
 
@@ -29,6 +34,12 @@ public:
     bool isRunning()    const noexcept { return running; }
     int  getCurrentPort() const noexcept { return currentPort; }
 
+    // Human-readable status for the UI / debug panel. Mirrors the bool
+    // returned by start(), and additionally surfaces the "port full"
+    // condition when the shared-port client cap is reached (B25) instead of
+    // the client being silently dropped.
+    const juce::String& oscStatus() const noexcept { return statusString; }
+
 private:
     void oscMessageReceived (const juce::OSCMessage& msg);
 
@@ -36,4 +47,5 @@ private:
     std::shared_ptr<SharedPort> sharedPort;
     int  currentPort = 0;
     bool running     = false;
+    juce::String statusString;
 };

@@ -177,7 +177,7 @@ public:
     juce::StringArray getMidiOutputOptions() const
     {
         juce::StringArray options;
-        options.add("Virtual: Audience MIDI Device Out");
+        options.add("Virtual: SpektraSynth MIDI Device Out");
         for (const auto& device : juce::MidiOutput::getAvailableDevices())
             options.add(device.name);
         return options;
@@ -191,11 +191,11 @@ public:
 
         if (midiOutputOptionIndex == 0)
         {
-            midiOutput = juce::MidiOutput::createNewDevice("Audience MIDI Device Out");
+            midiOutput = juce::MidiOutput::createNewDevice("SpektraSynth MIDI Device Out");
             if (midiOutput != nullptr)
             {
                 midiOutput->startBackgroundThread();
-                outputStatus = "Virtual port: Audience MIDI Device Out";
+                outputStatus = "Virtual port: SpektraSynth MIDI Device Out";
             }
             else
             {
@@ -493,7 +493,7 @@ public:
         g.fillAll(bg());
         g.setColour(text());
         g.setFont(juce::Font(juce::FontOptions(24.0f, juce::Font::bold)));
-        g.drawText("Audience MIDI Device", 24, 16, getWidth() - 48, 30, juce::Justification::centredLeft);
+        g.drawText("SpektraSynth MIDI Device", 24, 16, getWidth() - 48, 30, juce::Justification::centredLeft);
 
         g.setColour(muted());
         g.setFont(juce::Font(juce::FontOptions(13.0f, juce::Font::plain)));
@@ -637,7 +637,7 @@ private:
 class AudienceMidiDeviceApplication final : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override       { return "Audience MIDI Device"; }
+    const juce::String getApplicationName() override       { return "SpektraSynth MIDI Device"; }
     const juce::String getApplicationVersion() override    { return ProjectInfo::versionString; }
     bool moreThanOneInstanceAllowed() override             { return false; }
 

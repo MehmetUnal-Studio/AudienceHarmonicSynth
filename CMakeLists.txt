@@ -29,7 +29,7 @@ FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(AudienceHarmonicSynth
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audienceharmonicsynth"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynth"
     VERSION                     "${AUDIENCE_HARMONIC_SYNTH_VERSION}"
     IS_SYNTH                    TRUE
     NEEDS_MIDI_INPUT            ${AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_INPUT}
@@ -40,7 +40,7 @@ juce_add_plugin(AudienceHarmonicSynth
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Ahss
     FORMATS                     ${AUDIENCE_HARMONIC_SYNTH_FORMATS}
-    PRODUCT_NAME                "Audience Harmonic Synth"
+    PRODUCT_NAME                "SpektraSynth"
 )
 
 juce_generate_juce_header(AudienceHarmonicSynth)
@@ -56,6 +56,7 @@ endif()
 
 target_sources(AudienceHarmonicSynth PRIVATE
     Source/PluginProcessor.cpp
+    Source/MpeMidiOutput.cpp
     Source/PluginEditor.cpp
     Source/AuroraComponent.cpp
     Source/LibraryRail.cpp
@@ -70,7 +71,7 @@ target_sources(AudienceHarmonicSynth PRIVATE
 
 juce_add_plugin(AudienceHarmonicMidi
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audienceharmonicmidi"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmidi"
     IS_SYNTH                    FALSE
     NEEDS_MIDI_INPUT            TRUE
     NEEDS_MIDI_OUTPUT           TRUE
@@ -80,7 +81,7 @@ juce_add_plugin(AudienceHarmonicMidi
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Ahmd
     FORMATS                     VST3 Standalone
-    PRODUCT_NAME                "Audience Harmonic MIDI"
+    PRODUCT_NAME                "SpektraSynth MIDI"
 )
 
 juce_generate_juce_header(AudienceHarmonicMidi)
@@ -96,7 +97,7 @@ target_sources(AudienceHarmonicMidi PRIVATE
 
 juce_add_plugin(AudienceMidiGenerator
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audiencemidigenerator"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmidigenerator"
     IS_SYNTH                    FALSE
     NEEDS_MIDI_INPUT            TRUE
     NEEDS_MIDI_OUTPUT           TRUE
@@ -106,7 +107,7 @@ juce_add_plugin(AudienceMidiGenerator
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Amgn
     FORMATS                     VST3
-    PRODUCT_NAME                "Audience MIDI Generator"
+    PRODUCT_NAME                "SpektraSynth MIDI Generator"
 )
 
 juce_generate_juce_header(AudienceMidiGenerator)
@@ -122,8 +123,8 @@ target_sources(AudienceMidiGenerator PRIVATE
 
 juce_add_gui_app(AudienceMidiDevice
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audiencemididevice"
-    PRODUCT_NAME                "Audience MIDI Device"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmididevice"
+    PRODUCT_NAME                "SpektraSynth MIDI Device"
 )
 
 juce_generate_juce_header(AudienceMidiDevice)
@@ -312,6 +313,25 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_test(NAME AudienceMidiPitchTests COMMAND AudienceMidiPitchTests)
 
+    add_executable(AudienceMpeOutputTests
+        Tests/MpeOutputTests.cpp
+        Source/MpeMidiOutput.cpp
+    )
+
+    target_compile_definitions(AudienceMpeOutputTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceMpeOutputTests PRIVATE
+        juce::juce_audio_basics
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceMpeOutputTests COMMAND AudienceMpeOutputTests)
+
     add_executable(AudienceOscBridgeTests
         Tests/OscBridgeTests.cpp
         Source/OscBridge.cpp
@@ -349,6 +369,27 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     )
 
     add_test(NAME AudienceAtomicScaleBuilderTests COMMAND AudienceAtomicScaleBuilderTests)
+
+    add_executable(AudienceSampleLibraryTests
+        Tests/SampleLibraryTests.cpp
+        Source/SampleLibrary.cpp
+    )
+
+    target_compile_definitions(AudienceSampleLibraryTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/Samples"
+    )
+
+    target_link_libraries(AudienceSampleLibraryTests PRIVATE
+        juce::juce_audio_formats
+        juce::juce_audio_basics
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceSampleLibraryTests COMMAND AudienceSampleLibraryTests)
 
     add_executable(AudiencePerformanceSmokeTests
         Tests/PerformanceSmokeTests.cpp
@@ -403,7 +444,13 @@ if(NOT ANDROID)
     endforeach()
 endif()
 
-if(APPLE AND NOT ANDROID)
+# B15: the macOS auto-install (clean copy) of the AudienceHarmonicSynth VST3
+# into the user plug-ins folder is a local-dev convenience. Default ON preserves
+# the current behaviour; configure with -DAUDIENCE_SYNTH_AUTO_INSTALL=OFF (e.g. on
+# CI or other machines) to build the VST3 without installing/copying it.
+option(AUDIENCE_SYNTH_AUTO_INSTALL "Auto-install (clean copy) the VST3 to the user plug-ins folder after build (macOS dev convenience)" ON)
+
+if(AUDIENCE_SYNTH_AUTO_INSTALL AND APPLE AND NOT ANDROID)
     add_custom_command(TARGET AudienceHarmonicSynth_VST3 POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf
             "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience Harmonic Synth.vst3"

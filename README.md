@@ -1,4 +1,4 @@
-# Audience Harmonic Synth
+# SpektraSynth
 
 Version 1.0.35
 
@@ -35,8 +35,8 @@ cmake --build build --config Release -j
 
 The first configure downloads JUCE 8.0.4 via FetchContent. Release outputs:
 
-- VST3: `build/AudienceHarmonicSynth_artefacts/Release/VST3/Audience Harmonic Synth.vst3`
-- Standalone: `build/AudienceHarmonicSynth_artefacts/Release/Standalone/Audience Harmonic Synth.app`
+- VST3: `build/AudienceHarmonicSynth_artefacts/Release/VST3/SpektraSynth.vst3`
+- Standalone: `build/AudienceHarmonicSynth_artefacts/Release/Standalone/SpektraSynth.app`
 
 The build copies `Samples/` into each bundle's `Contents/Resources/Samples`
 folder. During development, the plugin can also load the source-tree `Samples/`
@@ -78,7 +78,7 @@ folder directly.
 | Audio MIDI Output Mode | 3 choices | Audio Only | Renders internal audio only, MIDI only, or audio plus outgoing MIDI |
 | MIDI Output Type | 3 choices | Off | Sends no MIDI, normal MIDI notes, or MPE per-note pitch-bend output |
 | Normal MIDI Channel | 1..16 | 1 | Channel used when MIDI Output Type is Normal MIDI |
-| MPE Pitch Bend Range | 4 choices | 48 st | Pitch-bend range for MPE member channels; the receiving synth must match |
+| MPE Pitch Bend Range | 4 choices | 2 st | Pitch-bend range for MPE member channels; the receiving synth must match. 2 st is the universal MPE default and comfortably covers the <= +/-50 cent microtonal offsets |
 | MPE Send Setup | on/off | on | Sends MPE lower-zone and bend-range RPN setup messages when needed |
 | MPE Pitch Mode | 2 choices | Retrigger | Retrigger degree changes or glide by updating per-note pitch bend when possible |
 
@@ -116,6 +116,26 @@ fade-out tail. The Python tools can also prepare files on disk:
 python3 trim_silence.py "Samples/Piano Dream"
 python3 split_voice.py Sources/HumanVoices/HumanVoice.wav Samples/HumanLive C1 D1 E1 F1 G1 A1 B1
 ```
+
+## `Source/` vs `Sources/`
+
+Two top-level directories differ by a single trailing `s`. They are unrelated and
+must not be confused:
+
+- **`Source/`** (singular) — the C++/JUCE plugin source code (`PluginProcessor.cpp`,
+  `PartialEngine.cpp`, the generated `ElementSpectralData.cpp`, etc.). This is what
+  `CMakeLists.txt` compiles.
+- **`Sources/`** (plural) — raw, unprocessed source recordings used as **input** to
+  the Python prep tools, not loaded by the plugin at runtime. It currently holds
+  `Lyre.wav` and `HumanVoices/HumanVoice.wav` (plus `.orig` backups and an Ableton
+  `.asd` analysis sidecar).
+
+The prep tools (`trim_silence.py`, `split_voice.py`) read raw audio from `Sources/`
+and write playable, root-note-named libraries into `Samples/`. At runtime the plugin
+only ever scans `Samples/` (the `AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH` baked into the
+build), never `Sources/`.
+
+Do not rename `Sources/`: tool invocations and local asset paths reference it by name.
 
 ## Simulator
 
@@ -257,7 +277,7 @@ playable scale  -> clustered representative degrees for performance
 
 ## MIDI Scale Module
 
-The Ableton-focused `Audience MIDI Generator` target includes a Scale MIDI
+The Ableton-focused `SpektraSynth MIDI Generator` target includes a Scale MIDI
 module before MIDI is sent to the host/external output. When enabled, note
 events are locked to a selected root, scale type, and correction mode while
 velocity, timing, channel, CC, pitch bend, aftertouch, and other non-note data

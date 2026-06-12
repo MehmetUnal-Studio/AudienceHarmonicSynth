@@ -1,4 +1,5 @@
 #include "AuroraComponent.h"
+#include "UiText.h"
 #include <cmath>
 
 namespace
@@ -35,12 +36,6 @@ namespace
             }
         }
         return juce::Colours::white;
-    }
-
-    juce::String midiName (int midi)
-    {
-        static const char* names[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
-        return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
     }
 
     juce::Colour wavelengthColour (double wavelengthNm)
@@ -134,6 +129,24 @@ juce::Colour AuroraComponent::bandColour (float t) const
     return juce::Colour::fromHSV(200.0f / 360.0f, 0.6f, L, 1.0f);
 }
 
+bool AuroraComponent::elementTint (juce::Colour& out) const
+{
+    // Only the Element Spectral engine carries an "element identity"; Sample
+    // Library playback keeps the neutral spectrum palette unchanged (FIX 8).
+    if (engine.engineSource.load(std::memory_order_relaxed) != 1)
+        return false;
+
+    const double nm = engine.getSpectralElementRootWavelengthNm();
+    if (nm < 360.0 || nm > 780.0)
+        return false;
+
+    // Reuse the same visible-spectrum nm->RGB mapping used by the wavelength
+    // wheel so the tint matches the readout the user already sees elsewhere.
+    // Lift the brightness so it reads as a hue rather than a near-black colour.
+    out = wavelengthColour(nm).withBrightness(0.85f);
+    return true;
+}
+
 void AuroraComponent::resized() {}
 
 void AuroraComponent::timerCallback()
@@ -184,6 +197,9 @@ void AuroraComponent::timerCallback()
                 p.decay  = 0.4f + rng.nextFloat() * 0.6f;
                 p.radius = 1.0f + rng.nextFloat() * 1.8f;
                 p.colour = bandColour(ti).interpolatedWith(juce::Colours::white, 0.4f);
+                juce::Colour pTint;
+                if (elementTint(pTint))
+                    p.colour = p.colour.interpolatedWith(pTint, 0.35f);
                 particles.push_back(p);
             }
         }
@@ -206,6 +222,13 @@ void AuroraComponent::paint (juce::Graphics& g)
     const float H = (float) getHeight();
     if (W <= 0 || H <= 0) return;
 
+    // Active-element identity tint (FIX 8). When set, the audience seats and the
+    // scale-strip beams are nudged toward the element's reference-wavelength hue
+    // so the whole visualization reads as "this element". Sample mode -> no tint.
+    juce::Colour elementCol;
+    const bool   tinted = elementTint(elementCol);
+    const float  tintAmt = tinted ? 0.42f : 0.0f;
+
     // ---- background ----
     juce::ColourGradient bg(juce::Colour(0xff0b0f16), W * 0.5f, H * 0.0f,
                             juce::Colour(0xff030608), W * 0.5f, H * 1.1f,
@@ -224,12 +247,9 @@ void AuroraComponent::paint (juce::Graphics& g)
 
     // ---- panel labels ----
     {
-        g.setColour(juce::Colour(0xff686f79));
-        g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 9.0f, juce::Font::plain)));
-        g.drawText("02", header.removeFromLeft(22), juce::Justification::centredLeft);
         g.setColour(juce::Colour(0xffd9dde6));
-        g.setFont(juce::Font(juce::FontOptions(10.5f)).boldened());
-        g.drawText("AUDIENCE MAP", header.removeFromLeft(122), juce::Justification::centredLeft);
+        g.setFont(juce::Font(juce::FontOptions(11.5f)).boldened());
+        g.drawText("AUDIENCE MAP", header.removeFromLeft(140), juce::Justification::centredLeft);
 
         g.setColour(juce::Colour(0xff707681));
         g.setFont(juce::Font(juce::FontOptions(10.0f)));
@@ -255,6 +275,9 @@ void AuroraComponent::paint (juce::Graphics& g)
         const float cellW = (float) grid.getWidth()  / (float) cols;
         const float cellH = (float) grid.getHeight() / (float) rows;
         const float seatR = juce::jlimit(1.4f, 4.2f, std::min(cellW, cellH) * 0.33f);
+        // Active seats are the hero of the map: render them well above the tiny
+        // inactive-dot size so a live audience reads clearly from a distance.
+        const float activeBaseR = juce::jlimit(6.0f, 16.0f, std::max(cellW, cellH) * 0.62f);
 
         g.setColour(juce::Colour(0x15161d25));
         for (int r = 0; r <= rows; ++r)
@@ -284,17 +307,22 @@ void AuroraComponent::paint (juce::Graphics& g)
 
                 const float xNorm = engine.getSeatX(row, col);
                 const float amp = juce::jlimit(0.0f, 1.0f, engine.getSeatY(row, col));
-                const auto colr = bandColour(xNorm).interpolatedWith(juce::Colour(0xffeff7ff), 0.16f);
-                const float activeR = seatR * (1.5f + amp * 1.2f);
+                auto colr = bandColour(xNorm).interpolatedWith(juce::Colour(0xffeff7ff), 0.16f);
+                if (tinted)
+                    colr = colr.interpolatedWith(elementCol, tintAmt);
+                const float activeR = activeBaseR * (0.82f + amp * 0.5f);
 
-                g.setColour(colr.withAlpha(0.12f + amp * 0.20f));
-                g.fillEllipse(cx - activeR * 2.1f, cy - activeR * 2.1f,
-                              activeR * 4.2f, activeR * 4.2f);
-                g.setColour(colr.withAlpha(0.92f));
+                // soft outer glow
+                g.setColour(colr.withAlpha(0.10f + amp * 0.18f));
+                g.fillEllipse(cx - activeR * 2.4f, cy - activeR * 2.4f,
+                              activeR * 4.8f, activeR * 4.8f);
+                // glowing core
+                g.setColour(colr.withAlpha(0.95f));
                 g.fillEllipse(cx - activeR, cy - activeR, activeR * 2.0f, activeR * 2.0f);
-                g.setColour(juce::Colours::white.withAlpha(0.38f));
-                g.fillEllipse(cx - activeR * 0.34f, cy - activeR * 0.34f,
-                              activeR * 0.68f, activeR * 0.68f);
+                // hot centre
+                g.setColour(juce::Colours::white.withAlpha(0.45f));
+                g.fillEllipse(cx - activeR * 0.32f, cy - activeR * 0.32f,
+                              activeR * 0.64f, activeR * 0.64f);
             }
         }
 
@@ -304,6 +332,30 @@ void AuroraComponent::paint (juce::Graphics& g)
         g.drawText("LOW PITCH / STAGE", map.getX() + 8, map.getY() + 6, 140, 12, juce::Justification::left);
         g.drawText("MID", map.getCentreX() - 28, map.getY() + 6, 56, 12, juce::Justification::centred);
         g.drawText("HIGH PITCH / STAGE", map.getRight() - 142, map.getY() + 6, 134, 12, juce::Justification::right);
+
+        // ---- empty-state hint (FIX 4) ----
+        // No audience and nothing sounding: tell the operator the engine is
+        // waiting and on which UDP port it's listening for OSC. Kept dim and
+        // centred so a live audience never sees it (it vanishes once seats or
+        // voices appear).
+        if (engine.getRegisteredSeatCount() == 0 && engine.getActiveVoiceCount() == 0)
+        {
+            auto hint = map.reduced(24, 0);
+            const int cy = map.getCentreY();
+
+            g.setColour(juce::Colour(0xff6f7783).withAlpha(0.92f));
+            g.setFont(juce::Font(juce::FontOptions(15.0f)).boldened());
+            g.drawText("Waiting for audience",
+                       hint.getX(), cy - 26, hint.getWidth(), 22, juce::Justification::centred);
+
+            const juce::String sub = listening
+                ? ("Listening for OSC on UDP " + juce::String(listenPort))
+                : (listenPort > 0 ? ("OSC port " + juce::String(listenPort) + " unavailable")
+                                  : juce::String("OSC bridge offline"));
+            g.setColour((listening ? juce::Colour(0xff5b636f) : juce::Colour(0xff7a5b5b)).withAlpha(0.92f));
+            g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 11.0f, juce::Font::plain)));
+            g.drawText(sub, hint.getX(), cy + 2, hint.getWidth(), 16, juce::Justification::centred);
+        }
     }
 
     // ---- bottom spectral scale strip ----
@@ -368,8 +420,14 @@ void AuroraComponent::paint (juce::Graphics& g)
 
         const int loMidi = n > 0 ? engine.getScaleMidi(0) : -1;
 
-        std::array<float, 128> midiEnergy {};
-        std::array<float, 8192> stepEnergy {};
+        // midiEnergy/stepEnergy are reused members (see header) rather than
+        // per-paint stack arrays. Clear them to match the previous semantics:
+        // midiEnergy is fully zeroed (every entry is accumulated and read), while
+        // stepEnergy only needs its [0, n) range cleared - that is the only range
+        // ever read, so stale values beyond n are harmless and we skip zeroing
+        // all 8192 floats (32 KB) on every paint.
+        midiEnergy.fill(0.0f);
+        std::fill_n(stepEnergy.begin(), (size_t) juce::jmin(n, (int) stepEnergy.size()), 0.0f);
         for (int i = 0; i < engine.getMaxVoices(); ++i)
         {
             const float amp = engine.getVoiceAmp(i);
@@ -580,7 +638,9 @@ void AuroraComponent::paint (juce::Graphics& g)
                                         ? midiEnergy[(size_t) midi] : 0.0f);
             const float activeNorm = maxScaleEnergy > 0.0f ? juce::jlimit(0.0f, 1.0f, activity / maxScaleEnergy)
                                                            : 0.0f;
-            const auto col = interpStops(1.0f - t);
+            auto col = interpStops(1.0f - t);
+            if (tinted)
+                col = col.interpolatedWith(elementCol, tintAmt * 0.7f);
             const bool active = activity > 0.015f;
             const float alpha = active ? 0.62f + activeNorm * 0.34f : 0.24f;
             const float lineW = active ? 1.8f + activeNorm * 2.6f : 1.25f;
@@ -652,7 +712,7 @@ void AuroraComponent::paint (juce::Graphics& g)
                 g.drawLine(x, (float) noteAxis.getY(), x, (float) noteAxis.getY() + 4.0f, 1.0f);
                 g.setColour(juce::Colour(0xff6b717c));
                 g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 8.0f, juce::Font::plain)));
-                g.drawText(midiName(midi), (int) (x - 18.0f), noteAxis.getY() + 3, 36, 10,
+                g.drawText(UiText::midiNoteName(midi), (int) (x - 18.0f), noteAxis.getY() + 3, 36, 10,
                            juce::Justification::centred);
             }
         }
@@ -669,7 +729,7 @@ void AuroraComponent::paint (juce::Graphics& g)
             const float x = xForT(t);
             g.setColour(juce::Colour(0xffffc266));
             g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 9.0f, juce::Font::plain)).boldened());
-            g.drawText("DOM " + midiName(dominantMidi), (int) (x - 32.0f), lines.getY() + 2, 64, 12,
+            g.drawText("DOM " + UiText::midiNoteName(dominantMidi), (int) (x - 32.0f), lines.getY() + 2, 64, 12,
                        juce::Justification::centred);
             g.drawLine(x, (float) lines.getY() + 15.0f, x, (float) lines.getY() + 21.0f, 1.0f);
         }

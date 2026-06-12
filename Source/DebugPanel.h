@@ -28,5 +28,6 @@ private:
     juce::TextEditor   midiView;
     juce::TextEditor   reportView;
     juce::TextButton   copyReportButton { "Copy Report" };
+    juce::TextButton   copyMidiButton { "Copy" };
     juce::String       lastReport;
 };

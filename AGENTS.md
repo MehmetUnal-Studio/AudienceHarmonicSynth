@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project
-This is a JUCE/C++ audio plugin called Audience Harmonic Synth.
+This is a JUCE/C++ audio plugin called SpektraSynth.
 
 The plugin is an audience-driven musical instrument with:
 - internal audio synthesis
@@ -73,10 +73,11 @@ For Element / Atomic Spectral Scales:
 - do not fake MPE using global pitch bend
 
 ## MPE defaults
-Lower Zone:
-- master channel: 1
-- member channels: 2-16
-- pitch bend range: configurable, default 48 semitones
+Zone (selectable via the mpeZone parameter):
+- Lower (default): master channel 1, member channels 2-16
+- Upper: master channel 16, member channels 1-15
+- pitch bend range: configurable (2/12/24/48), default 2 semitones
+  (spectral degrees are emitted as nearest 12-TET note + bend, always <= +/-50 cents)
 
 Each active voice owns one MPE member channel until note off.
 

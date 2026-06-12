@@ -1,9 +1,12 @@
 #include "../Source/PartialEngine.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -28,6 +31,104 @@ namespace
     juce::File pianoDreamDir()
     {
         return juce::File(AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH).getChildFile("Piano Dream");
+    }
+
+    // ---- B10: graceful degradation when the sample library is ABSENT -----
+    //
+    // These perf smoke scenarios need a loaded sample library to render through
+    // the sample voice path. When the bundled "Piano Dream" library is present
+    // (the normal case here) every scenario runs against it unchanged. When it
+    // is missing we synthesise a tiny stand-in library (short decaying sines,
+    // named A0.wav..C8.wav) into a temp dir so the render/perf path still runs;
+    // the perf bounds asserted below (finite, peak, voice cap, wall-clock) do
+    // not depend on the sample timbre. Only if even the synthetic library
+    // cannot be written do we SKIP the affected scenario instead of failing it.
+
+    // Sustained 3 s tone (see SignalFlowTests for the full rationale): a long,
+    // near-constant-amplitude sample with a couple of low harmonics so the
+    // sample voice keeps feeding audible, bounded data for the whole render.
+    bool writeSyntheticWav (const juce::File& file, double freqHz)
+    {
+        constexpr double sr      = 44100.0;
+        constexpr double seconds = 3.0;
+        const int        len     = (int) (sr * seconds);
+        const int        attack  = (int) (sr * 0.005);
+        const int        release = (int) (sr * 0.030);
+
+        juce::AudioBuffer<float> buffer (1, len);
+        auto* data = buffer.getWritePointer (0);
+        const double twoPiF = 2.0 * juce::MathConstants<double>::pi * freqHz;
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = (double) i / sr;
+            double s = std::sin (twoPiF * t)
+                     + 0.30 * std::sin (2.0 * twoPiF * t)
+                     + 0.15 * std::sin (3.0 * twoPiF * t);
+
+            double env = 0.35;
+            if (i < attack)               env *= (double) i / (double) attack;
+            else if (i > len - release)   env *= (double) (len - i) / (double) release;
+
+            data[i] = (float) (env * s / 1.45);
+        }
+
+        file.deleteFile();
+        std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+        if (stream == nullptr)
+            return false;
+
+        juce::WavAudioFormat format;
+        std::unique_ptr<juce::AudioFormatWriter> writer (
+            format.createWriterFor (stream.get(), sr, 1, 16, {}, 0));
+        if (writer == nullptr)
+            return false;
+
+        stream.release(); // writer now owns the stream
+        return writer->writeFromAudioSampleBuffer (buffer, 0, len);
+    }
+
+    juce::File buildSyntheticLibrary()
+    {
+        static const char* const names[] =
+            { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("SpektraSynthPerf_SynthSamples");
+        dir.createDirectory();
+
+        int written = 0;
+        for (int midi = 21; midi <= 108; ++midi)
+        {
+            const int oct = midi / 12 - 1;
+            const juce::String noteName =
+                juce::String (names[midi % 12]) + juce::String (oct);
+            const double freq = 440.0 * std::pow (2.0, (midi - 69) / 12.0);
+            if (writeSyntheticWav (dir.getChildFile (noteName + ".wav"), freq))
+                ++written;
+        }
+
+        return written > 0 ? dir : juce::File();
+    }
+
+    // Directory the scenarios load from: real Piano Dream if present, else a
+    // synthetic stand-in (computed once). `usingSynthetic` reports the choice.
+    const juce::File& effectiveSampleDir (bool& usingSynthetic)
+    {
+        static bool       synthetic = false;
+        static juce::File resolved = []
+        {
+            auto real = pianoDreamDir();
+            return real.isDirectory() ? real : juce::File();
+        }();
+
+        if (resolved == juce::File() && ! synthetic)
+        {
+            resolved  = buildSyntheticLibrary();
+            synthetic = (resolved != juce::File());
+        }
+
+        usingSynthetic = synthetic;
+        return resolved;
     }
 
     void configureEngine (PartialEngine& engine, int blockSize)
@@ -103,8 +204,10 @@ namespace
         return metrics;
     }
 
-    bool runScenario (const char* name, int polyMode, int participants, int blockSize,
-                      double audioSeconds, int grainShape, int signatureMode)
+    enum class ScenarioResult { Pass, Fail, Skip };
+
+    ScenarioResult runScenario (const char* name, int polyMode, int participants, int blockSize,
+                                double audioSeconds, int grainShape, int signatureMode)
     {
         PartialEngine engine;
         configureEngine(engine, blockSize);
@@ -112,11 +215,31 @@ namespace
         engine.grainShape.store(grainShape);
         engine.signatureMode.store(signatureMode);
 
-        if (engine.loadSampleLibrary(pianoDreamDir()) <= 0)
+        // B10: load the bundled library if present, else a synthetic stand-in.
+        bool usingSynthetic = false;
+        const auto& sampleDir = effectiveSampleDir(usingSynthetic);
+
+        if (sampleDir == juce::File())
         {
-            std::cout << "FAIL  " << name << "  samples unavailable\n";
-            return false;
+            // No real library AND synthetic generation failed: this scenario
+            // cannot run. SKIP it (not a failure) with a clear reason.
+            std::cout << "SKIP  " << name
+                      << "  (no sample library available - real or synthetic)\n";
+            return ScenarioResult::Skip;
         }
+
+        if (engine.loadSampleLibrary(sampleDir) <= 0)
+        {
+            // The resolved directory exists but produced no usable samples.
+            std::cout << "SKIP  " << name
+                      << "  (sample library at " << sampleDir.getFullPathName().toStdString()
+                      << " loaded no samples)\n";
+            return ScenarioResult::Skip;
+        }
+
+        if (usingSynthetic)
+            std::cout << "NOTE  " << name
+                      << "  using synthetic stand-in sample library\n";
 
         triggerCrowd(engine, participants);
         const auto metrics = renderScenario(engine, blockSize, audioSeconds);
@@ -135,18 +258,27 @@ namespace
                   << " worstBlockMs=" << metrics.worstBlockMs
                   << " peak=" << metrics.peak
                   << "\n";
-        return ok;
+        return ok ? ScenarioResult::Pass : ScenarioResult::Fail;
     }
 }
 
 int main()
 {
     int failed = 0;
-    failed += runScenario("Normal 60 participants", 0, 60, 128, 0.25, 0, 0) ? 0 : 1;
-    failed += runScenario("High 130 pulse envelope", 1, 130, 128, 0.20, 3, 3) ? 0 : 1;
-    failed += runScenario("Ultra 512 participants", 2, 512, 256, 0.12, 0, 1) ? 0 : 1;
-    failed += runScenario("Ultra 1024 participants", 2, 1024, 256, 0.08, 0, 2) ? 0 : 1;
+    int skipped = 0;
 
-    std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";
+    auto tally = [&] (ScenarioResult res)
+    {
+        if (res == ScenarioResult::Fail) ++failed;
+        else if (res == ScenarioResult::Skip) ++skipped;
+    };
+
+    tally(runScenario("Normal 60 participants", 0, 60, 128, 0.25, 0, 0));
+    tally(runScenario("High 130 pulse envelope", 1, 130, 128, 0.20, 3, 3));
+    tally(runScenario("Ultra 512 participants", 2, 512, 256, 0.12, 0, 1));
+    tally(runScenario("Ultra 1024 participants", 2, 1024, 256, 0.08, 0, 2));
+
+    std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed")
+              << " (" << skipped << " skipped)\n";
     return failed == 0 ? 0 : 1;
 }

@@ -28,8 +28,7 @@ private:
     void timerCallback() override;
     void paintBrandMark (juce::Graphics&, juce::Rectangle<float>);
     void paintWindowDots (juce::Graphics&, juce::Rectangle<int>);
-    void paintBedPanel  (juce::Graphics&, juce::Rectangle<int>);
-    void paintParticlePanel (juce::Graphics&, juce::Rectangle<int>);
+    void paintModulePanel (juce::Graphics&, juce::Rectangle<int>);
     void paintMacroPanel (juce::Graphics&, juce::Rectangle<int>);
     void paintScaleKeyboard (juce::Graphics&, juce::Rectangle<int>);
     void paintRibbon    (juce::Graphics&, juce::Rectangle<int>);
@@ -82,12 +81,12 @@ private:
     juce::ComboBox rootCombo, rootOctaveCombo, scaleCombo;
     juce::ComboBox polyphonyCombo;
     juce::ComboBox audioMidiOutputModeCombo, midiOutputTypeCombo, externalMidiPitchModeCombo;
-    juce::ComboBox normalMidiChannelCombo, mpeBendRangeCombo, mpePitchModeCombo;
+    juce::ComboBox normalMidiChannelCombo, mpeBendRangeCombo, mpePitchModeCombo, mpeZoneCombo;
     juce::ComboBox midiOutputDeviceCombo;
     juce::Slider octavesSlider;
     juce::Label rootLabel, rootOctaveLabel, scaleLabel, octavesLabel, polyphonyLabel;
     juce::Label audioMidiOutputModeLabel, midiOutputTypeLabel, externalMidiPitchModeLabel;
-    juce::Label normalMidiChannelLabel, mpeBendRangeLabel, mpePitchModeLabel;
+    juce::Label normalMidiChannelLabel, mpeBendRangeLabel, mpePitchModeLabel, mpeZoneLabel;
     juce::Label midiOutputDeviceLabel, midiOutputStatusLabel, midiActivityLabel;
     juce::ToggleButton mpeSetupToggle { "Setup" };
     juce::TextButton midiOutputRefreshBtn { "Rescan" };
@@ -111,6 +110,8 @@ private:
 
     juce::Rectangle<int> bedPanelBounds, particlePanelBounds, macroPanelBounds, keyboardPanelBounds, ribbonBounds;
     juce::Rectangle<int> midiOutputPanelBounds;
+    juce::Rectangle<int> textureTabBounds, voicesTabBounds;   // clickable module tabs
+    int moduleTab = 0;   // 0 = Texture, 1 = Voices (bottom module is tabbed)
 
     static constexpr int computerKeyboardSlots = 36;
     static constexpr int mouseKeyboardSlot = computerKeyboardSlots;
@@ -118,6 +119,7 @@ private:
     int mouseKeyboardStep = -1;
     juce::StringArray lastMidiOutputOptions;
     int midiOutputRefreshCounter = 0;
+    int lastVisibilityKey = -1;   // gates updateOutputModeVisibility() to actual mode changes
 
     using SA = juce::AudioProcessorValueTreeState::SliderAttachment;
     using CA = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
@@ -130,7 +132,7 @@ private:
     std::unique_ptr<CA> soundModeAttach, engineSourceAttach, samplePlaybackAttach, spectralElementAttach, atomicScaleModeAttach;
     std::unique_ptr<CA> rootAttach, rootOctaveAttach, scaleAttach, grainShapeAttach, polyphonyAttach;
     std::unique_ptr<CA> audioMidiOutputModeAttach, midiOutputTypeAttach, externalMidiPitchModeAttach;
-    std::unique_ptr<CA> normalMidiChannelAttach, mpeBendRangeAttach, mpePitchModeAttach;
+    std::unique_ptr<CA> normalMidiChannelAttach, mpeBendRangeAttach, mpePitchModeAttach, mpeZoneAttach;
     std::unique_ptr<BA> reverseAttach, freezeAttach, partialSoloAttach, mpeSetupAttach;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceEditor)
