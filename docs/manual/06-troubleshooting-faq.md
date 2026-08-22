@@ -240,12 +240,12 @@ in [05 - Pitch Systems & External Tuning](05-tuning-files.md).
 
 ## Heavy OSC traffic causes resets or missed movement
 
-The input path is bounded to protect the realtime MIDI path. In Grid and Ensemble,
-duplicate U/V bursts are collapsed to the latest position and sampled on attacks and
-grid boundaries. On/Off remains ordered and is not replaced by movement coalescing.
-Flow forwards movement directly, and an extreme lifecycle burst can still fill the
-fixed-capacity input queue; recovery requests a reset so a dropped release cannot
-leave notes held indefinitely.
+The input path is bounded to protect the realtime MIDI path. In every mode, duplicate
+U/V bursts collapse to the latest position while a separate priority queue preserves
+ordered On/Off. Flow consumes the latest movement marker directly; Grid and Ensemble
+sample the canonical position on attacks and grid boundaries. An extreme lifecycle
+burst can still fill its fixed-capacity queue; recovery requests a reset and rehydrates
+canonical held state so a dropped release cannot leave notes held indefinitely.
 
 - Throttle continuous U/V updates to a musically useful rate.
 - Do not resend unchanged values unnecessarily.

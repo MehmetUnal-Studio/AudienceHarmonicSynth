@@ -75,9 +75,9 @@ veya dosya-formatı modülü yoktur.
 | `AudienceProcessor` | APVTS, process lifecycle, MIDI thru, pitch map, touch durumu, Normal/MPE render, host/harici çıkış, state migration. | `PluginProcessor.*` |
 | `CosmicStateMigration` | Released 1.x'den schema 4'e kadar state'leri güvenli taşıma; eski state'lerde Time Field'ı Flow açma. | `PluginStateMigration.*` |
 | `AudienceEditor` | MIDI-only kontrol ve izleme arayüzü. | `PluginEditor.*` |
-| `OscBridge` | Paylaşımlı UDP listener, OSC parse/validation, değer clamp, zone/traffic telemetrisi. | `OscBridge.*`, `OscWireFormat.h` |
-| `MidiAudienceModel` | 256 source için atomic UI/control snapshot ve aktif `finger0` maskesi. | `MidiAudienceModel.*` |
-| `OscFingerRouter` | Control/OSC thread'lerinden audio thread'e sabit kapasiteli event aktarımı. | `OscFingerRouter.*` |
+| `OscBridge` | Paylaşımlı UDP listener, strict OSC parse/validation, immediate-bundle policy, değer clamp ve zone/traffic telemetrisi. | `OscBridge.*`, `OscWireFormat.h` |
+| `MidiAudienceModel` | 256 source için atomic UI/control snapshot, aktif `finger0` maskesi ve 3 saniyelik live-touch watchdog. | `MidiAudienceModel.*` |
+| `OscFingerRouter` | Ayrı lifecycle/motion FIFO'ları, On/Off önceliği ve latest U/V coalescing ile audio thread'e sabit kapasiteli aktarım. | `OscFingerRouter.*` |
 | `CrowdTimeField` | Flow/Grid/Ensemble scheduling, host/monotonic clock çözümü, fairness, lane, gate ve telemetry. | `CrowdTimeField.*` |
 | `MidiPitchMap` | Yedi tonal 12-TET tablo ve normalize X lookup. | `MidiPitchMap.*` |
 | `AtomicScaleCatalog` | 29 element x 5 density için immutable, önceden üretilmiş degree katalogu. | `AtomicScaleCatalog.*`, `AtomicScaleCatalogData.h` |
@@ -94,7 +94,7 @@ OSC UDP callback                          Simulator / UI thread
                             |
                     atomic source snapshot
                             |
-                    OscFingerRouter FIFO
+           lifecycle FIFO + latest U/V FIFO
                             |
                     AUDIO PROCESS BLOCK
                             |
@@ -111,7 +111,7 @@ OSC UDP callback                          Simulator / UI thread
                       /           \
              host MidiBuffer    external MIDI FIFO
                                       |
-                              60 Hz message timer
+                           2 ms high-resolution sender
                                       |
                           virtual / hardware output
 
@@ -218,7 +218,8 @@ diğerlerinden sonra tekrar kullanır.
 
 - `/cs/`, zone ve param isimleri case-insensitive;
 - `finger` literal'i lower-case ve tam eşleşmeli;
-- source 256 ve `finger0` dışındaki finger token'ları geçersizdir;
+- source 256 geçersizdir; parser exact `finger0..finger9` token'larını tanır,
+  Cosmic Microwave'ın `OscBridge` politikası yalnız `finger0`ı içeri alır;
 - `u/v`: `0..1` aralığına clamp;
 - `line`: 127'ye böl, sonra clamp;
 - `on`: numeric ve sıfır değilse aktif;
@@ -237,8 +238,10 @@ değildir.
 
 ### Overflow davranışı
 
-`OscFingerRouter` 8192 event kapasitelidir. Producer'lar kısa bir `SpinLock` ile
-serialize edilir; audio consumer lock almaz. FIFO dolarsa:
+`OscFingerRouter`, 8192 lifecycle olayı ve 8192 latest-motion marker'ı için ayrı
+sabit kuyruklar kullanır. Producer'lar kısa bir `SpinLock` ile serialize edilir;
+audio consumer lock almaz. U/V tekrarları source/finger/axis başına son değere
+coalesce edilir ve lifecycle her zaman önce tüketilir. Lifecycle FIFO dolarsa:
 
 1. dropped counter artar;
 2. `resetPending` set edilir;
@@ -404,9 +407,9 @@ Destination sırası:
 2. `Virtual: Cosmic Microwave <UDP port> Out`
 3. Sistem/hardware MIDI output'ları
 
-Host stream her zaman korunur. Harici destination seçilirse aynı kısa mesajlar 8192
-kapasiteli FIFO'ya yazılır. 60 Hz message timer `MidiOutput::sendMessageNow` çağrılarını
-yapar; audio thread OS MIDI device I/O yapmaz.
+Host stream her zaman korunur. Harici destination seçilirse aynı kısa mesajlar 16384
+kapasiteli FIFO'ya yazılır. 2 ms high-resolution sender
+`MidiOutput::sendMessageNow` çağrılarını yapar; audio thread OS MIDI device I/O yapmaz.
 
 Bu nedenle host çıkışı block/sample pozisyonunu korurken harici/virtual çıkış timer
 granülaritesine sahiptir. Hassas timestamp gerektiren kullanımda host yolu daha
@@ -418,7 +421,7 @@ deterministiktir.
 |---|---|---|
 | OSC realtime callback | Parse, telemetry, source atomic update, event enqueue. | Shared client `CriticalSection` + producer `SpinLock`; audio thread değil. |
 | Audio processing | MIDI input copy, host clock capture, Tonal/Atomic fixed map seçimi, bounded lifecycle drain, Time Field scheduling, sample-offset'li Normal/MPE host üretimi, external FIFO write. | Fixed array/FIFO/scheduler ve pre-reserved `MidiBuffer`; katalog üretimi, parse ve device I/O yok. |
-| Message/UI | Editor 8 Hz telemetry, simulator ~30 Hz, destination/state değişimi, 60 Hz external drain. | Atomics, kısa pending-state lock; destructive route işlemlerinde processor suspension. |
+| Message/UI | Editor 8 Hz telemetry, simulator ~30 Hz, 60 Hz live-touch watchdog ve destination/state değişimi; harici MIDI için ayrı 2 ms high-resolution sender. | Atomics, kısa pending-state lock; destructive route işlemlerinde processor suspension. |
 
 Kapasiteler:
 
@@ -427,11 +430,12 @@ Kapasiteler:
 | Source | 256 |
 | Canlı touch/source | 1 (`finger0`); core rezervi 10 slot/source |
 | Semantic MIDI state | 2560 |
-| OSC touch FIFO | 8192 |
+| OSC lifecycle FIFO | 8192 |
+| OSC latest-motion marker FIFO | 8192 (voice/axis/epoch başına en fazla bir bekleyen marker) |
 | Audio block lifecycle drain | `min(64, max(1, block sample sayısı))` |
 | CrowdTimeField block çıkışı | 64 |
 | NoteEvent scratch | 64 |
-| External MIDI FIFO | 8192 |
+| External MIDI FIFO | 16384 |
 | MIDI scratch reserve | buffer başına 262144 byte |
 | SharedPort client | 16 |
 | Atomic degree | element/mode başına en fazla 128 |
@@ -551,8 +555,9 @@ CMake on beş CTest hedefi tanımlar:
    olmadığı için aynı ID'ler ortak state kullanır. Çözüm upstream split'tir.
 2. **MPE 15-channel limiti:** Timed modlarda active limit efektif 15'e clamp edilir.
    Flow'da 16. aktif source touch oldest-note steal tetikleyebilir; bu allocation sınırıdır.
-3. **Event overflow:** Grid/Ensemble U/V burst'ünü latest-value olarak coalesce eder;
-   buna rağmen aşırı lifecycle burst'ü 8192-event FIFO'da safety reset üretebilir.
+3. **Event overflow:** Bütün modlar redundant U/V burst'ünü latest-value olarak
+   coalesce eder; buna rağmen aşırı On/Off lifecycle burst'ü ayrı 8192-event priority
+   FIFO'da safety reset üretebilir.
 
 ### Orta önem
 

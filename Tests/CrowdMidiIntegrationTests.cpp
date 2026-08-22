@@ -1,13 +1,21 @@
 #include "../Source/CrowdTimeField.h"
+#include "../Source/MidiAudienceModel.h"
 #include "../Source/MpeMidiOutput.h"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <iostream>
 
 namespace
 {
     int failed = 0;
+    std::atomic<std::uint32_t> fakeNowMs { 100 };
+
+    std::uint32_t fakeMonotonicClock() noexcept
+    {
+        return fakeNowMs.load(std::memory_order_relaxed);
+    }
 
     void expect (bool condition, const char* name)
     {
@@ -32,6 +40,24 @@ namespace
         frame.bpm = 120.0;
         frame.ppqPosition = ppq;
         return frame;
+    }
+
+    bool hasPhysicalNote (const juce::MidiBuffer& buffer, bool noteOn,
+                          int channel)
+    {
+        for (const auto metadata : buffer)
+        {
+            if (metadata.numBytes < 3)
+                continue;
+            const auto* bytes = metadata.data;
+            const int type = bytes[0] & 0xf0;
+            const bool isOn = type == 0x90 && bytes[2] != 0;
+            const bool isOff = type == 0x80 || (type == 0x90 && bytes[2] == 0);
+            if ((noteOn ? isOn : isOff)
+                && (bytes[0] & 0x0f) + 1 == channel)
+                return true;
+        }
+        return false;
     }
 }
 
@@ -149,6 +175,101 @@ int main()
     }
     expect(physicalOffs == 3 && channelsCorrect,
            "NoteOffs return on the stored source channels with no stuck owner");
+
+    // Live-phone disconnect watchdog: the canonical model publishes an ordered
+    // synthetic Off after exactly 3 s. Verify both immediate Flow and a timed
+    // Grid path close the same source-owned MIDI channel.
+    for (const auto mode : { CrowdTimeField::Mode::Flow,
+                             CrowdTimeField::Mode::Grid })
+    {
+        OscFingerRouter liveRouter;
+        MidiAudienceModel liveModel(liveRouter, &fakeMonotonicClock);
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        if (mode != CrowdTimeField::Mode::Flow)
+            liveModel.setMotionEventForwardingEnabled(false);
+        liveRouter.takeResetRequest();
+        liveRouter.discardPendingEvents();
+
+        liveModel.setLiveFingerOn(0, 17, 0, true);
+        std::array<OscFingerRouter::Event, 8> routed {};
+        const int routedOnCount = liveRouter.drain(routed.data(),
+                                                   (int) routed.size());
+        CrowdTimeField::InputEvent onInput;
+        bool foundRoutedOn = false;
+        for (int index = 0; index < routedOnCount; ++index)
+        {
+            if (routed[(size_t) index].type != OscFingerRouter::Event::On)
+                continue;
+            onInput.type = CrowdTimeField::InputEvent::Type::On;
+            onInput.sourceId = routed[(size_t) index].sourceId;
+            onInput.voiceId = CrowdTimeField::voiceIdFor(onInput.sourceId, 0);
+            foundRoutedOn = true;
+        }
+
+        CrowdTimeField scheduler;
+        CrowdTimeField::Config watchdogTiming = timing;
+        watchdogTiming.mode = mode;
+        CrowdTimeField::OutputBlock watchdogAttack;
+        scheduler.process(watchdogTiming, frameAt(0.0), &onInput,
+                          foundRoutedOn ? 1 : 0, watchdogAttack);
+
+        MpeMidiOutput watchdogMidi;
+        MpeMidiOutput::NoteEvent note;
+        note.type = MpeMidiOutput::NoteEvent::NoteOn;
+        note.sourceId = CrowdTimeField::voiceIdFor(17, 0);
+        note.participantId = 17;
+        note.frequencyHz = 440.0;
+        note.velocity = 0.8f;
+        juce::MidiBuffer watchdogOnMidi;
+        if (watchdogAttack.count > 0
+            && watchdogAttack.events[0].type == CrowdTimeField::OutputEvent::Type::Attack)
+        {
+            note.sampleOffset = watchdogAttack.events[0].sampleOffset;
+            watchdogMidi.render(midiConfig, &note, 1, watchdogOnMidi, 512);
+        }
+
+        fakeNowMs.store(3100, std::memory_order_relaxed);
+        const int expired = liveModel.expireStaleLiveTouches();
+        const int routedOffCount = liveRouter.drain(routed.data(),
+                                                    (int) routed.size());
+        CrowdTimeField::InputEvent offInput;
+        bool foundRoutedOff = false;
+        for (int index = 0; index < routedOffCount; ++index)
+        {
+            if (routed[(size_t) index].type != OscFingerRouter::Event::Off)
+                continue;
+            offInput.type = CrowdTimeField::InputEvent::Type::Off;
+            offInput.sourceId = routed[(size_t) index].sourceId;
+            offInput.voiceId = CrowdTimeField::voiceIdFor(offInput.sourceId, 0);
+            foundRoutedOff = true;
+        }
+
+        CrowdTimeField::OutputBlock watchdogRelease;
+        scheduler.process(watchdogTiming,
+                          frameAt(512.0 * 120.0 / (60.0 * 48000.0)),
+                          &offInput, foundRoutedOff ? 1 : 0,
+                          watchdogRelease);
+        MpeMidiOutput::NoteEvent release;
+        release.type = MpeMidiOutput::NoteEvent::NoteOff;
+        release.sourceId = CrowdTimeField::voiceIdFor(17, 0);
+        release.participantId = 17;
+        juce::MidiBuffer watchdogOffMidi;
+        for (int index = 0; index < watchdogRelease.count; ++index)
+        {
+            if (watchdogRelease.events[(size_t) index].type
+                != CrowdTimeField::OutputEvent::Type::Release)
+                continue;
+            release.sampleOffset = watchdogRelease.events[(size_t) index].sampleOffset;
+            watchdogMidi.render(midiConfig, &release, 1, watchdogOffMidi, 512);
+        }
+
+        expect(foundRoutedOn && expired == 1 && foundRoutedOff
+                   && hasPhysicalNote(watchdogOnMidi, true, 1)
+                   && hasPhysicalNote(watchdogOffMidi, false, 1),
+               mode == CrowdTimeField::Mode::Flow
+                   ? "watchdog Off closes the source-owned channel in Flow"
+                   : "watchdog Off closes the source-owned channel in timed Grid");
+    }
 
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";
     return failed == 0 ? 0 : 1;

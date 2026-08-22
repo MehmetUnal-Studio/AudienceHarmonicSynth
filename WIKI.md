@@ -6,7 +6,7 @@
 |---|---|
 | Product | Cosmic Microwave (formerly SpektraSynth) |
 | CMake project/target | `AudienceHarmonicSynth` |
-| Version | 2.2.0 |
+| Version | 2.2.1 |
 | Formats | VST3 + Standalone |
 | Framework | JUCE 8.0.4, C++17, CMake 3.22+ |
 | Runtime role | MIDI-only OSC router with a silent mono/stereo instrument output shell |
@@ -61,8 +61,10 @@ receiving Cosmic Microwave's MIDI.
   catalog of 29 elements and five density modes.
 - The port and the OSC zone are separate data. The plugin never infers one from the
   other.
-- Grid and Ensemble coalesce movement to the latest U/V snapshot while preserving
-  FIFO On/Off lifecycle order.
+- Every mode coalesces redundant ingress movement to the latest U/V value while a
+  separate priority FIFO preserves On/Off lifecycle order. Flow consumes those markers
+  as soon as the audio budget permits; Grid and Ensemble sample the canonical snapshot
+  on musical boundaries.
 - Separate instances can share host PPQ or a process-wide monotonic clock; Ensemble
   uses the UDP port only as a lane-phase seed, never as a zone filter.
 
@@ -124,8 +126,10 @@ values.
 | `off` | empty or finite numeric | Releases; numeric value is ignored. |
 | `line` | legacy `0..127` | Divide by 127, clamp, and handle as X. |
 
-OSC bundles are traversed recursively. Malformed addresses and unknown parameters are
-ignored.
+Only immediate OSC bundles are traversed; the traversal is depth-bounded and preserves
+the production `u`, `v`, `on` order. A dated bundle or dated nested subtree is ignored
+instead of being executed early. Malformed addresses, invalid argument cardinality,
+unsupported OSC types, non-finite values, and unknown parameters fail closed.
 
 ### 3.3 Port and zone
 
@@ -426,7 +430,7 @@ OSC UDP callback                         Simulator / UI thread
                            |
                            | source snapshots + touch events
                            v
-                   OscFingerRouter FIFO (8192)
+              lifecycle FIFO (8192) + latest U/V FIFO (8192)
                            |
                     audio processBlock
                            |
@@ -440,9 +444,9 @@ OSC UDP callback                         Simulator / UI thread
                            |
                     MpeMidiOutput render
                      /                 \
-             host MidiBuffer      external FIFO (8192)
+             host MidiBuffer      external FIFO (16384)
                                       |
-                              60 Hz message timer
+                           2 ms high-resolution sender
                                       |
                           virtual/hardware MidiOutput
 
@@ -458,7 +462,7 @@ host MIDI in -> preserved scratch -> unchanged thru when output enabled
 | `CosmicStateMigration` | Schema-aware, bounded restoration through schema 4, including Flow timing for older sessions. |
 | `OscBridge` | Shared UDP receiver, wire validation, value decoding/clamping, traffic and zone telemetry. |
 | `MidiAudienceModel` | Atomic 256-source UI/control state and single-touch hand-off. |
-| `OscFingerRouter` | Fixed 8192-event multi-producer/single-consumer queue with reset-on-overflow recovery. |
+| `OscFingerRouter` | Separate fixed lifecycle and latest-motion queues; lifecycle-first draining, U/V coalescing, epochs, and reset-on-lifecycle-overflow recovery. |
 | `CrowdTimeField` | Allocation-free host/monotonic clock resolution, pending admission, fair Grid scheduling, port-seeded Ensemble lanes, gates, and telemetry. |
 | `MidiPitchMap` | Seven fixed-capacity tonal tables and normalized-X lookup. |
 | `AtomicScaleCatalog` | Immutable 29-element x 5-mode generated degree catalog and fixed-map lookup. |
@@ -482,20 +486,27 @@ Key capacities:
 | Sources | 256 |
 | Admitted live touches per source | 1 (`finger0`) |
 | Reserved semantic MIDI voice states | 2560 (10 slots/source for compatibility) |
-| OSC touch event FIFO | 8192 |
+| OSC lifecycle FIFO | 8192 |
+| OSC latest-motion marker FIFO | 8192 (at most one pending marker per voice/axis/epoch) |
 | Lifecycle events drained per block | `min(64, max(1, block samples))` |
 | Time Field output events per block | 64 |
 | Generated note-event scratch | 64 |
-| External short-message FIFO | 8192 |
+| External short-message FIFO | 16384 |
 | Pre-reserved MIDI buffer storage | 262144 bytes each |
 | Shared clients per UDP port | 16 |
 | Atomic degrees per element/mode | 128 maximum |
 | Atomic projected pitch steps | 768 maximum |
 
-If the OSC event FIFO fills, `OscFingerRouter` increments its dropped count and requests
-a reset. The audio consumer prioritizes that reset, discards stale queued events, and
-emits all-off safety messages. This favours lifecycle safety over preserving every
-movement update.
+On/Off lifecycle and U/V motion use separate FIFOs. Lifecycle always drains first;
+repeated motion updates one latest-value slot instead of growing an unbounded packet
+backlog. If the lifecycle FIFO fills, `OscFingerRouter` requests a canonical-state
+reset and the audio consumer emits a bounded all-off sweep before rehydrating held
+touches. This favours note safety over preserving every intermediate movement sample.
+
+`MidiAudienceModel` also owns a three-second live-touch watchdog. Valid live U/V refresh
+only an already-started touch, explicit On starts it, and explicit Off stops it. If the
+upstream phone disappears without Off, the message-thread watchdog publishes one
+ordered synthetic Off. Simulator voices do not arm this watchdog.
 
 Destination change and Panic temporarily suspend processing before immediate external
 MIDI device operations. `releaseResources` publishes a pending external reset; the
@@ -657,12 +668,12 @@ target's `target_sources` list before documenting or modifying runtime behaviour
 - One instance has 256 source IDs and one admitted live touch (`finger0`) per source.
 - Normal MIDI has 16 channels; wrapped sources share channel controllers.
 - MPE has 15 member channels; the oldest active MPE note is stolen when full.
-- External/virtual short messages are sent by a 60 Hz message timer, while host MIDI
+- External/virtual short messages are sent by a 2 ms high-resolution sender, while host MIDI
   stays in the process block's `MidiBuffer`.
 - The simulator and live OSC share the same source-ID namespace; use the simulator for
   soundcheck before live traffic or avoid conflicting IDs.
-- Timed modes coalesce movement to the latest value, but an extreme lifecycle burst
-  can still overflow the fixed event FIFO and trigger a safety reset.
+- Every mode coalesces redundant movement to the latest value, but an extreme On/Off
+  lifecycle burst can still overflow its fixed priority FIFO and trigger a safety reset.
 - Merged telemetry is cumulative and diagnostic; it is not a MIDI control output.
 
 ### Upgrade to 2.2

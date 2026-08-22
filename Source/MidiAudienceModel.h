@@ -17,6 +17,8 @@ class MidiAudienceModel final : public SeatEventSink
 public:
     static constexpr int MAX_SOURCES = OscFingerRouter::MAX_SOURCES;
     static constexpr int MAX_FINGERS = OscFingerRouter::MAX_FINGERS;
+    static constexpr std::uint32_t liveTouchTimeoutMs = 3000;
+    using MonotonicClock = std::uint32_t (*)() noexcept;
 
     struct SourceSnapshot
     {
@@ -36,7 +38,8 @@ public:
         bool active = false;
     };
 
-    explicit MidiAudienceModel (OscFingerRouter& destination) noexcept;
+    explicit MidiAudienceModel (OscFingerRouter& destination,
+                                MonotonicClock clock = nullptr) noexcept;
 
     void setX  (int row, int sourceId, float xNorm) noexcept override;
     void setY  (int row, int sourceId, float yNorm) noexcept override;
@@ -45,6 +48,16 @@ public:
     void setFingerX  (int row, int sourceId, int finger, float xNorm) noexcept override;
     void setFingerY  (int row, int sourceId, int finger, float yNorm) noexcept override;
     void setFingerOn (int row, int sourceId, int finger, bool on) noexcept override;
+    void setLiveFingerX  (int row, int sourceId, int finger, float xNorm) noexcept override;
+    void setLiveFingerY  (int row, int sourceId, int finger, float yNorm) noexcept override;
+    void setLiveFingerOn (int row, int sourceId, int finger, bool on) noexcept override;
+
+    // Message/control-thread watchdog. Live OSC On arms a touch; U/V/Line only
+    // refresh an already-armed touch. Stationary simulator voices never arm and
+    // therefore never expire. Returns the number of ordered synthetic Off
+    // events published during this bounded pass.
+    int expireStaleLiveTouches (
+        std::uint32_t timeoutMs = liveTouchTimeoutMs) noexcept;
 
     // Clears UI/control state immediately. The queued MIDI branch is reset by
     // its consumer so stale note events cannot survive this operation.
@@ -76,15 +89,22 @@ private:
         std::atomic<float> y { 0.0f };
         std::array<std::atomic<float>, MAX_FINGERS> fingerX;
         std::array<std::atomic<float>, MAX_FINGERS> fingerY;
+        std::array<std::atomic<std::uint32_t>, MAX_FINGERS> liveActivityMs;
         std::atomic<std::uint16_t> activeFingerMask { 0 };
+        std::atomic<std::uint16_t> liveTrackedFingerMask { 0 };
     };
 
     static bool validSource (int sourceId) noexcept;
     static bool validFinger (int finger) noexcept;
     static float clampNormalized (float value) noexcept;
     static int countSetBits (std::uint16_t bits) noexcept;
+    static std::uint32_t systemMonotonicMilliseconds() noexcept;
+    void setFingerXLocked (int sourceId, int finger, float value) noexcept;
+    void setFingerYLocked (int sourceId, int finger, float value) noexcept;
+    void setFingerOnLocked (int sourceId, int finger, bool on) noexcept;
 
     OscFingerRouter& router;
+    MonotonicClock monotonicClock;
     // Live OSC and the message-thread simulator may publish concurrently.
     // Serialise each canonical-ledger mutation with its matching FIFO event so
     // those two representations always have the same total order. The audio

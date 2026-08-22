@@ -9,6 +9,12 @@
 namespace
 {
     int failed = 0;
+    std::atomic<std::uint32_t> fakeNowMs { 100 };
+
+    std::uint32_t fakeMonotonicClock() noexcept
+    {
+        return fakeNowMs.load(std::memory_order_relaxed);
+    }
 
     void expect (bool condition, const char* name)
     {
@@ -26,7 +32,7 @@ namespace
 int main()
 {
     OscFingerRouter router;
-    MidiAudienceModel model(router);
+    MidiAudienceModel model(router, &fakeMonotonicClock);
     std::array<OscFingerRouter::Event, 32> events {};
 
     model.setFingerX(0, 17, 2, 0.25f);
@@ -167,6 +173,189 @@ int main()
         expect(count == 400
                    && fifoActive == concurrentModel.getFingerSnapshot(42, 3).active,
                "concurrent OSC/simulator publishers keep FIFO order equal to canonical state");
+    }
+
+    // A stationary simulator uses only setFinger* and never the live-network
+    // hook, so it must remain held indefinitely.
+    {
+        OscFingerRouter watchdogRouter;
+        MidiAudienceModel watchdogModel(watchdogRouter, &fakeMonotonicClock);
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        watchdogModel.setFingerOn(0, 5, 0, true);
+        watchdogRouter.discardPendingEvents();
+        fakeNowMs.store(100000, std::memory_order_relaxed);
+        expect(watchdogModel.expireStaleLiveTouches() == 0
+                   && watchdogModel.getFingerSnapshot(5, 0).active,
+               "stationary simulator touch is not enrolled in the live OSC watchdog");
+    }
+
+    // Live OSC starts tracking explicitly. Refresh packets preserve the touch,
+    // the exact 3 s boundary expires it, and the synthetic Off is ordered.
+    {
+        OscFingerRouter watchdogRouter;
+        MidiAudienceModel watchdogModel(watchdogRouter, &fakeMonotonicClock);
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        watchdogModel.setLiveFingerOn(0, 7, 0, true);
+        watchdogRouter.discardPendingEvents();
+
+        for (const std::uint32_t tick : { 1100u, 2100u, 3100u })
+        {
+            fakeNowMs.store(tick, std::memory_order_relaxed);
+            watchdogModel.setLiveFingerX(0, 7, 0, 0.5f);
+        }
+        watchdogRouter.discardPendingEvents();
+
+        fakeNowMs.store(6099, std::memory_order_relaxed);
+        const bool beforeBoundary = watchdogModel.expireStaleLiveTouches() == 0
+                                 && watchdogModel.getFingerSnapshot(7, 0).active;
+        fakeNowMs.store(6100, std::memory_order_relaxed);
+        const bool atBoundary = watchdogModel.expireStaleLiveTouches() == 1
+                             && ! watchdogModel.getFingerSnapshot(7, 0).active;
+        std::array<OscFingerRouter::Event, 4> expiryEvents {};
+        const int expiryCount = watchdogRouter.drain(expiryEvents.data(),
+                                                      (int) expiryEvents.size());
+        expect(beforeBoundary && atBoundary && expiryCount == 1
+                   && expiryEvents[0].type == OscFingerRouter::Event::Off
+                   && expiryEvents[0].sourceId == 7 && expiryEvents[0].finger == 0,
+               "1 Hz live heartbeat expires once at the exact 3 s boundary with ordered Off");
+
+        // Refresh after expiry updates position only. It cannot reactivate or
+        // re-enrol the voice; a new explicit live On is required.
+        fakeNowMs.store(6200, std::memory_order_relaxed);
+        watchdogModel.setLiveFingerX(0, 7, 0, 0.9f);
+        fakeNowMs.store(20000, std::memory_order_relaxed);
+        const bool strayStayedOff = watchdogModel.expireStaleLiveTouches() == 0
+                                 && ! watchdogModel.getFingerSnapshot(7, 0).active;
+        watchdogModel.setLiveFingerOn(0, 7, 0, true);
+        expect(strayStayedOff && watchdogModel.getFingerSnapshot(7, 0).active,
+               "stray U/V never re-arms an expired touch; explicit live On does");
+    }
+
+    // uint32 millisecond rollover remains ordered by modular subtraction.
+    {
+        OscFingerRouter wrapRouter;
+        MidiAudienceModel wrapModel(wrapRouter, &fakeMonotonicClock);
+        constexpr std::uint32_t start = 0xffffffffu - 1000u;
+        fakeNowMs.store(start, std::memory_order_relaxed);
+        wrapModel.setLiveFingerOn(0, 8, 0, true);
+        wrapRouter.discardPendingEvents();
+        fakeNowMs.store(start + 2999u, std::memory_order_relaxed);
+        const bool heldAcrossWrap = wrapModel.expireStaleLiveTouches() == 0;
+        fakeNowMs.store(start + 3000u, std::memory_order_relaxed);
+        expect(heldAcrossWrap && wrapModel.expireStaleLiveTouches() == 1
+                   && ! wrapModel.getFingerSnapshot(8, 0).active,
+               "watchdog timeout remains exact across uint32 monotonic-clock wrap");
+    }
+
+    // Live tracking and the matching lifecycle update are one model operation.
+    // Every possible interleaving with expiry ends with the fresh On as
+    // canonical state and as the last FIFO lifecycle event.
+    {
+        OscFingerRouter raceRouter;
+        MidiAudienceModel raceModel(raceRouter, &fakeMonotonicClock);
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        raceModel.setLiveFingerOn(0, 9, 0, true);
+        raceRouter.discardPendingEvents();
+        fakeNowMs.store(3100, std::memory_order_relaxed);
+
+        std::atomic<bool> startRace { false };
+        std::thread expiry([&]
+        {
+            while (! startRace.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            raceModel.expireStaleLiveTouches();
+        });
+        std::thread freshOn([&]
+        {
+            while (! startRace.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            raceModel.setLiveFingerOn(0, 9, 0, true);
+        });
+        startRace.store(true, std::memory_order_release);
+        expiry.join();
+        freshOn.join();
+
+        std::array<OscFingerRouter::Event, 8> raceEvents {};
+        const int raceCount = raceRouter.drain(raceEvents.data(),
+                                               (int) raceEvents.size());
+        bool fifoActive = false;
+        for (int i = 0; i < raceCount; ++i)
+            if (raceEvents[(size_t) i].type == OscFingerRouter::Event::On
+                || raceEvents[(size_t) i].type == OscFingerRouter::Event::Off)
+                fifoActive = raceEvents[(size_t) i].type == OscFingerRouter::Event::On;
+        expect(raceCount >= 1 && fifoActive
+                   && raceModel.getFingerSnapshot(9, 0).active,
+               "fresh live On and simultaneous expiry retain canonical/FIFO agreement");
+    }
+
+    // A simulator release can race the same source identity as a fresh phone
+    // On. The live API must publish heartbeat ownership and the On under one
+    // lock: whichever complete operation is last owns both canonical state and
+    // FIFO order, and only that live-active result receives a later expiry.
+    {
+        OscFingerRouter collisionRaceRouter;
+        MidiAudienceModel collisionRaceModel(collisionRaceRouter,
+                                              &fakeMonotonicClock);
+        fakeNowMs.store(3100, std::memory_order_relaxed);
+        std::atomic<bool> startRace { false };
+        std::thread simulatorOff([&]
+        {
+            while (! startRace.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            collisionRaceModel.setFingerOn(0, 11, 0, false);
+        });
+        std::thread liveOn([&]
+        {
+            while (! startRace.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            collisionRaceModel.setLiveFingerOn(0, 11, 0, true);
+        });
+        startRace.store(true, std::memory_order_release);
+        simulatorOff.join();
+        liveOn.join();
+
+        std::array<OscFingerRouter::Event, 8> eventsAfterRace {};
+        const int eventCount = collisionRaceRouter.drain(
+            eventsAfterRace.data(), (int) eventsAfterRace.size());
+        bool fifoActive = false;
+        for (int index = 0; index < eventCount; ++index)
+            if (eventsAfterRace[(size_t) index].type == OscFingerRouter::Event::On
+                || eventsAfterRace[(size_t) index].type == OscFingerRouter::Event::Off)
+                fifoActive = eventsAfterRace[(size_t) index].type
+                          == OscFingerRouter::Event::On;
+
+        const bool canonicalMatches = eventCount == 2
+                                   && collisionRaceModel.getFingerSnapshot(11, 0).active
+                                      == fifoActive;
+        fakeNowMs.store(6100, std::memory_order_relaxed);
+        const int expired = collisionRaceModel.expireStaleLiveTouches();
+        expect(canonicalMatches && expired == (fifoActive ? 1 : 0)
+                   && ! collisionRaceModel.getFingerSnapshot(11, 0).active,
+               "simulator Off versus live On is atomic across heartbeat, canonical state and FIFO");
+    }
+
+    // Stop and clear both erase watchdog provenance. A later stationary
+    // simulator source reusing that ID cannot inherit a stale live deadline.
+    {
+        OscFingerRouter collisionRouter;
+        MidiAudienceModel collisionModel(collisionRouter, &fakeMonotonicClock);
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        collisionModel.setLiveFingerOn(0, 10, 0, true);
+        collisionModel.setLiveFingerOn(0, 10, 0, false);
+        collisionModel.setFingerOn(0, 10, 0, true); // stationary simulator reuse
+        collisionRouter.discardPendingEvents();
+        fakeNowMs.store(100000, std::memory_order_relaxed);
+        const bool explicitStopSafe = collisionModel.expireStaleLiveTouches() == 0
+                                   && collisionModel.getFingerSnapshot(10, 0).active;
+
+        collisionModel.clear();
+        collisionRouter.takeResetRequest();
+        collisionRouter.discardPendingEvents();
+        collisionModel.setFingerOn(0, 10, 0, true);
+        fakeNowMs.store(200000, std::memory_order_relaxed);
+        expect(explicitStopSafe && collisionModel.expireStaleLiveTouches() == 0
+                   && collisionModel.getFingerSnapshot(10, 0).active,
+               "live Stop and Panic/clear erase tracking before stationary simulator ID reuse");
     }
 
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";

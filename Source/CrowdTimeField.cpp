@@ -957,6 +957,7 @@ void CrowdTimeField::process (const Config& requestedConfig,
     output = {};
     const Config config = sanitiseConfig(requestedConfig);
     const ResolvedClock clock = resolveClock(config, frame);
+    const bool nullInputWithPositiveCount = inputs == nullptr && inputCount > 0;
     inputCount = inputs != nullptr ? std::max(0, inputCount) : 0;
 
     const auto fillStatus = [&] () noexcept
@@ -1013,7 +1014,7 @@ void CrowdTimeField::process (const Config& requestedConfig,
         pendingAnchorDeferred_ = false;
     }
 
-    if (inputCount > kMaxInputEventsPerBlock)
+    if (nullInputWithPositiveCount || inputCount > kMaxInputEventsPerBlock)
     {
         clearVoiceState();
         fairCursor_ = -1;

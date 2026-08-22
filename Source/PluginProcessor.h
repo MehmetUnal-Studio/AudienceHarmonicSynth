@@ -120,18 +120,23 @@ private:
     juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void cacheParameterPointers();
     void updatePitchMap();
-    bool processIncomingMidi (const juce::MidiBuffer&);
+    bool processIncomingMidi (const juce::MidiBuffer&, int numSamples);
     void releaseAllIncomingMidiNotes() noexcept;
     void renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples,
                              bool outputEnabled,
+                             const MpeMidiOutput::MpeConfig& midiConfig,
+                             const CrowdTimeField::Config& timeConfig,
                              const CrowdTimeField::ClockFrame& clockFrame,
                              bool resetAlreadyEmitted);
     void renderTimedOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples,
                                   bool outputEnabled,
+                                  const MpeMidiOutput::MpeConfig& midiConfig,
+                                  const CrowdTimeField::Config& timeConfig,
                                   const CrowdTimeField::ClockFrame& clockFrame,
                                   bool resetAlreadyEmitted);
     MpeMidiOutput::MpeConfig buildMpeConfig() const;
-    CrowdTimeField::Config buildTimeFieldConfig() const noexcept;
+    CrowdTimeField::Config buildTimeFieldConfig (
+        const MpeMidiOutput::MpeConfig& midiConfig) const noexcept;
     CrowdTimeField::ClockFrame captureTimeFieldClock (int numSamples,
                                                        double monotonicSeconds) const noexcept;
     void rehydrateTimeFieldFromCanonical() noexcept;

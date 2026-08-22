@@ -26,6 +26,8 @@ public:
         float value = 0.0f;
     };
 
+    OscFingerRouter() noexcept;
+
     void pushX (int sourceId, int finger, float value) noexcept;
     void pushY (int sourceId, int finger, float value) noexcept;
     void pushOn (int sourceId, int finger, bool on) noexcept;
@@ -44,12 +46,63 @@ public:
         return droppedEvents.load(std::memory_order_relaxed);
     }
 
+    uint32_t getCoalescedMotionEventCount() const noexcept
+    {
+        return coalescedMotionEvents.load(std::memory_order_relaxed);
+    }
+
 private:
-    void push (Event::Type type, int sourceId, int finger, float value) noexcept;
+    struct QueuedEvent
+    {
+        Event event;
+        uint32_t epoch = 1;
+    };
+
+    struct MotionState
+    {
+        std::atomic<float> latestX { 0.0f };
+        std::atomic<float> latestY { 0.0f };
+        std::atomic<uint32_t> queuedXEpoch { 0 };
+        std::atomic<uint32_t> queuedYEpoch { 0 };
+        std::atomic<uint32_t> publishedEpoch { 1 };
+
+        // Producer-thread state. All writers are serialised by producerLock;
+        // the audio consumer never reads these members.
+        uint32_t producerEpoch = 1;
+        bool xDirtySinceLifecycle = false;
+        bool yDirtySinceLifecycle = false;
+    };
+
+    static int voiceIndex (int sourceId, int finger) noexcept;
+    static uint32_t nextEpoch (uint32_t current) noexcept;
+    static void incrementSaturating (std::atomic<uint32_t>& counter,
+                                     uint32_t amount = 1) noexcept;
+
+    void pushMotion (Event::Type type, int sourceId, int finger, float value) noexcept;
+    void pushLifecycle (int sourceId, int finger, bool on) noexcept;
+    bool enqueueLifecycleGroup (const QueuedEvent* group, int count) noexcept;
+    bool enqueueMotionMarker (Event::Type type, int sourceId, int finger,
+                              uint32_t epoch) noexcept;
 
     juce::SpinLock producerLock;
-    juce::AbstractFifo fifo { EVENT_QUEUE_SIZE };
-    std::array<Event, EVENT_QUEUE_SIZE> events {};
+
+    // Lifecycle traffic has its own queue and is always drained before motion.
+    // This prevents a crowd-sized U/V flood from starving note-off messages.
+    juce::AbstractFifo lifecycleFifo { EVENT_QUEUE_SIZE };
+    std::array<QueuedEvent, EVENT_QUEUE_SIZE> lifecycleEvents {};
+
+    // Motion is represented by one latest-value marker per source/finger/axis
+    // and lifecycle epoch. Repeated packets update atomics rather than growing
+    // this queue without bound.
+    juce::AbstractFifo motionFifo { EVENT_QUEUE_SIZE };
+    std::array<QueuedEvent, EVENT_QUEUE_SIZE> motionEvents {};
+    std::array<MotionState, MAX_VOICES> motionStates {};
+
+    // Audio-thread-only epoch view used to reject stale motion markers which
+    // belonged to a touch before its most recent On/Off boundary.
+    std::array<uint32_t, MAX_VOICES> consumerEpochs {};
+
     std::atomic<bool> resetPending { false };
     std::atomic<uint32_t> droppedEvents { 0 };
+    std::atomic<uint32_t> coalescedMotionEvents { 0 };
 };

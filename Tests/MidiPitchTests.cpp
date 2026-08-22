@@ -83,6 +83,23 @@ int main()
              failed);
     }
 
+    {
+        const auto subnormalPitch = convertFrequencyToMidiPitch(
+            std::numeric_limits<double>::denorm_min(), 48);
+        const auto maximumPitch = convertFrequencyToMidiPitch(
+            std::numeric_limits<double>::max(), 48);
+        expect (subnormalPitch.noteNumber == 0
+             && maximumPitch.noteNumber == 127
+             && std::isfinite(subnormalPitch.targetFrequencyHz)
+             && std::isfinite(maximumPitch.targetFrequencyHz)
+             && subnormalPitch.pitchBend14Bit >= 0
+             && subnormalPitch.pitchBend14Bit <= 16383
+             && maximumPitch.pitchBend14Bit >= 0
+             && maximumPitch.pitchBend14Bit <= 16383,
+             "subnormal and DBL_MAX frequencies avoid log/cast overflow",
+             failed);
+    }
+
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";
     return failed == 0 ? 0 : 1;
 }

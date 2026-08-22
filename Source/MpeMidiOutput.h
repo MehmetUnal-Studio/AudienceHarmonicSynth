@@ -27,6 +27,7 @@ public:
     // One stable MIDI voice slot for every OSC source/finger pair:
     // 256 source IDs x 10 fingers = voice IDs 0..2559.
     static constexpr int kMaxMidiSources = 256 * 10;
+    static constexpr int kMaxEventsPerRender = 64;
 
     // Every APVTS value the moved code reads. AudienceProcessor builds this from
     // its raw parameter pointers before each render.
@@ -162,6 +163,7 @@ private:
     struct MidiOutVoiceState
     {
         bool active = false;
+        int outputType = 0;
         int sourceId = -1;
         int channel = 1;
         int note = -1;
@@ -201,11 +203,11 @@ private:
     void sendMpeSetupIfNeeded (const MpeConfig& config, juce::MidiBuffer& midiMessages, int sampleOffset);
     void sendPitchBendRangeRpn (juce::MidiBuffer& midiMessages, int sampleOffset,
                                 int channel, int semitones);
-    int  allocateMpeChannelForSource (const MpeConfig& config, int sourceId,
+    int  allocateMpeChannelForSource (int sourceId,
                                       juce::MidiBuffer& midiMessages, int sampleOffset);
     void releaseMpeChannelForSource (int sourceId) noexcept;
     void refreshMpeChannelCounts() noexcept;
-    void sendNoteOffForSource (const MpeConfig& config, int sourceId,
+    void sendNoteOffForSource (int sourceId,
                                juce::MidiBuffer& midiMessages, int sampleOffset);
     void sendExpressionForSource (const MpeConfig& config, int sourceId, const NoteEvent& event,
                                   juce::MidiBuffer& midiMessages, int sampleOffset, bool force);

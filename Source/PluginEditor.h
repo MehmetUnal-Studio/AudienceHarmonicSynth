@@ -45,6 +45,10 @@ private:
     juce::Label activeFingersValue;
     juce::Label notesSentValue;
     juce::Label mpeVoicesValue;
+    juce::Label activeSourcesCaption;
+    juce::Label activeFingersCaption;
+    juce::Label notesSentCaption;
+    juce::Label mpeVoicesCaption;
 
     // OSC input card
     juce::Label portLabel;
@@ -74,6 +78,7 @@ private:
 
     // Temporal note scheduling
     juce::Label timeStatusLabel;
+    juce::Label timeTelemetryLabel;
     juce::Label timeModeLabel, clockSourceLabel, internalBpmLabel, gridDivisionLabel;
     juce::Label maxAttacksLabel, maxActiveVoicesLabel, gatePercentLabel, temporalSpreadLabel;
     juce::ComboBox timeModeCombo, clockSourceCombo, gridDivisionCombo, temporalSpreadCombo;
@@ -109,6 +114,8 @@ private:
     bool destinationRouteUnresolved = false;
     int lastUdpPort = -1;
     int lastVisibilityKey = -1;
+    uint32_t lastTimeFieldMerged = 0;
+    double mergeActivityUntilMs = 0.0;
     uint32_t lastMidiOutputRouteRevision = 0;
     juce::StringArray midiOutputOptions;
 

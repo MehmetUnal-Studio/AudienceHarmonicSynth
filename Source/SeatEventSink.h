@@ -34,4 +34,24 @@ public:
         (void) finger;
         setOn(row, sourceId, on);
     }
+
+    // Atomic live-network entry points. Routing-aware sinks override these to
+    // update heartbeat ownership and canonical/MIDI state under one producer
+    // critical section. The defaults preserve auxiliary products which do not
+    // implement a stale-touch watchdog. Simulator calls continue to use the
+    // ordinary setFinger* API and therefore never masquerade as live traffic.
+    virtual void setLiveFingerX (int row, int sourceId, int finger, float xNorm)
+    {
+        setFingerX(row, sourceId, finger, xNorm);
+    }
+
+    virtual void setLiveFingerY (int row, int sourceId, int finger, float yNorm)
+    {
+        setFingerY(row, sourceId, finger, yNorm);
+    }
+
+    virtual void setLiveFingerOn (int row, int sourceId, int finger, bool on)
+    {
+        setFingerOn(row, sourceId, finger, on);
+    }
 };

@@ -17,9 +17,7 @@
 
     where:
         /cs/        literal prefix ("control surface"). Case-insensitive.
-        <row>       a single letter A..Z (case-insensitive) -> row index 0..25.
-                    Anything after the letter up to the next '/' is ignored
-                    (e.g. "/cs/A/..." and "/cs/A1/..." both yield row 0).
+        <row>       exactly one letter A..Z (case-insensitive) -> row index 0..25.
         <col>       one or more decimal digits -> source/participant id. Must
                     be in [0, MAX_OSC_SOURCES). The digits must be followed
                     by '/'.
@@ -125,64 +123,79 @@ namespace osc_wire
     {
         Address out;
 
-        // Prefix: '/', 'c', 's', '/'  (c/s case-insensitive, matching original)
-        if (addr == nullptr
-            || addr[0] != '/'
-            || toLowerAscii (addr[1]) != 'c'
-            || toLowerAscii (addr[2]) != 's'
-            || addr[3] != '/')
+        // Prefix: '/', 'c', 's', '/' (c/s case-insensitive). Advance only
+        // after the current byte matches, so "", "/", "/c" and "/cs" never
+        // dereference beyond their own NUL terminator.
+        if (addr == nullptr)
             return out;
 
-        const char* p = addr + kPrefixLen;
+        const char* p = addr;
+        if (*p != '/') return out;
+        ++p;
+        if (toLowerAscii(*p) != 'c') return out;
+        ++p;
+        if (toLowerAscii(*p) != 's') return out;
+        ++p;
+        if (*p != '/') return out;
+        ++p;
 
-        // Row: a single letter A..Z (case-insensitive).
+        // Row: exactly one letter A..Z (case-insensitive). Requiring the slash
+        // immediately after the letter prevents malformed tokens such as A1
+        // from silently aliasing Zone A.
         char rowChar = *p;
         if (rowChar >= 'a' && rowChar <= 'z')
             rowChar = (char) (rowChar - ('a' - 'A'));
-        if (rowChar < kRowFirst || rowChar > kRowLast)
+        if (rowChar < kRowFirst || rowChar > kRowLast || p[1] != '/')
             return out;
         const int row = (int) (rowChar - kRowFirst);
-
-        // Skip the rest of the row segment up to the next '/'.
-        while (*p != 0 && *p != '/')
-            ++p;
-        if (*p != '/')
-            return out;
-        ++p;
+        p += 2;
 
         // Column: one or more decimal digits.
         if (maxSources <= 0)
             return out;
 
+        int maxDigits = 1;
+        for (int upper = maxSources - 1; upper >= 10; upper /= 10)
+            ++maxDigits;
+
         bool hasCol = false;
-        bool colOutOfRange = false;
+        int  digits = 0;
         int  col    = 0;
         while (*p >= '0' && *p <= '9')
         {
             hasCol = true;
+            if (++digits > maxDigits)
+                return out;
             const int digit = *p - '0';
-            if (! colOutOfRange)
-            {
-                if (col > (maxSources - 1 - digit) / 10)
-                    colOutOfRange = true;
-                else
-                    col = col * 10 + digit;
-            }
+
+            // Return at the first impossible digit. Besides avoiding integer
+            // overflow this bounds work for a hostile address containing tens
+            // of thousands of digits (a UDP datagram can be almost 64 KiB).
+            if (digit > maxSources - 1
+                || col > (maxSources - 1 - digit) / 10)
+                return out;
+
+            col = col * 10 + digit;
             ++p;
         }
 
         if (! hasCol || *p != '/')
             return out;
-        if (colOutOfRange || col < 0 || col >= maxSources)
+        if (col < 0 || col >= maxSources)
             return out;
         ++p;
 
         // Finger: exact lower-case "finger" plus one decimal digit 0..9.
+        // Check each byte through the terminator rather than indexing six
+        // bytes unconditionally. This keeps every truncated prefix within the
+        // logical bounds of its NUL-terminated string.
         for (std::size_t i = 0; i < kFingerPrefixLen; ++i)
-            if (p[i] != kFingerPrefix[i])
+        {
+            if (*p == 0 || *p != kFingerPrefix[i])
                 return out;
+            ++p;
+        }
 
-        p += kFingerPrefixLen;
         if (*p < '0' || *p > '9')
             return out;
         const int finger = *p - '0';
@@ -190,11 +203,15 @@ namespace osc_wire
         if (*p != '/')
             return out;
 
+        const char* const param = p + 1;
+        if (classifyParam(param) == Param::None)
+            return out;
+
         out.valid = true;
         out.row   = row;
         out.col   = col;
         out.finger = finger;
-        out.param = p + 1; // trailing segment (NUL-terminated within addr)
+        out.param = param; // trailing segment (NUL-terminated within addr)
         return out;
     }
 }

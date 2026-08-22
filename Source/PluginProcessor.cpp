@@ -3,6 +3,7 @@
 #include "PluginStateMigration.h"
 
 #include <cmath>
+#include <limits>
 
 static_assert (OscFingerRouter::MAX_SOURCES == SeatEventSink::MAX_OSC_SOURCES,
                "OSC parser and MIDI audience capacities must match");
@@ -40,12 +41,35 @@ namespace
 
     int rawParamInt (const std::atomic<float>* param, int fallback = 0) noexcept
     {
-        return (int) rawParamValue(param, (float) fallback);
+        const double value = static_cast<double>(
+            rawParamValue(param, static_cast<float>(fallback)));
+        if (value <= static_cast<double>(std::numeric_limits<int>::lowest()))
+            return std::numeric_limits<int>::lowest();
+        if (value >= static_cast<double>(std::numeric_limits<int>::max()))
+            return std::numeric_limits<int>::max();
+        return static_cast<int>(value);
     }
 
     bool rawParamBool (const std::atomic<float>* param, bool fallback = false) noexcept
     {
         return rawParamValue(param, fallback ? 1.0f : 0.0f) > 0.5f;
+    }
+
+    int boundedStateInt (const juce::var& value, int minimum, int maximum,
+                         int fallback) noexcept
+    {
+        const int safeFallback = juce::jlimit(minimum, maximum, fallback);
+        if (! (value.isInt() || value.isInt64()
+               || value.isDouble() || value.isBool()))
+            return safeFallback;
+
+        const double raw = static_cast<double>(value);
+        if (! std::isfinite(raw))
+            return safeFallback;
+
+        const double bounded = juce::jlimit(static_cast<double>(minimum),
+                                            static_cast<double>(maximum), raw);
+        return static_cast<int>(bounded);
     }
 
     struct MpeZoneChannels
@@ -68,7 +92,7 @@ AudienceProcessor::AudienceProcessor()
                                .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
       apvts(*this, nullptr, "PARAMS", createLayout()),
       audienceModel(fingerRouter),
-      osc(audienceModel),
+      osc(audienceModel, OscBridge::FingerPolicy::finger0Only),
       simulator(audienceModel, MidiAudienceModel::MAX_SOURCES)
 {
     cacheParameterPointers();
@@ -324,7 +348,8 @@ void AudienceProcessor::updatePitchMap()
     lastAtomicScaleMode = atomicMode;
 }
 
-bool AudienceProcessor::processIncomingMidi (const juce::MidiBuffer& input)
+bool AudienceProcessor::processIncomingMidi (const juce::MidiBuffer& input,
+                                             int numSamples)
 {
 #if COSMIC_MIDI_DIAGNOSTICS
     recordIncomingMidiDebugEvents(input);
@@ -336,6 +361,7 @@ bool AudienceProcessor::processIncomingMidi (const juce::MidiBuffer& input)
     bool copyInput = true;
     bool overflowed = false;
     int activeCount = activeExternalMidiKeys.load(std::memory_order_relaxed);
+    const int lastSample = numSamples > 0 ? numSamples - 1 : 0;
     for (const auto metadata : input)
     {
         const auto eventBytes = metadata.numBytes > 0
@@ -345,7 +371,9 @@ bool AudienceProcessor::processIncomingMidi (const juce::MidiBuffer& input)
             && metadata.numBytes > 0 && metadata.numBytes <= 65535
             && storedEvents < realtimeMidiInputEventLimit
             && eventBytes <= realtimeMidiInputBudgetBytes - storedBytes
-            && midiInputScratch.addEvent(metadata.data, metadata.numBytes, metadata.samplePosition))
+            && midiInputScratch.addEvent(metadata.data, metadata.numBytes,
+                                         juce::jlimit(0, lastSample,
+                                                      metadata.samplePosition)))
         {
             storedBytes += eventBytes;
             ++storedEvents;
@@ -423,36 +451,45 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const double externalBlockStartTimeMs = juce::Time::getMillisecondCounterHiRes();
 
     // Preserve the host input before reclaiming the preallocated output buffer.
-    const bool midiInputOverflowed = processIncomingMidi(midiMessages);
+    const bool midiInputOverflowed = processIncomingMidi(midiMessages,
+                                                          buffer.getNumSamples());
     updatePitchMap();
     const bool pitchMapChanged = pitchMapChangedThisBlock;
 
-    const int midiType = juce::jlimit(0, 2, rawParamInt(rawParams.midiOutputType, 1));
-    const int routingMode = juce::jlimit(0, 1, rawParamInt(rawParams.normalMidiRoutingMode, 1));
-    const int normalChannel = juce::jlimit(0, 15, rawParamInt(rawParams.normalMidiChannel));
-    const int bendRange = MpeMidiOutput::bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange));
-    const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone));
-    const int setupEnabled = rawParamBool(rawParams.mpeSendSetupMessages, true) ? 1 : 0;
-    const int pitchMode = juce::jlimit(0, 1, rawParamInt(rawParams.mpePitchMode));
-    const int timeMode = juce::jlimit(0, 2, rawParamInt(rawParams.timeMode, 2));
-    const int clockSource = juce::jlimit(0, 1, rawParamInt(rawParams.clockSource));
-    const float internalBpm = juce::jlimit(40.0f, 240.0f,
-                                           rawParamValue(rawParams.internalBpm, 120.0f));
-    const int gridDivision = juce::jlimit(0, 3, rawParamInt(rawParams.gridDivision, 2));
-    const int maxAttacks = juce::jlimit(1, 16, rawParamInt(rawParams.maxAttacksPerStep, 4));
-    const int maxActive = juce::jlimit(1, 16, rawParamInt(rawParams.maxActiveVoices, 16));
-    const float gatePercent = juce::jlimit(5.0f, 100.0f,
-                                           rawParamValue(rawParams.gatePercent, 70.0f));
-    const int temporalSpread = juce::jlimit(0, 4, rawParamInt(rawParams.temporalSpread, 2));
+    // APVTS parameter atomics may change at any point during a callback. Capture
+    // one bounded snapshot and use it for change detection, reset decisions and
+    // rendering alike. Re-reading the atomics in renderOutgoingMidi used to let
+    // a mid-block automation write switch routing without the matching safety
+    // reset, corrupting normal-note refcounts or MPE channel ownership.
+    const auto midiConfig = buildMpeConfig();
+    const auto timeConfig = buildTimeFieldConfig(midiConfig);
+    const int midiType = midiConfig.outputType;
+    const int routingMode = midiConfig.normalRoutingMode;
+    const int normalChannel = midiConfig.normalMidiChannel;
+    const int bendRange = MpeMidiOutput::bendRangeFromChoice(
+        midiConfig.pitchBendRangeChoice);
+    const int setupEnabled = midiConfig.sendSetupMessages ? 1 : 0;
+    const int pitchMode = midiConfig.pitchMode;
+    const int timeMode = static_cast<int>(timeConfig.mode);
+    const int clockSource = static_cast<int>(timeConfig.clockSource);
+    const float internalBpm = static_cast<float>(timeConfig.internalBpm);
+    const int gridDivision = static_cast<int>(timeConfig.division);
+    const int maxAttacks = timeConfig.maxAttacksPerStep;
+    const int maxActive = timeConfig.maxActive;
+    const float gatePercent = static_cast<float>(timeConfig.gatePercent);
+    const int temporalSpread = timeConfig.spreadSlots <= 1 ? 0
+                             : timeConfig.spreadSlots <= 2 ? 1
+                             : timeConfig.spreadSlots <= 4 ? 2
+                             : timeConfig.spreadSlots <= 8 ? 3 : 4;
     const bool routeChanged = midiOutputRouteChangedPending.exchange(false, std::memory_order_acq_rel);
 
     const bool midiConfigChanged = midiType != lastMidiOutputType
                                 || routingMode != lastNormalMidiRoutingMode
                                 || normalChannel != lastNormalMidiChannel
                                 || bendRange != lastMpeBendRange
-                                || zone.master != lastMpeMaster
-                                || zone.memberFirst != lastMpeMemberFirst
-                                || zone.memberLast != lastMpeMemberLast
+                                || midiConfig.masterChannel != lastMpeMaster
+                                || midiConfig.memberFirst != lastMpeMemberFirst
+                                || midiConfig.memberLast != lastMpeMemberLast
                                 || setupEnabled != lastMpeSetupEnabled
                                 || pitchMode != lastMpePitchMode;
     const bool internalTempoChanged = (clockSource == 1 || lastClockSource == 1)
@@ -476,9 +513,9 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     lastNormalMidiRoutingMode = routingMode;
     lastNormalMidiChannel = normalChannel;
     lastMpeBendRange = bendRange;
-    lastMpeMaster = zone.master;
-    lastMpeMemberFirst = zone.memberFirst;
-    lastMpeMemberLast = zone.memberLast;
+    lastMpeMaster = midiConfig.masterChannel;
+    lastMpeMemberFirst = midiConfig.memberFirst;
+    lastMpeMemberLast = midiConfig.memberLast;
     lastMpeSetupEnabled = setupEnabled;
     lastMpePitchMode = pitchMode;
     lastTimeMode = timeMode;
@@ -492,7 +529,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     audienceModel.setMotionEventForwardingEnabled(timeMode == 0);
 
-    mpeOut.setMemberRange(zone.memberFirst, zone.memberLast);
+    mpeOut.setMemberRange(midiConfig.memberFirst, midiConfig.memberLast);
     if (configChanged || routeChanged || midiInputOverflowed || pitchMapChanged)
     {
         mpeOut.markSetupDirty();
@@ -544,7 +581,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const auto clockFrame = captureTimeFieldClock(buffer.getNumSamples(),
                                                    externalBlockStartTimeMs * 0.001);
     renderOutgoingMidi(output, buffer.getNumSamples(), outputEnabled,
-                       clockFrame, needsSafetyReset);
+                       midiConfig, timeConfig, clockFrame, needsSafetyReset);
 #if COSMIC_MIDI_DIAGNOSTICS
     mpeOut.recordOutgoingMidiDebugEvents(output);
 #endif
@@ -562,15 +599,19 @@ MpeMidiOutput::MpeConfig AudienceProcessor::buildMpeConfig() const
     config.masterChannel = zone.master;
     config.memberFirst = zone.memberFirst;
     config.memberLast = zone.memberLast;
-    config.pitchBendRangeChoice = rawParamInt(rawParams.mpePitchBendRange);
-    config.normalRoutingMode = rawParamInt(rawParams.normalMidiRoutingMode, 1);
-    config.normalMidiChannel = rawParamInt(rawParams.normalMidiChannel);
+    config.pitchBendRangeChoice = juce::jlimit(
+        0, 3, rawParamInt(rawParams.mpePitchBendRange));
+    config.normalRoutingMode = juce::jlimit(
+        0, 1, rawParamInt(rawParams.normalMidiRoutingMode, 1));
+    config.normalMidiChannel = juce::jlimit(
+        0, 15, rawParamInt(rawParams.normalMidiChannel));
     config.sendSetupMessages = rawParamBool(rawParams.mpeSendSetupMessages, true);
     config.pitchMode = juce::jlimit(0, 1, rawParamInt(rawParams.mpePitchMode));
     return config;
 }
 
-CrowdTimeField::Config AudienceProcessor::buildTimeFieldConfig() const noexcept
+CrowdTimeField::Config AudienceProcessor::buildTimeFieldConfig (
+    const MpeMidiOutput::MpeConfig& midiConfig) const noexcept
 {
     static constexpr int spreadValues[] { 1, 2, 4, 8, 16 };
 
@@ -587,7 +628,7 @@ CrowdTimeField::Config AudienceProcessor::buildTimeFieldConfig() const noexcept
                                             rawParamInt(rawParams.maxAttacksPerStep, 4));
     config.maxActive = juce::jlimit(1, 16,
                                     rawParamInt(rawParams.maxActiveVoices, 16));
-    if (juce::jlimit(0, 2, rawParamInt(rawParams.midiOutputType, 1)) == 2)
+    if (midiConfig.outputType == 2)
         config.maxActive = juce::jmin(config.maxActive, 15);
     config.gatePercent = juce::jlimit(5.0, 100.0,
                                       (double) rawParamValue(rawParams.gatePercent, 70.0f));
@@ -653,14 +694,16 @@ void AudienceProcessor::rehydrateTimeFieldFromCanonical() noexcept
 void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
                                             int numSamples,
                                             bool outputEnabled,
+                                            const MpeMidiOutput::MpeConfig& config,
+                                            const CrowdTimeField::Config& timeConfig,
                                             const CrowdTimeField::ClockFrame& clockFrame,
                                             bool resetAlreadyEmitted)
 {
-    const auto timeConfig = buildTimeFieldConfig();
     if (timeConfig.mode != CrowdTimeField::Mode::Flow)
     {
         renderTimedOutgoingMidi(midiMessages, numSamples, outputEnabled,
-                                clockFrame, resetAlreadyEmitted);
+                                config, timeConfig, clockFrame,
+                                resetAlreadyEmitted);
         return;
     }
 
@@ -678,7 +721,6 @@ void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
     timeFieldBpm.store(useHost && hostLocked ? clockFrame.bpm : timeConfig.internalBpm,
                        std::memory_order_relaxed);
 
-    const auto config = buildMpeConfig();
     // Bound semantic work by both the fixed scratch capacity and the current
     // audio deadline. Tiny host blocks (including pluginval's 1-sample case)
     // must not be asked to emit a 64-voice MPE burst.
@@ -857,10 +899,10 @@ void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
 
 void AudienceProcessor::renderTimedOutgoingMidi (
     juce::MidiBuffer& midiMessages, int numSamples, bool outputEnabled,
+    const MpeMidiOutput::MpeConfig& midiConfig,
+    const CrowdTimeField::Config& timeConfig,
     const CrowdTimeField::ClockFrame& clockFrame, bool resetAlreadyEmitted)
 {
-    const auto midiConfig = buildMpeConfig();
-    const auto timeConfig = buildTimeFieldConfig();
     const int blockBudget = juce::jlimit(1, midiLifecycleEventBudget,
                                          juce::jmax(1, numSamples));
     int midiEventCount = 0;
@@ -1167,6 +1209,11 @@ void AudienceProcessor::sendExternalResetSweep()
 
 void AudienceProcessor::timerCallback()
 {
+    // Processor-owned timer runs for the full plug-in lifetime, including when
+    // the editor is closed. Three missing 1 Hz phone heartbeats synthesize one
+    // ordered Off, preventing a disconnected client from holding a note forever.
+    audienceModel.expireStaleLiveTouches();
+
     int restoredPort = 6060;
     int restoredOutput = 0;
     int restoredRouteKind = -1;
@@ -1533,9 +1580,13 @@ void AudienceProcessor::setStateInformation (const void* data, int size)
 
         const juce::ScopedLock lock(pendingStateLock);
         apvts.replaceState(state);
-        pendingUdpPort = (int) state.getProperty("udpPort", 6060);
-        pendingMidiOutputOption = (int) state.getProperty("midiOutputOption", 0);
-        pendingMidiOutputRouteKind = (int) state.getProperty("midiOutputRouteKind", -1);
+        pendingUdpPort = boundedStateInt(state.getProperty("udpPort", 6060),
+                                         1, 65535, 6060);
+        pendingMidiOutputOption = boundedStateInt(
+            state.getProperty("midiOutputOption", 0),
+            0, std::numeric_limits<int>::max(), 0);
+        pendingMidiOutputRouteKind = boundedStateInt(
+            state.getProperty("midiOutputRouteKind", -1), -1, 2, -1);
         pendingMidiOutputDeviceIdentifier = state.getProperty("midiOutputDeviceIdentifier").toString();
         pendingStateApply.store(true, std::memory_order_release);
     }
@@ -1600,7 +1651,7 @@ juce::String AudienceProcessor::getMidiStateDebugText() const
     text << "OSC            : " << osc.oscStatus() << "\n";
     text << "UDP            : " << getUdpPort() << "\n";
     text << "active sources : " << audienceModel.getActiveSourceCount() << "\n";
-    text << "active fingers : " << audienceModel.getActiveFingerCount() << "\n";
+    text << "active touches : " << audienceModel.getActiveFingerCount() << "\n";
     text << "MIDI output    : " << getMidiOutputStatus() << "\n";
     text << "dropped output : " << (int) externalMidiDropped.load(std::memory_order_relaxed) << "\n";
     return text;

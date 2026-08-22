@@ -866,6 +866,15 @@ int main()
                       CrowdTimeField::kMaxInputEventsPerBlock + 1, output);
         expect(output.resetRequested && output.overflowed && output.count == 0,
                "oversized input count is rejected before unbounded work or access");
+
+        field.process(config, nextFrame(frame, 64), nullptr, 1, output);
+        expect(output.resetRequested && output.overflowed && output.count == 0,
+               "null input with a positive count fails closed before access");
+
+        expect(CrowdTimeField::sourceIdForVoice(-1) == -1
+                   && CrowdTimeField::sourceIdForVoice(
+                       CrowdTimeField::kMaxVoices) == -1,
+               "invalid voice ids never alias a valid source");
     }
 
     // Performance gate: empty and 16-active Grid states process realistic runs

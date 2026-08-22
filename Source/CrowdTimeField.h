@@ -131,7 +131,8 @@ public:
 
     static constexpr int sourceIdForVoice (int voiceId) noexcept
     {
-        return voiceId / kFingersPerSource;
+        return voiceId >= 0 && voiceId < kMaxVoices
+             ? voiceId / kFingersPerSource : -1;
     }
 
     static Config sanitiseConfig (const Config&) noexcept;

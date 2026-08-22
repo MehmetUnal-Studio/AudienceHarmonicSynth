@@ -2,7 +2,7 @@
 
 Formerly named **SpektraSynth**.
 
-Version 2.2.0
+Version 2.2.1
 
 Cosmic Microwave is a JUCE VST3 and standalone OSC-to-MIDI router for
 audience interaction. It receives already-separated zone streams over UDP, keeps each
@@ -46,6 +46,12 @@ live service sends `u`, `v`, and `on` only.
 - OSC `int32` and `float32` arguments are accepted; non-finite values are ignored.
 - `u` and `v` are clamped to `0..1`. Legacy `line` is divided by 127 and clamped.
 - Each source owns one ordered touch/note lifecycle.
+- Production OSC bundles must use the immediate timetag. Dated bundles are ignored so
+  they are never executed early against Ableton's independent musical clock.
+- Repeated movement is reduced to its latest U/V value while ordered On/Off traffic is
+  kept in a separate priority queue. A movement flood therefore cannot trap a note.
+- If an active live touch receives no valid U, V, or On heartbeat for three seconds,
+  Cosmic Microwave publishes a synthetic ordered Off. Simulator voices are excluded.
 
 ### Direct MIDI controls
 
@@ -268,8 +274,10 @@ stereo instrument output -> silent compatibility shell
 ```
 
 The OSC callback validates bounded source/touch data before enqueueing it. The realtime
-path uses preallocated event and MIDI storage. UI monitoring reads lightweight source
-snapshots rather than the network receiver directly.
+path uses preallocated event and MIDI storage. Lifecycle and motion have independent
+bounded queues; motion keeps only the latest value for each axis and lifecycle always
+drains first. UI monitoring reads lightweight source snapshots rather than the network
+receiver directly.
 
 ## Upgrade note
 

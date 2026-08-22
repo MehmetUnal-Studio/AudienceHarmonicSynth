@@ -139,9 +139,12 @@ are rendered directly; in Grid and Ensemble the latest values are sampled at att
 and grid boundaries. A rendered pitch-map step change retriggers the note by default;
 MPE can glide while the target remains within the same base MIDI note.
 
-Addresses outside the contract are ignored: wrong prefix, missing segments, source
-`256` or higher, any finger other than exact lower-case `finger0`, or an unknown
-parameter. OSC bundles are supported.
+Addresses outside the contract are ignored: wrong prefix, missing or extra segments,
+source `256` or higher, any finger other than exact lower-case `finger0`, an unknown
+parameter, an unsupported argument type, or the wrong number of arguments. Immediate
+OSC bundles are supported and preserve their depth-first message order. Dated bundles
+are intentionally ignored rather than being executed early; timing belongs to the
+host-synchronised Time Field.
 
 ## Crowd Time Field
 
@@ -294,12 +297,14 @@ does not invent a UDP zone; the observed-zone status reflects valid OSC traffic 
 - The sender must be able to reach the Cosmic Microwave machine's LAN address and the
   assigned UDP port.
 - Allow inbound UDP for the standalone application or Ableton in the system firewall.
-- UDP has no acknowledgements or retransmission. Send explicit `/on 0` releases and
-  keep **PANIC** available in case a release datagram is lost.
-- Send `u`/`v` only as fast as the performance requires; avoid needless duplicate
-  traffic. Timed modes coalesce intermediate movement but lifecycle input remains
-  bounded, so sender-side restraint is still useful.
+- UDP has no acknowledgements or retransmission. Send explicit `/on 0` releases. As a
+  second line of defence, an active live touch with no valid U/V/On heartbeat for three
+  seconds is closed with one ordered synthetic Off; **PANIC** remains the manual reset.
+- Send `u`/`v` only as fast as the performance requires. Flow, Grid, and Ensemble keep
+  the latest U/V per touch while a separate priority queue protects On/Off, so redundant
+  motion cannot starve a release; sender-side restraint still reduces network load.
 - Confirm one zone, one port, and one instance together before the audience connects.
-- If an `off` packet is lost or the sender disappears, click **PANIC**. It clears live
-  source state and sends note-off/all-off safety messages to the host and selected
-  external destination.
+- If a release (`/on 0`) packet is lost or the sender disappears, first allow the
+  three-second watchdog to close that touch. Use **PANIC** when an immediate global reset
+  is required; it clears live source state and sends bounded all-off safety messages to
+  the host and selected external destination.

@@ -7,7 +7,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQU
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment target" FORCE)
 endif()
 
-project(AudienceHarmonicSynth VERSION 2.2.0 LANGUAGES C CXX)
+project(AudienceHarmonicSynth VERSION 2.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -483,7 +483,9 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     add_executable(AudienceCrowdMidiIntegrationTests
         Tests/CrowdMidiIntegrationTests.cpp
         Source/CrowdTimeField.cpp
+        Source/MidiAudienceModel.cpp
         Source/MpeMidiOutput.cpp
+        Source/OscFingerRouter.cpp
     )
 
     target_compile_definitions(AudienceCrowdMidiIntegrationTests PRIVATE

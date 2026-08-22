@@ -168,10 +168,11 @@ The compact status reports clock lock, effective BPM/division, and:
 - **M / MERGED** - scheduled work coalesced or expired after it could not be admitted.
 
 MERGED is cumulative telemetry for judging crowd pressure; it is not converted into a
-MIDI CC or any other musical control. In Grid and Ensemble, incoming U/V bursts update
-the latest control state instead of forwarding every movement packet. That latest
-state is sampled at attacks and grid boundaries. On/Off events remain ordered and are
-never replaced by movement coalescing.
+MIDI CC or any other musical control. In every mode, incoming U/V bursts update one
+latest-value state while a separate priority queue protects On/Off. Flow consumes the
+latest movement markers directly; Grid and Ensemble sample the canonical state at
+attacks and grid boundaries. On/Off events remain ordered and are never replaced by
+movement coalescing.
 
 ## PITCH MAPPING
 

@@ -44,8 +44,8 @@ namespace cm
         g.setColour (lineSoft);
         g.fillRect (bounds.reduced (14, 0).withY (bounds.getY() + 34).withHeight (1));
 
-        g.setColour (textDim);
-        g.setFont (juce::Font (juce::FontOptions (10.5f).withStyle ("bold")));
+        g.setColour (textMuted.withAlpha (0.82f));
+        g.setFont (juce::Font (juce::FontOptions (10.8f).withStyle ("bold")));
         g.drawText (title, bounds.reduced (15, 0).removeFromTop (35),
                     juce::Justification::centredLeft, false);
 
@@ -90,13 +90,15 @@ namespace cm
                                                   (float) width - 1.0f,
                                                   (float) height - 1.0f);
             const auto focused = box.hasKeyboardFocus (true);
+            const auto enabledAlpha = box.isEnabled() ? 1.0f : 0.34f;
             const auto outline = focused || isButtonDown
                                    ? box.findColour (juce::ComboBox::focusedOutlineColourId)
                                    : box.findColour (juce::ComboBox::outlineColourId);
 
-            g.setColour (box.findColour (juce::ComboBox::backgroundColourId));
+            g.setColour (box.findColour (juce::ComboBox::backgroundColourId)
+                             .withMultipliedAlpha (enabledAlpha));
             g.fillRoundedRectangle (bounds, 6.0f);
-            g.setColour (outline.withAlpha (focused ? 0.95f : 0.78f));
+            g.setColour (outline.withAlpha ((focused ? 0.95f : 0.78f) * enabledAlpha));
             g.drawRoundedRectangle (bounds, 6.0f, focused ? 1.2f : 0.8f);
 
             const auto centreX = (float) buttonX + (float) buttonW * 0.5f;
@@ -105,7 +107,8 @@ namespace cm
             chevron.startNewSubPath (centreX - 4.0f, centreY - 1.5f);
             chevron.lineTo (centreX, centreY + 2.5f);
             chevron.lineTo (centreX + 4.0f, centreY - 1.5f);
-            g.setColour (box.findColour (juce::ComboBox::arrowColourId).withAlpha (0.88f));
+            g.setColour (box.findColour (juce::ComboBox::arrowColourId)
+                             .withAlpha (0.88f * enabledAlpha));
             g.strokePath (chevron, juce::PathStrokeType (1.5f,
                                                         juce::PathStrokeType::curved,
                                                         juce::PathStrokeType::rounded));
@@ -124,7 +127,8 @@ namespace cm
         {
             auto bounds = button.getLocalBounds().toFloat().reduced (0.5f);
             const auto accent = button.findColour (juce::TextButton::buttonOnColourId).withAlpha (1.0f);
-            auto fill = backgroundColour;
+            const auto enabledAlpha = button.isEnabled() ? 1.0f : 0.34f;
+            auto fill = backgroundColour.withMultipliedAlpha (enabledAlpha);
             if (down)
                 fill = fill.interpolatedWith (accent, 0.20f);
             else if (highlighted)
@@ -133,7 +137,8 @@ namespace cm
             g.setColour (fill);
             g.fillRoundedRectangle (bounds, 6.0f);
             g.setColour ((highlighted || button.hasKeyboardFocus (true))
-                           ? accent.withAlpha (0.72f) : line.withAlpha (0.88f));
+                           ? accent.withAlpha (0.72f * enabledAlpha)
+                           : line.withAlpha (0.88f * enabledAlpha));
             g.drawRoundedRectangle (bounds, 6.0f,
                                     button.hasKeyboardFocus (true) ? 1.2f : 0.8f);
         }
@@ -186,16 +191,20 @@ namespace cm
             const auto centreY = (float) y + (float) height * 0.5f;
             auto track = juce::Rectangle<float> ((float) x, centreY - 2.0f,
                                                  (float) width, 4.0f);
-            g.setColour (slider.findColour (juce::Slider::backgroundColourId));
+            const auto enabledAlpha = slider.isEnabled() ? 1.0f : 0.30f;
+            g.setColour (slider.findColour (juce::Slider::backgroundColourId)
+                               .withMultipliedAlpha (enabledAlpha));
             g.fillRoundedRectangle (track, 2.0f);
 
             auto fill = track.withWidth (juce::jmax (0.0f, sliderPos - track.getX()));
-            g.setColour (slider.findColour (juce::Slider::trackColourId));
+            g.setColour (slider.findColour (juce::Slider::trackColourId)
+                               .withMultipliedAlpha (enabledAlpha));
             g.fillRoundedRectangle (fill, 2.0f);
 
-            g.setColour (slider.findColour (juce::Slider::thumbColourId));
+            g.setColour (slider.findColour (juce::Slider::thumbColourId)
+                               .withMultipliedAlpha (enabledAlpha));
             g.fillEllipse (sliderPos - 5.0f, centreY - 5.0f, 10.0f, 10.0f);
-            g.setColour (cyan.withAlpha (0.85f));
+            g.setColour (cyan.withAlpha (0.85f * enabledAlpha));
             g.drawEllipse (sliderPos - 5.0f, centreY - 5.0f, 10.0f, 10.0f, 1.0f);
         }
     };
@@ -218,8 +227,19 @@ namespace cm
             if ((mask & (1u << (juce::uint32) i)) != 0)
                 zones.add (juce::String::charToString ((juce::juce_wchar) ('A' + i)));
 
-        return "Observed zone" + juce::String (zones.size() == 1 ? " " : "s ")
-             + zones.joinIntoString (", ");
+        if (zones.size() > 1)
+            return "MIXED ZONES  /  " + zones.joinIntoString (" + ");
+
+        return "ZONE " + zones[0];
+    }
+
+    static int zoneCount (juce::uint32 mask) noexcept
+    {
+        int count = 0;
+        for (int i = 0; i < 26; ++i)
+            if ((mask & (1u << (juce::uint32) i)) != 0)
+                ++count;
+        return count;
     }
 
     static juce::String compactCount (int value)
@@ -278,6 +298,12 @@ public:
             g.fillRect (x - 0.5f, (float) channelHeader.getY() + 3.0f,
                         1.0f, (float) grid.getBottom() - (float) channelHeader.getY() - 3.0f);
         }
+        for (int group = 1; group < 4; ++group)
+        {
+            const auto y = (float) grid.getY() + rowHeight * (float) group * 4.0f;
+            g.fillRect ((float) grid.getX(), y - 0.5f,
+                        (float) grid.getWidth(), 1.0f);
+        }
 
         for (int channelIndex = 0; channelIndex < 16; ++channelIndex)
         {
@@ -324,10 +350,10 @@ public:
                     g.setColour (cm::text.withAlpha (0.96f));
                     g.fillEllipse (px - dot * 0.5f, py - dot * 0.5f, dot, dot);
 
-                    if (cell.getWidth() >= 24.0f && cell.getHeight() >= 12.0f)
+                    if (cell.getWidth() >= 17.0f && cell.getHeight() >= 11.0f)
                     {
                         g.setColour (cm::text.withAlpha (0.90f));
-                        g.setFont (juce::Font (juce::FontOptions (7.2f).withStyle ("bold")));
+                        g.setFont (juce::Font (juce::FontOptions (6.6f).withStyle ("bold")));
                         g.drawText (juce::String (sourceId), cell.reduced (2.0f),
                                     juce::Justification::bottomLeft, false);
                     }
@@ -391,20 +417,29 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     sourceMap = std::make_unique<SourceActivityMap> (proc.audienceModel);
     addAndMakeVisible (*sourceMap);
 
-    auto styleMetric = [this] (juce::Label& label, const juce::String& title)
+    auto styleMetric = [this] (juce::Label& value, juce::Label& caption,
+                               const juce::String& captionText,
+                               const juce::String& title)
     {
-        addAndMakeVisible (label);
-        label.setJustificationType (juce::Justification::centred);
-        label.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
-        label.setColour (juce::Label::outlineColourId, juce::Colours::transparentBlack);
-        label.setColour (juce::Label::textColourId, cm::text);
-        label.setFont (juce::Font (juce::FontOptions (10.0f).withStyle ("bold")));
-        label.setTitle (title);
+        addAndMakeVisible (value);
+        value.setJustificationType (juce::Justification::centred);
+        value.setColour (juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+        value.setColour (juce::Label::outlineColourId, juce::Colours::transparentBlack);
+        value.setColour (juce::Label::textColourId, cm::text);
+        value.setFont (juce::Font (juce::FontOptions (16.5f).withStyle ("bold")));
+        value.setTitle (title);
+
+        addAndMakeVisible (caption);
+        caption.setText (captionText, juce::dontSendNotification);
+        caption.setJustificationType (juce::Justification::centred);
+        caption.setColour (juce::Label::textColourId, cm::textDim);
+        caption.setFont (juce::Font (juce::FontOptions (8.2f).withStyle ("bold")));
+        caption.setMinimumHorizontalScale (0.76f);
     };
-    styleMetric (activeSourcesValue, "Active OSC sources");
-    styleMetric (activeFingersValue, "Active touches");
-    styleMetric (notesSentValue, "MIDI notes sent");
-    styleMetric (mpeVoicesValue, "Active MPE voices");
+    styleMetric (activeSourcesValue, activeSourcesCaption, "SOURCES", "Active OSC sources");
+    styleMetric (activeFingersValue, activeFingersCaption, "TOUCHES", "Active touches");
+    styleMetric (notesSentValue, notesSentCaption, "MIDI NOTES", "MIDI notes sent");
+    styleMetric (mpeVoicesValue, mpeVoicesCaption, "MPE VOICES", "Active MPE voices");
 
     // OSC input ---------------------------------------------------------------
     styleLabel (portLabel, "UDP PORT");
@@ -424,12 +459,13 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
         if (! updatingPortEditor)
         {
             portEditorDirty = portEditor.getText().trim() != juce::String (proc.getUdpPort());
+            portApplyButton.setEnabled (portEditorDirty);
             portEditor.setDescription ("UDP port for this Cosmic Microwave instance. Enter a number from 1 to 65535 and press Return or Apply.");
-            oscPathLabel.setText ("/cs/{zone}/{source}/finger0/{u|v|on}",
+            oscPathLabel.setText ("/cs/{zone}/{source}/finger0  |  /u  /v  /on  |  0-1",
                                   juce::dontSendNotification);
             oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
             oscPathLabel.setTitle ("OSC address format");
-            oscPathLabel.setDescription ("Expected OSC address format for this UDP input.");
+            oscPathLabel.setDescription ("Single-touch OSC contract. Only finger0 is accepted; u and v are normalized from zero to one, on 1 starts a touch, and on 0 releases it. A live touch is safety-released after three seconds without valid updates.");
             repaint (oscCardBounds);
         }
     };
@@ -448,11 +484,12 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     oscStatusLabel.setTitle ("OSC receiver status");
     addAndMakeVisible (oscStatusLabel);
 
-    styleLabel (oscPathLabel, "/cs/{zone}/{source}/finger0/{u|v|on}");
+    styleLabel (oscPathLabel, "/cs/{zone}/{source}/finger0  |  /u  /v  /on  |  0-1");
     oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
-    oscPathLabel.setFont (juce::Font (juce::FontOptions (9.5f)));
+    oscPathLabel.setFont (juce::Font (juce::FontOptions (9.0f)));
     oscPathLabel.setTitle ("OSC address format");
-    oscPathLabel.setDescription ("Expected OSC address format for this UDP input.");
+    oscPathLabel.setDescription ("Single-touch OSC contract. Only finger0 is accepted; u and v are normalized from zero to one, on 1 starts a touch, and on 0 releases it. A live touch is safety-released after three seconds without valid updates.");
+    oscPathLabel.setTooltip (oscPathLabel.getDescription());
     addAndMakeVisible (oscPathLabel);
 
     // Routing summary ---------------------------------------------------------
@@ -634,6 +671,14 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     timeStatusLabel.setDescription ("Clock, tempo, grid division, pending attacks, active voices and merged-attack telemetry.");
     addAndMakeVisible (timeStatusLabel);
 
+    styleLabel (timeTelemetryLabel, {}, juce::Justification::centredLeft);
+    timeTelemetryLabel.setColour (juce::Label::textColourId, cm::textMuted);
+    timeTelemetryLabel.setFont (juce::Font (juce::FontOptions (9.6f).withStyle ("bold")));
+    timeTelemetryLabel.setMinimumHorizontalScale (0.72f);
+    timeTelemetryLabel.setTitle ("Time Field load");
+    timeTelemetryLabel.setDescription ("Pending attacks, active scheduled voices and merged same-step attacks.");
+    addAndMakeVisible (timeTelemetryLabel);
+
     timeModeAttachment = std::make_unique<ComboAttachment> (proc.apvts, "timeMode", timeModeCombo);
     clockSourceAttachment = std::make_unique<ComboAttachment> (proc.apvts, "clockSource", clockSourceCombo);
     internalBpmAttachment = std::make_unique<SliderAttachment> (proc.apvts, "internalBpm", internalBpmSlider);
@@ -799,22 +844,43 @@ void AudienceEditor::paint (juce::Graphics& g)
     g.drawText ("MIDI ONLY", badge.toNearestInt().withTrimmedLeft (9),
                 juce::Justification::centred, false);
 
-    for (auto* metric : { &activeSourcesValue, &activeFingersValue, &notesSentValue, &mpeVoicesValue })
+    const std::array<juce::Label*, 4> metricValues {{ &activeSourcesValue, &activeFingersValue,
+                                                      &notesSentValue, &mpeVoicesValue }};
+    const std::array<juce::Label*, 4> metricCaptions {{ &activeSourcesCaption, &activeFingersCaption,
+                                                        &notesSentCaption, &mpeVoicesCaption }};
+    for (size_t index = 0; index < metricValues.size(); ++index)
     {
-        const auto metricBounds = metric->getBounds().toFloat();
+        const auto metricBounds = metricValues[index]->getBounds()
+                                      .getUnion (metricCaptions[index]->getBounds()).toFloat();
         g.setColour (cm::cardRaised.withAlpha (0.58f));
         g.fillRoundedRectangle (metricBounds, 7.0f);
         g.setColour (cm::lineSoft.withAlpha (0.92f));
         g.drawRoundedRectangle (metricBounds.reduced (0.5f), 7.0f, 0.8f);
+
+        const auto accent = cm::cyan.interpolatedWith (cm::violet,
+                                                        (float) index / 3.0f);
+        g.setColour (accent.withAlpha (0.72f));
+        g.fillRoundedRectangle (metricBounds.withHeight (1.4f).reduced (8.0f, 0.0f), 0.7f);
     }
 
-    cm::drawCard (g, oscCardBounds, "OSC INPUT", "PER ZONE");
+    cm::drawCard (g, oscCardBounds, "OSC INPUT", "ZONE / FINGER0");
     cm::drawCard (g, routingCardBounds, "SOURCE ROUTING", "ID-LOCKED");
-    cm::drawCard (g, simulatorCardBounds, "SIMULATOR");
+    cm::drawCard (g, simulatorCardBounds, "SIMULATOR", "LOCAL TEST");
     cm::drawCard (g, pitchCardBounds, "PITCH MAPPING");
-    cm::drawCard (g, timeCardBounds, "TIME FIELD", "CLOCK / DENSITY");
+    cm::drawCard (g, timeCardBounds, "TIME FIELD", "SYNC / LOAD");
     cm::drawCard (g, midiCardBounds, "MIDI ROUTING", "NORMAL / MPE");
     cm::drawCard (g, destinationCardBounds, "MIDI OUTPUT");
+
+    if (! timeStatusLabel.getBounds().isEmpty() && ! timeTelemetryLabel.getBounds().isEmpty())
+    {
+        const auto liveBounds = timeStatusLabel.getBounds()
+                                    .getUnion (timeTelemetryLabel.getBounds())
+                                    .toFloat().expanded (5.0f, 2.0f);
+        g.setColour (cm::background.withAlpha (0.44f));
+        g.fillRoundedRectangle (liveBounds, 6.0f);
+        g.setColour (cm::lineSoft.withAlpha (0.86f));
+        g.drawRoundedRectangle (liveBounds.reduced (0.5f), 6.0f, 0.8f);
+    }
 }
 
 void AudienceEditor::resized()
@@ -825,9 +891,15 @@ void AudienceEditor::resized()
     auto metrics = headerArea.reduced (14, 12).removeFromRight (juce::jmin (500, getWidth() - 395));
     constexpr int metricGap = 7;
     const int metricWidth = (metrics.getWidth() - metricGap * 3) / 4;
-    for (auto* metric : { &activeSourcesValue, &activeFingersValue, &notesSentValue, &mpeVoicesValue })
+    const std::array<juce::Label*, 4> metricValues {{ &activeSourcesValue, &activeFingersValue,
+                                                      &notesSentValue, &mpeVoicesValue }};
+    const std::array<juce::Label*, 4> metricCaptions {{ &activeSourcesCaption, &activeFingersCaption,
+                                                        &notesSentCaption, &mpeVoicesCaption }};
+    for (size_t index = 0; index < metricValues.size(); ++index)
     {
-        metric->setBounds (metrics.removeFromLeft (metricWidth));
+        auto metric = metrics.removeFromLeft (metricWidth);
+        metricValues[index]->setBounds (metric.removeFromTop (26));
+        metricCaptions[index]->setBounds (metric);
         metrics.removeFromLeft (metricGap);
     }
 
@@ -837,8 +909,8 @@ void AudienceEditor::resized()
     area.removeFromTop (8);
 
     const int cardGap = 10;
-    const int oscWidth = (int) std::round ((double) (top.getWidth() - cardGap * 2) * 0.31);
-    const int routingWidth = (int) std::round ((double) (top.getWidth() - cardGap * 2) * 0.34);
+    const int oscWidth = (int) std::round ((double) (top.getWidth() - cardGap * 2) * 0.33);
+    const int routingWidth = (int) std::round ((double) (top.getWidth() - cardGap * 2) * 0.38);
     oscCardBounds = top.removeFromLeft (oscWidth);
     top.removeFromLeft (cardGap);
     routingCardBounds = top.removeFromLeft (routingWidth);
@@ -848,8 +920,8 @@ void AudienceEditor::resized()
     const int sidebarWidth = juce::jlimit (348, 430, (int) std::round ((double) area.getWidth() * 0.38));
     auto sidebar = area.removeFromRight (sidebarWidth);
     area.removeFromRight (11);
-    const int timeWidth = juce::jlimit (244, 292,
-                                        (int) std::round ((double) area.getWidth() * 0.42));
+    const int timeWidth = juce::jlimit (260, 304,
+                                        (int) std::round ((double) area.getWidth() * 0.44));
     timeCardBounds = area.removeFromRight (timeWidth);
     area.removeFromRight (9);
     mapCardBounds = area;
@@ -918,8 +990,9 @@ void AudienceEditor::resized()
     {
         auto inner = timeCardBounds.reduced (13);
         inner.removeFromTop (27);
-        timeStatusLabel.setBounds (inner.removeFromTop (24));
-        inner.removeFromTop (2);
+        timeStatusLabel.setBounds (inner.removeFromTop (21));
+        timeTelemetryLabel.setBounds (inner.removeFromTop (17));
+        inner.removeFromTop (3);
 
         auto layoutPair = [] (juce::Rectangle<int> row,
                               juce::Label& leftLabel, juce::Component& leftControl,
@@ -1150,12 +1223,15 @@ void AudienceEditor::restoreUdpPortEditor()
     portEditor.setText (juce::String (lastUdpPort), false);
     updatingPortEditor = false;
     portEditorDirty = false;
+    portApplyButton.setEnabled (false);
     portEditor.setColour (juce::TextEditor::outlineColourId, cm::line);
     portEditor.setDescription ("UDP port for this Cosmic Microwave instance. Enter a number from 1 to 65535 and press Return or Apply.");
-    oscPathLabel.setText ("/cs/{zone}/{source}/finger0/{u|v|on}", juce::dontSendNotification);
+    oscPathLabel.setText ("/cs/{zone}/{source}/finger0  |  /u  /v  /on  |  0-1",
+                          juce::dontSendNotification);
     oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
     oscPathLabel.setTitle ("OSC address format");
-    oscPathLabel.setDescription ("Expected OSC address format for this UDP input.");
+    oscPathLabel.setDescription ("Single-touch OSC contract. Only finger0 is accepted; u and v are normalized from zero to one, on 1 starts a touch, and on 0 releases it. A live touch is safety-released after three seconds without valid updates.");
+    oscPathLabel.setTooltip (oscPathLabel.getDescription());
     repaint (oscCardBounds);
 }
 
@@ -1262,10 +1338,14 @@ void AudienceEditor::updateLiveText()
     const int notesSent = proc.getMidiNotesSent();
     const int mpeVoices = proc.getActiveMpeVoices();
 
-    activeSourcesValue.setText (juce::String (activeSources) + "  SOURCES", juce::dontSendNotification);
-    activeFingersValue.setText (juce::String (activeFingers) + "  TOUCHES", juce::dontSendNotification);
-    notesSentValue.setText (cm::compactCount (notesSent) + "  NOTES", juce::dontSendNotification);
-    mpeVoicesValue.setText (juce::String (mpeVoices) + "  MPE VOICES", juce::dontSendNotification);
+    activeSourcesValue.setText (juce::String (activeSources), juce::dontSendNotification);
+    activeFingersValue.setText (juce::String (activeFingers), juce::dontSendNotification);
+    notesSentValue.setText (cm::compactCount (notesSent), juce::dontSendNotification);
+    mpeVoicesValue.setText (juce::String (mpeVoices), juce::dontSendNotification);
+    activeSourcesValue.setDescription (juce::String (activeSources) + " active OSC sources.");
+    activeFingersValue.setDescription (juce::String (activeFingers) + " active finger0 touches.");
+    notesSentValue.setDescription (juce::String (notesSent) + " MIDI note attacks sent.");
+    mpeVoicesValue.setDescription (juce::String (mpeVoices) + " active MPE voices.");
 
     if (cm::choiceValue (proc.apvts, "pitchSystem") == 1)
     {
@@ -1301,40 +1381,104 @@ void AudienceEditor::updateLiveText()
     const int liveTimeMode = selectedMode >= 0
                                ? selectedMode
                                : cm::choiceValue (proc.apvts, "timeMode");
-    const auto clockName = hostClock ? juce::String ("HOST") : juce::String ("INTERNAL");
-    const auto clockAndGrid = clockName + " " + juce::String (proc.getTimeFieldBpm(), 1)
-                            + " BPM / " + divisions[divisionIndex];
-    const auto queueState = "PENDING " + juce::String (proc.getTimeFieldPending())
-                          + " / ACTIVE " + juce::String (proc.getTimeFieldActive())
-                          + " / MERGED " + juce::String (proc.getTimeFieldMerged());
-    const auto fullTimeFieldStatus = liveTimeMode == 0
-                                   ? juce::String ("Flow direct | active ")
-                                       + juce::String (proc.getTimeFieldActive())
-                                   : clockAndGrid + " | " + queueState;
-    const auto compactTimeFieldStatus = liveTimeMode == 0
-                                      ? juce::String ("FLOW / DIRECT  |  A")
-                                          + juce::String (proc.getTimeFieldActive())
-                                      : (proc.getTimeFieldClockLocked() ? "LOCK / " : "WAIT / ")
-                                          + clockName + " "
-                                          + juce::String (proc.getTimeFieldBpm(), 0)
-                                          + " / " + divisions[divisionIndex]
-                                          + "  |  P" + juce::String (proc.getTimeFieldPending())
-                                          + " A" + juce::String (proc.getTimeFieldActive())
-                                          + " M" + juce::String (proc.getTimeFieldMerged());
-    timeStatusLabel.setText (compactTimeFieldStatus, juce::dontSendNotification);
-    timeStatusLabel.setTooltip (fullTimeFieldStatus);
-    timeStatusLabel.setDescription (fullTimeFieldStatus
-                                    + (liveTimeMode == 0
-                                         ? ". Timing controls are bypassed."
-                                         : proc.getTimeFieldClockLocked()
-                                             ? ". Clock is locked."
-                                             : ". Waiting for a stable clock."));
-    const bool timeFieldReady = liveTimeMode == 0 || proc.getTimeFieldClockLocked();
+    const bool clockLocked = proc.getTimeFieldClockLocked();
+    const int pending = proc.getTimeFieldPending();
+    const int scheduledActive = proc.getTimeFieldActive();
+    const auto merged = proc.getTimeFieldMerged();
+    const auto bpm = juce::String (proc.getTimeFieldBpm(), 0);
+    const auto grid = juce::String (divisions[divisionIndex]);
+
+    juce::String primaryTimeStatus;
+    juce::String clockDescription;
+    if (liveTimeMode == 0)
+    {
+        primaryTimeStatus = "FLOW  /  DIRECT";
+        clockDescription = "Flow mode sends touch attacks directly. Timing controls are bypassed.";
+    }
+    else if (hostClock && clockLocked)
+    {
+        primaryTimeStatus = "HOST LOCK  /  " + bpm + " BPM  /  " + grid;
+        clockDescription = "Time Field is locked to the running host transport at "
+                         + bpm + " BPM on the " + grid + " grid.";
+    }
+    else if (hostClock)
+    {
+        // Host transport may be stopped or absent in Standalone. Scheduling is
+        // still active: every instance shares the monotonic-seconds fallback.
+        primaryTimeStatus = "FREE CLOCK  /  " + bpm + " BPM  /  " + grid;
+        clockDescription = "Host transport is stopped or unavailable. Time Field remains active on the shared monotonic clock at "
+                         + bpm + " BPM on the " + grid + " grid.";
+    }
+    else
+    {
+        primaryTimeStatus = "INTERNAL  /  " + bpm + " BPM  /  " + grid;
+        clockDescription = "Time Field is running from its internal clock at "
+                         + bpm + " BPM on the " + grid + " grid.";
+    }
+
+    timeStatusLabel.setText (primaryTimeStatus, juce::dontSendNotification);
+    timeStatusLabel.setTooltip (clockDescription);
+    timeStatusLabel.setDescription (clockDescription);
     timeStatusLabel.setColour (juce::Label::textColourId,
-                               timeFieldReady ? cm::green : cm::amber);
+                               liveTimeMode != 0 && hostClock && ! clockLocked
+                                 ? cm::amber : cm::green);
+
+    const auto nowMs = juce::Time::getMillisecondCounterHiRes();
+    if (merged < lastTimeFieldMerged)
+        mergeActivityUntilMs = 0.0;
+    else if (merged > lastTimeFieldMerged)
+        mergeActivityUntilMs = nowMs + 1400.0;
+    lastTimeFieldMerged = merged;
+
+    const int configuredActiveLimit = juce::jmax (
+        1, (int) std::lround (maxActiveVoicesSlider.getValue()));
+    // An MPE zone has one master plus only fifteen member channels. Reflect the
+    // processor's effective cap in load telemetry instead of waiting for an
+    // impossible sixteenth active voice before showing queue pressure.
+    const int activeLimit = cm::choiceValue (proc.apvts, "midiOutputType") == 2
+                          ? juce::jmin (15, configuredActiveLimit)
+                          : configuredActiveLimit;
+    const int attacksPerStep = juce::jmax (1, (int) std::lround (maxAttacksSlider.getValue()));
+    const int spreadSteps = juce::jmax (1, temporalSpreadCombo.getText().getIntValue());
+    const int oneSpreadCapacity = attacksPerStep * spreadSteps;
+    const bool atActiveLimit = liveTimeMode != 0 && pending > 0
+                            && scheduledActive >= activeLimit;
+    const bool queuePressure = liveTimeMode != 0 && pending > oneSpreadCapacity;
+    const bool highLoad = atActiveLimit || queuePressure;
+    const bool mergeActivity = liveTimeMode != 0 && nowMs < mergeActivityUntilMs;
+    const auto queueState = "PENDING " + juce::String (pending)
+                          + "  /  ACTIVE " + juce::String (scheduledActive)
+                          + "  /  MERGED " + juce::String (merged);
+    const auto loadDescription = liveTimeMode == 0
+                               ? "Direct signal path with " + juce::String (scheduledActive)
+                                   + " active touches."
+                               : queueState
+                                   + ". Merged counts same-step attack collisions combined safely; it is not a dropped-note count."
+                                   + (atActiveLimit
+                                        ? " The active-voice limit is currently full and attacks remain queued."
+                                        : queuePressure
+                                            ? " High load: the pending queue exceeds one selected temporal-spread window."
+                                        : mergeActivity
+                                            ? " Crowd attacks were consolidated during the latest scheduling window."
+                                            : " Scheduler load is within the selected limits.");
+    timeTelemetryLabel.setText (liveTimeMode == 0
+                                  ? "ATTACKS PASS THROUGH  /  ACTIVE "
+                                      + juce::String (scheduledActive)
+                                  : highLoad
+                                      ? "HIGH LOAD  /  P" + juce::String (pending)
+                                          + "  /  A" + juce::String (scheduledActive)
+                                          + "  /  M" + juce::String (merged)
+                                      : queueState,
+                                juce::dontSendNotification);
+    timeTelemetryLabel.setTooltip (loadDescription);
+    timeTelemetryLabel.setDescription (loadDescription);
+    timeTelemetryLabel.setColour (juce::Label::textColourId,
+                                  highLoad || mergeActivity ? cm::amber
+                                  : pending > 0 ? cm::violet : cm::textMuted);
 
     const bool listening = proc.osc.isRunning() && proc.osc.isReceiving();
     const auto messageCount = proc.osc.getValidMessageCount();
+    const auto malformedCount = proc.osc.getMalformedDatagramCount();
     const auto age = proc.osc.getLastValidMessageAgeMs();
     juce::String oscText;
     juce::String oscDetail;
@@ -1344,6 +1488,14 @@ void AudienceEditor::updateLiveText()
         oscDetail = proc.osc.oscStatus().isNotEmpty() ? proc.osc.oscStatus() : "OSC receiver stopped";
         oscText = "ERR / " + oscDetail;
         oscColour = cm::red;
+    }
+    else if (messageCount == 0 && malformedCount > 0)
+    {
+        oscText = "BAD OSC / " + juce::String ((int) malformedCount);
+        oscDetail = "Listening on UDP " + juce::String (proc.getUdpPort())
+                  + " | " + juce::String (malformedCount)
+                  + " malformed OSC datagrams were rejected; no valid message has arrived";
+        oscColour = cm::amber;
     }
     else if (messageCount == 0)
     {
@@ -1359,7 +1511,11 @@ void AudienceEditor::updateLiveText()
                                   : juce::String ((double) messageCount / 1000.0, 1) + "k";
         oscText = "RX / " + messageSummary + " MSG";
         oscDetail = "Receiving on UDP " + juce::String (proc.getUdpPort())
-                  + " | " + juce::String (messageCount) + " valid messages";
+                  + " | " + juce::String (messageCount) + " valid messages"
+                  + (malformedCount > 0
+                       ? " | " + juce::String (malformedCount)
+                           + " malformed datagrams safely rejected"
+                       : juce::String());
         oscColour = cm::green;
     }
     else
@@ -1367,14 +1523,20 @@ void AudienceEditor::updateLiveText()
         oscText = "STALE / " + juce::String ((double) age / 1000.0, 1) + " s";
         oscDetail = "Listening on UDP " + juce::String (proc.getUdpPort())
                   + " | last valid message "
-                  + juce::String ((double) age / 1000.0, 1) + " seconds ago";
+                  + juce::String ((double) age / 1000.0, 1) + " seconds ago"
+                  + (malformedCount > 0
+                       ? " | " + juce::String (malformedCount)
+                           + " malformed datagrams safely rejected"
+                       : juce::String());
         oscColour = cm::textMuted;
     }
     oscStatusLabel.setText (juce::String::fromUTF8 ("\xe2\x80\xa2  ") + oscText,
                             juce::dontSendNotification);
     oscStatusLabel.setColour (juce::Label::textColourId, oscColour);
-    oscStatusLabel.setTooltip (oscDetail);
-    oscStatusLabel.setDescription (oscDetail);
+    const auto oscSafetyDetail = oscDetail
+                               + ". Live touches are safety-released after 3 seconds without valid OSC updates.";
+    oscStatusLabel.setTooltip (oscSafetyDetail);
+    oscStatusLabel.setDescription (oscSafetyDetail);
 
     const int midiType = cm::choiceValue (proc.apvts, "midiOutputType");
     if (midiType == 1)
@@ -1385,7 +1547,7 @@ void AudienceEditor::updateLiveText()
                                      juce::dontSendNotification);
         if (routingMode == 1)
         {
-            routingDetailLabel.setText ("1:1  /  2:2  /  ...  /  16:16  /  17:1  /  note pairs stay together",
+            routingDetailLabel.setText ("1:1  /  ...  /  16:16  /  17:1  /  0:16  /  note pairs stay together",
                                         juce::dontSendNotification);
         }
         else
@@ -1410,12 +1572,23 @@ void AudienceEditor::updateLiveText()
     }
 
     const auto observedZones = proc.osc.getObservedZoneMask();
+    const int observedZoneCount = cm::zoneCount (observedZones);
     zoneStatusLabel.setText (cm::zonesFromMask (observedZones)
                              + "  /  " + juce::String (activeSources) + " sources  /  "
                              + juce::String (activeFingers) + " touches",
                              juce::dontSendNotification);
+    const bool oscFresh = listening && messageCount > 0 && age <= 1500u;
     zoneStatusLabel.setColour (juce::Label::textColourId,
-                               observedZones != 0 ? cm::green : cm::textDim);
+                               observedZoneCount > 1 ? cm::amber
+                               : observedZones == 0 ? cm::textDim
+                               : oscFresh ? cm::green : cm::textMuted);
+    const auto zoneDescription = observedZoneCount > 1
+                               ? "Mixed-zone input detected on this UDP port. Route one zone per Cosmic Microwave instance."
+                               : observedZoneCount == 1
+                                   ? "One OSC zone is observed on this UDP port."
+                                   : "No valid OSC zone has been observed yet.";
+    zoneStatusLabel.setTooltip (zoneDescription);
+    zoneStatusLabel.setDescription (zoneDescription);
 
     simMoveButton.setToggleState (proc.simulator.isRandomMovementOn(), juce::dontSendNotification);
 

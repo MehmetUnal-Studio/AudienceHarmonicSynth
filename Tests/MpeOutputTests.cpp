@@ -1325,6 +1325,97 @@ int main()
                "scheduled MIDI sample offsets clamp to the current block boundary");
     }
 
+    // ---- Test 22: releases follow the route that owns the note ----
+    {
+        MpeMidiOutput midi;
+        const auto normal = participantNormalConfig();
+        const MpeMidiOutput::NoteEvent ons[] {
+            participantNoteOn(0, 1, kA4),
+            participantNoteOn(1, 1, kA4),
+        };
+        juce::MidiBuffer onBuffer;
+        midi.render(normal, ons, 2, onBuffer, 64);
+
+        auto changedToMpe = mpeConfig();
+        const auto firstOff = noteOff(0);
+        juce::MidiBuffer firstRelease;
+        midi.render(changedToMpe, &firstOff, 1, firstRelease, 64);
+        const auto firstMessages = decode(firstRelease);
+        expect(countMatching(firstMessages, [] (const Msg& message)
+                   { return message.status == kNoteOff; }) == 0,
+               "config transition releases a Normal shared-note owner through its stored refcount");
+
+        const auto secondOff = noteOff(1);
+        juce::MidiBuffer finalRelease;
+        midi.render(normal, &secondOff, 1, finalRelease, 64);
+        const auto finalMessages = decode(finalRelease);
+        expect(countMatching(finalMessages, [] (const Msg& message)
+                   { return message.status == kNoteOff && message.channel == 1 && message.d1 == 69; }) == 1,
+               "last Normal owner still emits exactly one physical NoteOff after a transient MPE config");
+
+        MpeMidiOutput mpeOwner;
+        const auto mpeOn = noteOn(2, kA4);
+        juce::MidiBuffer mpeOnBuffer;
+        mpeOwner.render(changedToMpe, &mpeOn, 1, mpeOnBuffer, 64);
+        const int ownedChannel = mpeOwner.getVoiceDebugSnapshot(2).channel;
+        const auto mpeOff = noteOff(2);
+        juce::MidiBuffer mpeRelease;
+        mpeOwner.render(normal, &mpeOff, 1, mpeRelease, 64);
+        const auto mpeReleaseMessages = decode(mpeRelease);
+        expect(countMatching(mpeReleaseMessages, [ownedChannel] (const Msg& message)
+                   { return message.status == kNoteOff && message.channel == ownedChannel; }) == 1,
+               "config transition releases an MPE owner on its stored member channel");
+    }
+
+    // ---- Test 23: hostile direct configs and event counts fail closed ----
+    {
+        MpeMidiOutput midi;
+        auto hostile = mpeConfig();
+        hostile.masterChannel = 5;
+        hostile.memberFirst = -500;
+        hostile.memberLast = 10;
+        hostile.pitchBendRangeChoice = std::numeric_limits<int>::max();
+        hostile.pitchMode = std::numeric_limits<int>::min();
+
+        auto event = noteOn(0, kA4);
+        event.sampleOffset = std::numeric_limits<int>::min();
+        juce::MidiBuffer repaired;
+        midi.render(hostile, &event, 1, repaired, std::numeric_limits<int>::min());
+        const auto repairedMessages = decode(repaired);
+        expect(indexOf(repairedMessages, [] (const Msg& message)
+                   { return message.status == kNoteOn && message.channel == 2; }) >= 0
+                   && indexOf(repairedMessages, [] (const Msg& message)
+                   { return message.status == kNoteOn && message.channel == 1; }) < 0,
+               "hostile overlapping MPE zone is repaired and never allocates its master channel");
+        bool allAtZero = ! repaired.isEmpty();
+        for (const auto metadata : repaired)
+            allAtZero = allAtZero && metadata.samplePosition == 0;
+        expect(allAtZero,
+               "INT_MIN block length and event offset clamp without signed overflow");
+
+        std::array<MpeMidiOutput::NoteEvent,
+                   MpeMidiOutput::kMaxEventsPerRender + 1> oversized {};
+        for (int index = 0; index < (int) oversized.size(); ++index)
+            oversized[(size_t) index] = participantNoteOn(index, index, kA4);
+        juce::MidiBuffer overflow;
+        midi.render(participantNormalConfig(), oversized.data(),
+                    (int) oversized.size(), overflow, 64);
+        const auto overflowMessages = decode(overflow);
+        expect(countMatching(overflowMessages, [] (const Msg& message)
+                   { return message.status == kCC
+                         && (message.d1 == 120 || message.d1 == 123); }) == 32
+                   && countMatching(overflowMessages, [] (const Msg& message)
+                   { return message.status == kNoteOn; }) == 0,
+               "oversized lifecycle input emits one bounded reset instead of dropping a NoteOff tail");
+
+        juce::MidiBuffer nullInput;
+        midi.render(participantNormalConfig(), nullptr, 1, nullInput, 64);
+        expect(countMatching(decode(nullInput), [] (const Msg& message)
+                   { return message.status == kCC
+                         && (message.d1 == 120 || message.d1 == 123); }) == 32,
+               "null positive-count input also fails closed with a bounded reset");
+    }
+
     std::cout << "\nSummary: " << (g_failed == 0 ? "ok" : "failed") << "\n";
     return g_failed == 0 ? 0 : 1;
 }

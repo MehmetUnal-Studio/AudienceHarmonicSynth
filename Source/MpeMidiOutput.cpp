@@ -63,6 +63,8 @@ int MpeMidiOutput::normalChannelForParticipant (int participantId, int sourceIdB
 
 void MpeMidiOutput::setMemberRange (int first, int last) noexcept
 {
+    first = juce::jlimit(1, 16, first);
+    last = juce::jlimit(first, 16, last);
     // AudienceProcessor::processBlock calls this UNCONDITIONALLY every block, so we
     // must only re-arm the round-robin cursor when the range ACTUALLY changes.
     // Otherwise the per-block same-range calls reset the cursor every block, and
@@ -130,18 +132,15 @@ void MpeMidiOutput::sendPitchBendRangeRpn (juce::MidiBuffer& midiMessages, int s
 
 void MpeMidiOutput::sendMpeSetupIfNeeded (const MpeConfig& config, juce::MidiBuffer& midiMessages, int sampleOffset)
 {
-    // B24: atomic read+clear. Relaxed is fine - the flag only gates re-emission of
-    // the idempotent MPE setup; render() reads+clears on the audio thread while
-    // markSetupDirty() sets it on the message thread.
-    if (! mpeSetupDirty.load(std::memory_order_relaxed))
+    // Consume the request atomically. A concurrent markSetupDirty() after this
+    // exchange remains set for the following render instead of being lost to a
+    // later unconditional store(false).
+    if (! mpeSetupDirty.exchange(false, std::memory_order_relaxed))
         return;
 
     if (config.outputType != 2
         || ! config.sendSetupMessages)
-    {
-        mpeSetupDirty.store(false, std::memory_order_relaxed);
         return;
-    }
 
     const int master = juce::jlimit(1, 16, config.masterChannel);
     // B8: member channels are now zone-derived; the Upper zone uses ch1 as a
@@ -149,10 +148,6 @@ void MpeMidiOutput::sendMpeSetupIfNeeded (const MpeConfig& config, juce::MidiBuf
     const int first = juce::jlimit(1, 16, config.memberFirst);
     const int last = juce::jlimit(first, 16, config.memberLast);
     const int bendRange = bendRangeFromChoice(config.pitchBendRangeChoice);
-
-    // The zone guarantees the member range never includes the master channel
-    // (Lower: master1 / members2-16; Upper: master16 / members1-15).
-    jassert (master < first || master > last);
 
     const int memberCount = juce::jlimit(0, 15, last - first + 1);
     midiMessages.addEvent(juce::MidiMessage::controllerEvent(master, 101, 0), sampleOffset);
@@ -164,8 +159,6 @@ void MpeMidiOutput::sendMpeSetupIfNeeded (const MpeConfig& config, juce::MidiBuf
 
     for (int ch = first; ch <= last; ++ch)
         sendPitchBendRangeRpn(midiMessages, sampleOffset, ch, bendRange);
-
-    mpeSetupDirty.store(false, std::memory_order_relaxed);
 }
 
 void MpeMidiOutput::sendAllMidiNotesOff (juce::MidiBuffer& midiMessages, int sampleOffset)
@@ -209,7 +202,7 @@ void MpeMidiOutput::refreshMpeChannelCounts() noexcept
                                std::memory_order_relaxed);
 }
 
-void MpeMidiOutput::sendNoteOffForSource (const MpeConfig& config, int sourceId,
+void MpeMidiOutput::sendNoteOffForSource (int sourceId,
                                           juce::MidiBuffer& midiMessages, int sampleOffset)
 {
     if (sourceId < 0 || sourceId >= (int) midiOutVoices.size())
@@ -220,7 +213,11 @@ void MpeMidiOutput::sendNoteOffForSource (const MpeConfig& config, int sourceId,
         return;
 
     const int ch = juce::jlimit(1, 16, state.channel);
-    if (config.outputType == 2)
+    // Release according to the route that owns this voice, not the caller's
+    // newest config. This makes a mid-transition NoteOff decrement the correct
+    // normal refcount or free the correct MPE member even if configuration was
+    // changed between callbacks.
+    if (state.outputType == 2)
     {
         // MPE member channels are per-note, so their note-off also resets the
         // per-channel pressure and bend exactly as before.
@@ -268,7 +265,7 @@ void MpeMidiOutput::sendNoteOffForSource (const MpeConfig& config, int sourceId,
 #endif
 }
 
-int MpeMidiOutput::allocateMpeChannelForSource (const MpeConfig& config, int sourceId,
+int MpeMidiOutput::allocateMpeChannelForSource (int sourceId,
                                                 juce::MidiBuffer& midiMessages, int sampleOffset)
 {
     if (sourceId >= 0 && sourceId < (int) midiOutVoices.size())
@@ -332,7 +329,7 @@ int MpeMidiOutput::allocateMpeChannelForSource (const MpeConfig& config, int sou
     if (oldestSource >= 0)
     {
         const int stolenChannel = midiOutVoices[(size_t) oldestSource].channel;
-        sendNoteOffForSource(config, oldestSource, midiMessages, sampleOffset);
+        sendNoteOffForSource(oldestSource, midiMessages, sampleOffset);
         mpeChannelOwner[(size_t) stolenChannel] = sourceId;
         return stolenChannel;
     }
@@ -350,7 +347,7 @@ void MpeMidiOutput::sendExpressionForSource (const MpeConfig& config, int source
     if (! state.active)
         return;
 
-    const int type = config.outputType;
+    const int type = state.outputType;
     const int ch = juce::jlimit(1, 16, state.channel);
     const int pressure = pressureFromUnit(event.y);
     // Cosmic Microwave is a direct OSC -> MIDI router. There is no longer an
@@ -435,9 +432,12 @@ void MpeMidiOutput::handleMidiSourceEvent (const MpeConfig& config, const NoteEv
 
     if (event.type == NoteEvent::NoteOff)
     {
-        sendNoteOffForSource(config, sourceId, midiMessages, sampleOffset);
+        sendNoteOffForSource(sourceId, midiMessages, sampleOffset);
         return;
     }
+
+    if (config.outputType == 0)
+        return;
 
     if (event.type == NoteEvent::Expression)
     {
@@ -454,6 +454,7 @@ void MpeMidiOutput::handleMidiSourceEvent (const MpeConfig& config, const NoteEv
 
     if (outputType == 2
         && state.active
+        && state.outputType == outputType
         && state.note == pitch.noteNumber
         && std::abs(pitch.pitchBend14Bit - state.pitchBend) <= 1)
     {
@@ -462,15 +463,17 @@ void MpeMidiOutput::handleMidiSourceEvent (const MpeConfig& config, const NoteEv
     }
 
     if (outputType == 2 && config.pitchMode == 1 && state.active
+        && state.outputType == outputType
         && pitchBendFromBaseNote(event.frequencyHz, state.note, bendRange).reachable)
     {
         sendExpressionForSource(config, sourceId, event, midiMessages, sampleOffset, true);
         return;
     }
 
-    sendNoteOffForSource(config, sourceId, midiMessages, sampleOffset);
+    sendNoteOffForSource(sourceId, midiMessages, sampleOffset);
 
     state.active = true;
+    state.outputType = outputType;
     state.sourceId = sourceId;
     state.note = pitch.noteNumber;
     state.frequencyHz = pitch.targetFrequencyHz;
@@ -479,7 +482,7 @@ void MpeMidiOutput::handleMidiSourceEvent (const MpeConfig& config, const NoteEv
     if (outputType == 2)
     {
         sendMpeSetupIfNeeded(config, midiMessages, sampleOffset);
-        const int ch = allocateMpeChannelForSource(config, sourceId, midiMessages, sampleOffset);
+        const int ch = allocateMpeChannelForSource(sourceId, midiMessages, sampleOffset);
         state.channel = ch;
         state.pitchBend = pitch.pitchBend14Bit;
         mpeChannelOwner[(size_t) ch] = sourceId;
@@ -542,25 +545,72 @@ void MpeMidiOutput::render (const MpeConfig& config,
                             const NoteEvent* events, int count,
                             juce::MidiBuffer& midiMessages, int numSamples)
 {
+    MpeConfig safeConfig = config;
+    safeConfig.outputType = juce::jlimit(0, 2, safeConfig.outputType);
+    safeConfig.masterChannel = juce::jlimit(1, 16, safeConfig.masterChannel);
+    safeConfig.memberFirst = juce::jlimit(1, 16, safeConfig.memberFirst);
+    safeConfig.memberLast = juce::jlimit(safeConfig.memberFirst, 16,
+                                         safeConfig.memberLast);
+    safeConfig.pitchBendRangeChoice = juce::jlimit(
+        0, 3, safeConfig.pitchBendRangeChoice);
+    safeConfig.normalMidiChannel = juce::jlimit(
+        0, 15, safeConfig.normalMidiChannel);
+    safeConfig.normalRoutingMode = juce::jlimit(
+        0, 1, safeConfig.normalRoutingMode);
+    safeConfig.pitchMode = juce::jlimit(0, 1, safeConfig.pitchMode);
+
+    // Hostile/custom MPE configs must never allocate the master channel as a
+    // member. Public callers normally provide a valid Lower/Upper zone; repair
+    // overlap deterministically for fuzzed state or direct API use.
+    if (safeConfig.outputType == 2
+        && safeConfig.masterChannel >= safeConfig.memberFirst
+        && safeConfig.masterChannel <= safeConfig.memberLast)
+    {
+        if (safeConfig.masterChannel >= 9)
+        {
+            safeConfig.masterChannel = 16;
+            safeConfig.memberFirst = 1;
+            safeConfig.memberLast = 15;
+        }
+        else
+        {
+            safeConfig.masterChannel = 1;
+            safeConfig.memberFirst = 2;
+            safeConfig.memberLast = 16;
+        }
+    }
+
+    if (count < 0)
+        count = 0;
+    if ((events == nullptr && count > 0) || count > kMaxEventsPerRender)
+    {
+        // Never partially consume an oversized lifecycle list: dropping its
+        // tail could discard the matching NoteOff. Fail closed with one bounded
+        // physical reset and clear every semantic owner.
+        sendMidiResetMessages(midiMessages, 0);
+        reset();
+        return;
+    }
+
     // Clamp the member range exactly as AudienceProcessor::processBlock did when
     // it derived mpeFirst/mpeLast (memberLast is clamped to be >= memberFirst), so
     // the channel-allocation range matches the processor byte-for-byte. B8: the
     // lower clamp is relaxed from 2 to 1 so the zone-derived Upper range (members
     // 1..15) is honoured; Lower (2..16) is unaffected.
-    const int configuredFirst = juce::jlimit(1, 16, config.memberFirst);
-    const int configuredLast = juce::jlimit(configuredFirst, 16, config.memberLast);
+    const int configuredFirst = safeConfig.memberFirst;
+    const int configuredLast = safeConfig.memberLast;
     setMemberRange(configuredFirst, configuredLast);
 
-    const int outputType = config.outputType;
+    const int outputType = safeConfig.outputType;
     if (outputType == 2)
-        sendMpeSetupIfNeeded(config, midiMessages, 0);
+        sendMpeSetupIfNeeded(safeConfig, midiMessages, 0);
 
+    const int lastSample = numSamples > 0 ? numSamples - 1 : 0;
     for (int i = 0; i < count; ++i)
     {
         const auto& event = events[(size_t) i];
-        const int sampleOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1),
-                                               event.sampleOffset);
-        handleMidiSourceEvent(config, event, midiMessages, sampleOffset);
+        const int sampleOffset = juce::jlimit(0, lastSample, event.sampleOffset);
+        handleMidiSourceEvent(safeConfig, event, midiMessages, sampleOffset);
     }
 }
 
