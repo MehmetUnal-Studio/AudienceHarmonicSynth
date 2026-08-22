@@ -9,7 +9,7 @@ set(AUDIENCE_HARMONIC_SYNTH_VERSION "${PROJECT_VERSION}")
 set(AUDIENCE_HARMONIC_SYNTH_FORMATS VST3 Standalone)
 set(AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_INPUT TRUE)
 set(AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_OUTPUT TRUE)
-option(AUDIENCE_SYNTH_AUTO_INSTALL "Auto-install plug-ins to the user VST3 folder after build (macOS dev convenience)" OFF)
+option(AUDIENCE_SYNTH_AUTO_INSTALL "Auto-install plug-ins to the user VST3 folder after build (macOS dev convenience)" ON)
 
 if(ANDROID)
     set(AUDIENCE_HARMONIC_SYNTH_VERSION "${PROJECT_VERSION}")
@@ -490,9 +490,9 @@ if(APPLE AND NOT ANDROID)
 endif()
 
 # B15: the macOS auto-install (clean copy) of the AudienceHarmonicSynth VST3
-# into the user plug-ins folder is an explicit local-dev convenience. It stays
-# OFF by default because the cleanup removes legacy same-CID bundle names.
-# Opt in with -DAUDIENCE_SYNTH_AUTO_INSTALL=ON only when an install is intended.
+# into the user plug-ins folder is the default local-dev workflow. Configure
+# with -DAUDIENCE_SYNTH_AUTO_INSTALL=OFF for CI or build-only environments.
+# The install removes legacy same-CID names before copying the canonical bundle.
 if(AUDIENCE_SYNTH_AUTO_INSTALL AND APPLE AND NOT ANDROID)
     add_custom_command(TARGET AudienceHarmonicSynth_VST3 POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf
