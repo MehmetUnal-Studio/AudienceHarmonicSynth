@@ -2,15 +2,15 @@
 
 Formerly named **SpektraSynth**.
 
-Version 2.1.0
+Version 2.2.0
 
 Cosmic Microwave is a JUCE VST3 and standalone OSC-to-MIDI router for
 audience interaction. It receives already-separated zone streams over UDP, keeps each
-source/finger lifecycle intact, maps normalized movement through either tonal or
+source's single-touch lifecycle intact, maps normalized movement through either tonal or
 element-derived Atomic Scale pitch maps, and sends Normal MIDI or MPE to Ableton, a
 virtual MIDI endpoint, or a system MIDI device.
 
-Cosmic Microwave 2.1 is behaviourally MIDI-only: it does not generate sound. The VST3
+Cosmic Microwave 2.2 is behaviourally MIDI-only: it does not generate sound. The VST3
 keeps a silent stereo instrument shell, its existing class identity, and its instrument
 placement so Ableton sets made with the earlier product can still resolve the device.
 
@@ -27,23 +27,25 @@ for separating zones before they reach the plugin; for example:
 The port does not define the zone. The plugin reads the zone from every valid OSC
 address and reports mixed-zone traffic, but it does not filter or infer zones.
 
-Canonical messages are:
+Production messages are:
 
 ```text
-/cs/<zone>/<source>/finger<n>/on    1          activate finger
-/cs/<zone>/<source>/finger<n>/on    0          release finger
-/cs/<zone>/<source>/finger<n>/off              release finger
-/cs/<zone>/<source>/finger<n>/u     <0..1>     horizontal position
-/cs/<zone>/<source>/finger<n>/v     <0..1>     vertical position
-/cs/<zone>/<source>/finger<n>/line  <0..127>   legacy horizontal position
+/cs/<zone>/<source>/finger0/u     <0..1>     horizontal position
+/cs/<zone>/<source>/finger0/v     <0..1>     vertical position
+/cs/<zone>/<source>/finger0/on    1          activate touch
+/cs/<zone>/<source>/finger0/on    0          release touch
 ```
+
+Legacy `/off` and `/line 0..127` inputs remain accepted for older patches, but the
+live service sends `u`, `v`, and `on` only.
 
 - Zones are `A..Z`.
 - Source IDs are `0..255`.
-- Fingers are `finger0..finger9`.
+- The live product accepts `finger0` only. Secondary finger tokens are ignored before
+  state and telemetry, matching the one-person/one-touch performance model.
 - OSC `int32` and `float32` arguments are accepted; non-finite values are ignored.
 - `u` and `v` are clamped to `0..1`. Legacy `line` is divided by 127 and clamped.
-- Each finger has an independent note lifecycle.
+- Each source owns one ordered touch/note lifecycle.
 
 ### Direct MIDI controls
 
@@ -58,6 +60,37 @@ Controller values are `round(value * 127)`. Note-on velocity is limited to `1..1
 Horizontal position is divided into equal regions across the selected root, pitch map,
 and octave range. New sessions default to the Atomic system with Helium, Extended
 density, root C2, and a four-octave range.
+
+## Crowd Time Field
+
+Cosmic Microwave 2.2 can turn an asynchronous crowd into a shared rhythmic field
+without changing source identity or note ownership:
+
+| Mode | Behaviour |
+|---|---|
+| **Flow** | Pass lifecycle and movement through directly, preserving the earlier 2.1 timing behaviour. |
+| **Grid** | Queue attacks to the next selected musical division, with fair selection, an attacks-per-step limit, and an active-voice limit. Held notes release with their ordered Off; an admitted short tap receives the configured minimum gate. |
+| **Ensemble** | Place each source in a deterministic lane across the selected spread, apply a fixed gate, and requeue a still-held source for later pulses. |
+
+New sessions default to **Ensemble / Host / 1/16**, with **4 attacks per step**,
+**16 active voices**, **70% gate**, and a **4-step spread**. MPE has only 15 member
+channels, so its effective active limit is 15 even when the saved control reads 16.
+Sessions saved before state schema 4 migrate to **Flow**, preserving their immediate
+timing rather than silently quantizing an existing performance.
+
+With **Host** selected, a playing host's tempo and PPQ timeline define the grid. If
+that clock is missing or the transport is stopped, the scheduler continues from a
+process-wide monotonic timebase at the Internal BPM. Selecting **Internal** uses that
+common monotonic clock explicitly, so separate instances still share one absolute
+time reference.
+
+Grid and Ensemble retain the latest U/V values and sample them at scheduled attack and
+grid boundaries instead of forwarding every redundant movement packet. Ordered On/Off
+lifecycle events are not packet-round-robined or replaced by movement coalescing. In
+Ensemble, the UDP port supplies a stable lane seed so different zone instances do not
+all place the same source ID on the same tick. A pending short tap remains eligible for
+at least one complete lane cycle. **MERGED** is monitoring only: it counts scheduled
+work coalesced or expired under pressure and does not produce a MIDI CC.
 
 ## Pitch systems
 
@@ -93,11 +126,11 @@ not packet order:
 0 -> Ch 16
 ```
 
-All fingers and all `u`, `v`, `on`, and `off` messages from one source use that
+All `u`, `v`, `on`, and `off` messages from one source's `finger0` touch use that
 source's channel. A second **Single channel** mode sends every source through one
 selected channel.
 
-MPE assigns each active finger to one member channel. Lower zone uses master Channel 1
+MPE assigns each active source touch to one member channel. Lower zone uses master Channel 1
 and members 2-16; Upper uses master Channel 16 and members 1-15. When all 15 member
 channels are occupied, the oldest active MPE note is released before its channel is
 reused.
@@ -136,11 +169,13 @@ instead of treating its member channels as independent source channels.
 
 The MIDI-only editor contains:
 
-- live **SOURCES**, **FINGERS**, **NOTES**, and **MPE VOICES** metrics;
+- live **SOURCES**, **TOUCHES**, **NOTES**, and **MPE VOICES** metrics;
 - an **OSC INPUT** card with port and validated-traffic status;
 - a source-routing summary with observed zone letters;
 - a simulator for source-count and movement tests;
 - a 256-source **SOURCE MATRIX** grouped into 16 MIDI-channel columns;
+- a **TIME FIELD** card for Flow/Grid/Ensemble timing, host/internal clocking,
+  density limits, gate, spread, and live Pending/Active/Merged telemetry;
 - a Tonal/Atomic pitch system with element and density selection;
 - Normal MIDI and MPE routing controls;
 - host, virtual, and hardware destination selection; and
@@ -157,6 +192,14 @@ The MIDI-only editor contains:
 | MPE Pitch Bend Range | 2, 12, 24, 48 semitones | 2 semitones |
 | MPE Send Setup Messages | Off, On | On |
 | MPE Pitch Mode | Retrigger, Glide | Retrigger |
+| Time Field Mode | Flow, Grid, Ensemble | Ensemble |
+| Time Field Clock | Host, Internal | Host |
+| Internal BPM | 40..240 BPM | 120 BPM |
+| Grid Division | 1/4, 1/8, 1/16, 1/32 | 1/16 |
+| Attacks Per Step | 1..16 | 4 |
+| Maximum Active Voices | 1..16 | 16 (effective 15 in MPE) |
+| Gate Length | 5..100% | 70% |
+| Temporal Spread | 1, 2, 4, 8, 16 steps | 4 steps |
 | Pitch System | Tonal, Atomic | Atomic |
 | Root | C..B | C |
 | Root Octave | 0..6 | 2 |
@@ -195,7 +238,7 @@ The CMake project contains four MIDI-oriented products:
 
 | Product | Formats | Purpose |
 |---|---|---|
-| **Cosmic Microwave** | VST3 + Standalone | Flagship finger-aware OSC-to-Normal-MIDI/MPE router documented here. |
+| **Cosmic Microwave** | VST3 + Standalone | Flagship single-touch OSC-to-Normal-MIDI/MPE router documented here. |
 | **Cosmic Microwave MIDI** | VST3 + Standalone | MIDI-effect audience generator with scale processing. |
 | **Cosmic Microwave MIDI Generator** | VST3 | Ableton-focused MIDI-effect variant with scale correction/remapping. |
 | **Cosmic Microwave MIDI Device** | Standalone | Lightweight UDP-to-MIDI application. |
@@ -205,14 +248,18 @@ The CMake project contains four MIDI-oriented products:
 ```text
 already-separated OSC zone / simulator
   -> OscBridge validation
-  -> MidiAudienceModel (256 sources x 10 fingers)
+  -> MidiAudienceModel (256 sources x one admitted live touch)
   -> OscFingerRouter fixed-capacity event queue
+  -> CrowdTimeField
+       -> Flow: direct lifecycle/motion
+       -> Grid: clocked attack queue
+       -> Ensemble: port-seeded temporal lanes
   -> pitch lookup
        -> MidiPitchMap (7 tonal 12-TET maps)
        -> AtomicScaleMap (29 elements x 5 density modes)
   -> MpeMidiOutput
        -> Normal MIDI: fixed channel or stable source -> Ch 1..16
-       -> MPE: one member channel per active finger
+       -> MPE: one member channel per active source touch
   -> host MIDI bus
   -> optional port-derived virtual or hardware MIDI destination
 
@@ -220,7 +267,7 @@ host MIDI input -> unchanged MIDI thru when output is enabled
 stereo instrument output -> silent compatibility shell
 ```
 
-The OSC callback validates bounded source/finger data before enqueueing it. The realtime
+The OSC callback validates bounded source/touch data before enqueueing it. The realtime
 path uses preallocated event and MIDI storage. UI monitoring reads lightweight source
 snapshots rather than the network receiver directly.
 
@@ -232,14 +279,16 @@ bundle identity for existing session lookup. Do not keep `SpektraSynth.vst3` and
 same plugin class. Back up the old bundle outside the plugin folder, install Cosmic
 Microwave, and rescan the host.
 
-New 2.1 sessions open on Atomic / Helium / Extended. Existing schema-2 MIDI-only
-sessions migrate explicitly to Tonal so they keep their previous pitch-map intent.
+New 2.2 sessions open on Ensemble timing and Atomic / Helium / Extended pitch mapping.
+Existing state from schema 3 or earlier receives Flow timing, so upgrading does not
+move established attacks onto a grid. Existing schema-2 MIDI-only sessions still
+migrate explicitly to Tonal so they keep their previous pitch-map intent.
 Released 1.x sessions that selected an element spectrum migrate to Atomic and recover
 the corresponding element; their stable `spectralElement` and `atomicScaleMode`
 parameter values are retained.
 
 Repositories upgraded from pre-2.0 versions may still contain old media, preparation
-tools, or implementation files. The `AudienceHarmonicSynth` 2.1 target does not load
+tools, or implementation files. The `AudienceHarmonicSynth` 2.2 target does not load
 or compile them; `CMakeLists.txt` is the authoritative runtime source list.
 
 ## Manual

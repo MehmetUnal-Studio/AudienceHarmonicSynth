@@ -51,6 +51,7 @@ public:
         Type   type        = NoteOn;
         int    sourceId     = -1;
         int    participantId = -1; // stable OSC participant/source id; -1 uses configured channel
+        int    sampleOffset  = 0;  // block-relative emission time, clamped by render()
         double frequencyHz  = 261.6255653005986;
         float  velocity     = 0.0f;
         float  x            = 0.5f;

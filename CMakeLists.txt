@@ -1,9 +1,16 @@
 cmake_minimum_required(VERSION 3.22)
-project(AudienceHarmonicSynth VERSION 2.1.0 LANGUAGES C CXX)
+
+# This must be initialised before project(). Otherwise CMake creates an empty
+# cache entry during compiler detection and the native SDK version silently
+# becomes the plug-in's minimum supported macOS version.
+if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment target" FORCE)
+endif()
+
+project(AudienceHarmonicSynth VERSION 2.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment target")
 
 set(AUDIENCE_HARMONIC_SYNTH_VERSION "${PROJECT_VERSION}")
 set(AUDIENCE_HARMONIC_SYNTH_FORMATS VST3 Standalone)
@@ -64,6 +71,7 @@ target_sources(AudienceHarmonicSynth PRIVATE
     Source/PluginEditor.cpp
     Source/AtomicScaleMap.cpp
     Source/AtomicScaleCatalog.cpp
+    Source/CrowdTimeField.cpp
     Source/MidiAudienceModel.cpp
     Source/MidiPitchMap.cpp
     Source/OscBridge.cpp
@@ -460,6 +468,37 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_test(NAME AudienceAtomicMidiIntegrationTests COMMAND AudienceAtomicMidiIntegrationTests)
 
+    add_executable(AudienceCrowdTimeFieldTests
+        Tests/CrowdTimeFieldTests.cpp
+        Source/CrowdTimeField.cpp
+    )
+
+    target_link_libraries(AudienceCrowdTimeFieldTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceCrowdTimeFieldTests COMMAND AudienceCrowdTimeFieldTests)
+
+    add_executable(AudienceCrowdMidiIntegrationTests
+        Tests/CrowdMidiIntegrationTests.cpp
+        Source/CrowdTimeField.cpp
+        Source/MpeMidiOutput.cpp
+    )
+
+    target_compile_definitions(AudienceCrowdMidiIntegrationTests PRIVATE
+        COSMIC_MIDI_DIAGNOSTICS=1
+    )
+
+    target_link_libraries(AudienceCrowdMidiIntegrationTests PRIVATE
+        juce::juce_audio_basics
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceCrowdMidiIntegrationTests COMMAND AudienceCrowdMidiIntegrationTests)
+
     add_executable(AudiencePluginStateMigrationTests
         Tests/PluginStateMigrationTests.cpp
         Source/PluginStateMigration.cpp
@@ -495,15 +534,11 @@ endif()
 # The install removes legacy same-CID names before copying the canonical bundle.
 if(AUDIENCE_SYNTH_AUTO_INSTALL AND APPLE AND NOT ANDROID)
     add_custom_command(TARGET AudienceHarmonicSynth_VST3 POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E rm -rf
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Cosmic Microwave.vst3"
-        COMMAND ${CMAKE_COMMAND} -E rm -rf
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/SpektraSynth.vst3"
-        COMMAND ${CMAKE_COMMAND} -E rm -rf
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience Harmonic Synth.vst3"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "$<TARGET_BUNDLE_DIR:AudienceHarmonicSynth_VST3>"
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Cosmic Microwave.vst3"
+        COMMAND ${CMAKE_COMMAND}
+            "-DSOURCE_BUNDLE=$<TARGET_BUNDLE_DIR:AudienceHarmonicSynth_VST3>"
+            "-DUSER_VST3_ROOT=$ENV{HOME}/Library/Audio/Plug-Ins/VST3"
+            "-DSYSTEM_VST3_ROOT=/Library/Audio/Plug-Ins/VST3"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallCosmicMicrowaveVST3.cmake"
         COMMENT "Replacing legacy same-CID bundles with canonical Cosmic Microwave VST3"
     )
 endif()

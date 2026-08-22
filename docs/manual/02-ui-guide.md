@@ -1,8 +1,8 @@
 # 02 - UI Guide
 
-Cosmic Microwave is an OSC-to-MIDI router. The editor is focused on five jobs:
-selecting the UDP input, confirming source identity, mapping horizontal movement to
-notes, choosing Normal MIDI or MPE, and selecting a MIDI destination.
+Cosmic Microwave is an OSC-to-MIDI router. The editor is focused on selecting the UDP
+input, confirming source identity, organizing crowd attacks in time, mapping movement
+to notes, choosing Normal MIDI or MPE, and selecting a MIDI destination.
 
 The product does not generate sound. It remains a silent stereo instrument shell so
 Ableton can keep the same device placement and session identity, but its behaviour and
@@ -12,15 +12,15 @@ all visible controls are MIDI-only.
 
 ```
 +--------------------------------------------------------------------------+
-| COSMIC MICROWAVE   MIDI ONLY   SOURCES | FINGERS | NOTES | MPE VOICES    |
+| COSMIC MICROWAVE   MIDI ONLY   SOURCES | TOUCHES | NOTES | MPE VOICES    |
 +----------------------+------------------------+--------------------------+
 | OSC INPUT            | SOURCE ROUTING         | SIMULATOR                |
 +----------------------+------------------------+--------------------------+
-|                                                       | PITCH MAPPING    |
-| SOURCE MATRIX                                        +------------------+
-| 256 source IDs grouped into 16 MIDI-channel columns  | MIDI ROUTING     |
-|                                                       +------------------+
-|                                                       | MIDI OUTPUT      |
+| SOURCE MATRIX                  | TIME FIELD           | PITCH MAPPING    |
+| 256 IDs / 16 channel columns   | Flow/Grid/Ensemble   +------------------+
+|                                | clock and density    | MIDI ROUTING     |
+|                                | live P/A/M status    +------------------+
+|                                |                      | MIDI OUTPUT      |
 +-------------------------------------------------------+------------------+
 ```
 
@@ -33,8 +33,8 @@ The header identifies the device as **COSMIC MICROWAVE**, labels its role as
 **OSC / MIDI ROUTING INSTRUMENT**, and shows a **MIDI ONLY** badge. Four live metrics
 appear on the right:
 
-- **SOURCES** - OSC or simulator source IDs with at least one active finger.
-- **FINGERS** - the total number of active fingers across those sources.
+- **SOURCES** - OSC or simulator source IDs with an active `finger0` touch.
+- **TOUCHES** - the total number of active `finger0` touches across those sources.
 - **NOTES** - note-on messages emitted since the current MIDI state was reset.
 - **MPE VOICES** - member channels currently occupied in MPE mode. This is MIDI
   channel allocation, not an internal sound-engine count.
@@ -58,7 +58,7 @@ The status line distinguishes these states:
 The address reminder beneath the status is:
 
 ```text
-/cs/{zone}/{source}/finger{n}/{on|off|u|v}
+/cs/{zone}/{source}/finger0/{u|v|on}
 ```
 
 Each instance listens to one UDP port. The upstream server should therefore send one
@@ -76,12 +76,12 @@ In **Normal MIDI / Per source 1-16**, the card shows the stable mapping:
 1 -> Ch 1   2 -> Ch 2   ...   16 -> Ch 16   17 -> Ch 1
 ```
 
-Source `0` is accepted and wraps to Channel 16. Every finger and every `on`, `off`,
-`u`, and `v` message belonging to a source uses that source's channel.
+Source `0` is accepted and wraps to Channel 16. Every `u`, `v`, and `on` message
+belonging to a source's admitted finger0 touch uses that source's channel.
 
 The summary changes when **Single channel**, **MPE MIDI**, or **Off** is selected. Its
 bottom line reports the zone letters observed in valid OSC addresses and the current
-source/finger totals. If more than one zone appears, check the upstream port split;
+source/touch totals. If more than one zone appears, check the upstream port split;
 the plugin observes zone data but does not filter traffic by zone.
 
 ## SIMULATOR
@@ -106,9 +106,72 @@ the Channel 1 column contains `1, 17, 33, ...`, while source `0` occupies the fi
 cell of the Channel 16 column.
 
 Inactive cells are dim. An active source lights its cell and shows a white point whose
-position follows the source's most recent X/Y values. The point grows slightly when
-more fingers are active. The map is a monitor; selecting a cell does not change
-routing.
+position follows the source's most recent X/Y values. The map is a monitor; selecting
+a cell does not change routing.
+
+## TIME FIELD
+
+The **TIME FIELD** turns independently timed phone gestures into one shared temporal
+system while keeping every source's single-touch lifecycle intact.
+
+### MODE
+
+- **Flow** - direct response. On/Off and movement retain their incoming block timing;
+  the other Time Field controls are bypassed. This matches pre-2.2 behaviour.
+- **Grid** - new attacks wait for the next selected division. Selection is fair and
+  bounded by **ATTACKS / STEP** and **ACTIVE LIMIT**. A held note releases on its
+  ordered Off; a tap admitted after ending before its grid opportunity receives the
+  configured minimum gate.
+- **Ensemble** - each source belongs to a deterministic lane within **SPREAD / STEPS**.
+  Attacks receive a fixed gate; a source that remains held is queued for a later pulse.
+  This is the default for new sessions.
+
+New 2.2 sessions use **Ensemble**, **Host**, **1/16**, four attacks per step, an active
+limit of 16, a 70% gate, and a four-step spread. MPE can use only 15 member channels,
+so its effective active limit is 15 even if the control reads 16. State saved before
+schema 4 opens in **Flow**, avoiding an unexpected timing change in an older set.
+
+### CLOCK and DIVISION
+
+**Host** follows the host tempo and PPQ position while its transport is playing. If
+the host clock is incomplete or stopped, the scheduler continues on a process-wide
+monotonic fallback at the **INTERNAL BPM**. The status shows **WAIT** in that fallback
+state because host lock is absent, even though safe scheduling continues.
+
+**Internal** explicitly uses the same common monotonic timebase at `40..240 BPM`.
+Separate instances therefore share an absolute grid even without usable host PPQ.
+**DIVISION** selects `1/4`, `1/8`, `1/16`, or `1/32`. The Internal BPM control appears
+when Internal clocking is selected in a timed mode.
+
+### Density and gate controls
+
+- **ATTACKS / STEP** (`1..16`) limits how many queued attacks can start on one grid
+  boundary.
+- **ACTIVE LIMIT** (`1..16`) limits simultaneous scheduled voices. The MPE runtime
+  cap is 15.
+- **GATE** (`5..100%`) sets the fixed Ensemble note length and the minimum Grid gate
+  for a short tap.
+- **SPREAD / STEPS** (`1`, `2`, `4`, `8`, or `16`) defines Ensemble's lane cycle.
+  Grid uses the base division directly.
+
+In Ensemble, the instance's UDP port supplies a stable phase seed for the lane map.
+Zones that reuse the same source IDs on different ports are therefore decorrelated
+instead of all attacking on the same host tick. A pending short tap remains eligible
+for at least one full lane cycle before it can expire.
+
+### Live status
+
+The compact status reports clock lock, effective BPM/division, and:
+
+- **P / PENDING** - lifecycle attacks waiting for a permitted grid/lane boundary.
+- **A / ACTIVE** - currently sounding Time Field voices.
+- **M / MERGED** - scheduled work coalesced or expired after it could not be admitted.
+
+MERGED is cumulative telemetry for judging crowd pressure; it is not converted into a
+MIDI CC or any other musical control. In Grid and Ensemble, incoming U/V bursts update
+the latest control state instead of forwarding every movement packet. That latest
+state is sampled at attacks and grid boundaries. On/Off events remain ordered and are
+never replaced by movement coalescing.
 
 ## PITCH MAPPING
 
@@ -145,7 +208,7 @@ For Atomic maps, Normal MIDI sends the nearest semitone. MPE uses the exact
 element-derived frequency target, represented by the nearest base note and per-note
 pitch bend. Match the receiving instrument's MPE bend range.
 
-Changing any pitch-map control safely releases and retriggers held OSC fingers at
+Changing any pitch-map control safely releases and retriggers held OSC touches at
 their new mapped notes.
 
 ## MIDI ROUTING
@@ -154,7 +217,7 @@ their new mapped notes.
 
 - **Off** - keep receiving and displaying OSC, but emit no MIDI.
 - **Normal MIDI** - send conventional channel MIDI.
-- **MPE MIDI** - allocate a member channel per active finger and send per-note
+- **MPE MIDI** - allocate a member channel per active source touch and send per-note
   expression.
 
 Incoming MIDI from the host is passed through while output is enabled.
@@ -165,9 +228,9 @@ Incoming MIDI from the host is passed through while output is enabled.
   shown above. This is the intended audience-routing mode.
 - **Single channel** - send every source through the selected **FIXED CHANNEL**.
 
-Each finger is still an independent note owner. If several fingers land on the same
-channel and note, reference counting keeps that note held until the last owner releases
-it.
+Each source touch remains an independent note owner. If wrapped source IDs land on the
+same channel and note, reference counting keeps that note held until the last owner
+releases it.
 
 ### MPE controls
 
@@ -214,9 +277,11 @@ a sender disconnect, a routing change, or any suspected missing `off` packet.
 2. Set the instance's UDP port, for example `6060` for Zone A and `6061` for Zone B.
 3. Choose **Normal MIDI -> Per source 1-16** for channel-separated routing, or choose
    **MPE MIDI** for per-note expression.
-4. Select the port-named virtual destination for the clearest Ableton routing.
-5. Confirm the observed zone, source count, activity map, destination status, and then
-   test **PANIC** before the audience connects.
+4. Leave **Ensemble / Host / 1/16** for the starting crowd-control preset, or use Flow
+   while checking the raw end-to-end route.
+5. Select the port-named virtual destination for the clearest Ableton routing.
+6. Confirm the observed zone, Time Field status, source count, activity map, and
+   destination status; then test **PANIC** before the audience connects.
 
 See [04 - OSC & the Audience](04-osc-audience.md) for the wire format and
 [03 - MPE Setup](03-mpe-setup.md) for receiver configuration.

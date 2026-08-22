@@ -174,9 +174,24 @@ int main()
         const uint32_t aValid = bridgeA.getValidMessageCount();
         const uint32_t bValid = bridgeB.getValidMessageCount();
 
-        sender.send("/cs/A/0/finger1/on", 1);
-        sender.send("/cs/A/0/finger1/u", 0.25f);
-        sender.send("/cs/A/0/finger1/v", 0.5f);
+        // Secondary-finger traffic may exist on the live wire, but this
+        // single-finger receiver must ignore it before sink state and valid
+        // message telemetry. The following finger0 triplet is an ordered UDP
+        // barrier and the only traffic expected to land.
+        juce::OSCBundle startBundle;
+        startBundle.addElement(juce::OSCBundle::Element(
+            juce::OSCMessage("/cs/A/0/finger1/on", 1)));
+        startBundle.addElement(juce::OSCBundle::Element(
+            juce::OSCMessage("/cs/A/0/finger1/u", 0.9f)));
+        startBundle.addElement(juce::OSCBundle::Element(
+            juce::OSCMessage("/cs/A/0/finger1/v", 0.1f)));
+        startBundle.addElement(juce::OSCBundle::Element(
+            juce::OSCMessage("/cs/A/0/finger0/u", 0.25f)));
+        startBundle.addElement(juce::OSCBundle::Element(
+            juce::OSCMessage("/cs/A/0/finger0/v", 0.5f)));
+        startBundle.addElement(juce::OSCBundle::Element(
+            juce::OSCMessage("/cs/A/0/finger0/on", 1)));
+        sender.send(startBundle);
 
         const bool fannedOut = waitForCount(sinkA.onCount, aOn + 1)
             && waitForCount(sinkA.xCount, aX + 1)
@@ -188,15 +203,38 @@ int main()
             && waitForValidMessageCount(bridgeB, bValid + 3);
 
         expect(fannedOut && telemetryFannedOut
+                   && sinkA.onCount.load() == aOn + 1
+                   && sinkA.xCount.load() == aX + 1
+                   && sinkA.yCount.load() == aY + 1
+                   && sinkB.onCount.load() == bOn + 1
+                   && sinkB.xCount.load() == bX + 1
+                   && sinkB.yCount.load() == bY + 1
+                   && bridgeA.getValidMessageCount() == aValid + 3
+                   && bridgeB.getValidMessageCount() == bValid + 3
                    && sinkA.active.load() && sinkB.active.load()
                    && sinkA.lastRow.load() == 0 && sinkB.lastRow.load() == 0
                    && sinkA.lastCol.load() == 0 && sinkB.lastCol.load() == 0
-                   && sinkA.lastFinger.load() == 1 && sinkB.lastFinger.load() == 1,
-               "shared UDP packets and valid-message telemetry fan out to both clients", failed);
+                   && sinkA.lastFinger.load() == 0 && sinkB.lastFinger.load() == 0,
+               "finger0 fans out while secondary fingers stay invisible to state and telemetry", failed);
 
         expect((bridgeA.getObservedZoneMask() & 1u) != 0
                    && (bridgeB.getObservedZoneMask() & 1u) != 0,
                "valid zone A messages set the zone-A telemetry bit on both clients", failed);
+
+        // Production release is /on 0 in its own immediate bundle. Legacy
+        // /off remains covered below only as a backwards-compatible input.
+        {
+            const int aTarget = sinkA.onCount.load() + 1;
+            const int bTarget = sinkB.onCount.load() + 1;
+            juce::OSCBundle releaseBundle;
+            releaseBundle.addElement(juce::OSCBundle::Element(
+                juce::OSCMessage("/cs/A/0/finger0/on", 0)));
+            sender.send(releaseBundle);
+            const bool released = waitForCount(sinkA.onCount, aTarget)
+                && waitForCount(sinkB.onCount, bTarget);
+            expect(released && ! sinkA.active.load() && ! sinkB.active.load(),
+                   "production /on 0 bundle releases finger0", failed);
+        }
 
         // A known-good packet sent after a packet under test acts as an ordered
         // localhost UDP barrier. It lets the drop tests remain deterministic.
@@ -212,7 +250,7 @@ int main()
             const int x0 = sinkA.xCount.load();
             const uint32_t aBefore = bridgeA.getValidMessageCount();
             const uint32_t bBefore = bridgeB.getValidMessageCount();
-            sender.send("/cs/B/255/finger9/u", 0.25f);
+            sender.send("/cs/B/255/finger0/u", 0.25f);
             const bool landed = waitForCount(sinkA.xCount, x0 + 1)
                 && waitForValidMessageCount(bridgeA, aBefore + 1)
                 && waitForValidMessageCount(bridgeB, bBefore + 1);
@@ -223,9 +261,9 @@ int main()
                 && bridgeB.getLastValidMessageAgeMs() < 5000;
             expect(landed && telemetryOk
                        && sinkA.lastRow.load() == 1 && sinkA.lastCol.load() == 255
-                       && sinkA.lastFinger.load() == 9
+                       && sinkA.lastFinger.load() == 0
                        && nearlyEqual(sinkA.lastX.load(), 0.25f),
-                   "/u routes source 255/finger9 and records zones A/B with a recent age", failed);
+                   "/u routes source 255/finger0 and records zones A/B with a recent age", failed);
         }
 
         // The second, valid packet is an ordered localhost barrier. Exactly one
@@ -253,35 +291,42 @@ int main()
                    "source 256 is dropped without a sink call", failed);
         }
 
-        // Fingers sharing a participant no longer collapse in the bridge.
+        // Secondary fingers neither reach the sink nor create zone/valid
+        // telemetry. A following finger0 packet is the ordered UDP barrier.
         {
-            int target = sinkA.xCount.load() + 1;
+            const int x0 = sinkA.xCount.load();
+            const int on0 = sinkA.onCount.load();
+            const uint32_t aBefore = bridgeA.getValidMessageCount();
+            const uint32_t bBefore = bridgeB.getValidMessageCount();
             sender.send("/cs/C/7/finger1/u", 0.1f);
-            const bool firstLanded = waitForCount(sinkA.xCount, target);
-            const int firstFinger = sinkA.lastFinger.load();
-
-            target = sinkA.xCount.load() + 1;
-            sender.send("/cs/C/7/finger2/u", 0.2f);
-            const bool secondLanded = waitForCount(sinkA.xCount, target);
-            expect(firstLanded && secondLanded && firstFinger == 1
-                       && sinkA.lastFinger.load() == 2
-                       && sinkA.lastRow.load() == 2 && sinkA.lastCol.load() == 7,
-                   "finger1 and finger2 remain distinct for one participant", failed);
+            sender.send("/cs/C/7/finger9/on", 1);
+            sender.send("/cs/Z/99/finger0/u", 0.0f);
+            const bool barrierLanded = waitForValidMessageCount(bridgeA, aBefore + 1)
+                && waitForValidMessageCount(bridgeB, bBefore + 1);
+            expect(barrierLanded
+                       && bridgeA.getValidMessageCount() == aBefore + 1
+                       && bridgeB.getValidMessageCount() == bBefore + 1
+                       && sinkA.xCount.load() == x0 + 1
+                       && sinkA.onCount.load() == on0
+                       && sinkA.lastFinger.load() == 0
+                       && (bridgeA.getObservedZoneMask() & (1u << 2)) == 0
+                       && (bridgeB.getObservedZoneMask() & (1u << 2)) == 0,
+                   "finger1..finger9 do not create sink state, crowd counts or zone telemetry", failed);
         }
 
         // Legacy /line remains 0..127, while /u and /v clamp direct values.
         {
             int target = sinkA.xCount.load() + 1;
-            sender.send("/cs/D/3/finger4/line", 64.0f);
+            sender.send("/cs/D/3/finger0/line", 64.0f);
             const bool lineLanded = waitForCount(sinkA.xCount, target);
             const bool lineScaled = nearlyEqual(sinkA.lastX.load(), 64.0f / 127.0f);
 
             target = sinkA.xCount.load() + 1;
-            sender.send("/cs/D/3/finger4/u", 1.5f);
+            sender.send("/cs/D/3/finger0/u", 1.5f);
             const bool uLanded = waitForCount(sinkA.xCount, target);
 
             const int yTarget = sinkA.yCount.load() + 1;
-            sender.send("/cs/D/3/finger4/v", -0.5f);
+            sender.send("/cs/D/3/finger0/v", -0.5f);
             const bool vLanded = waitForCount(sinkA.yCount, yTarget);
 
             expect(lineLanded && lineScaled && uLanded && vLanded
@@ -294,19 +339,19 @@ int main()
         // a non-zero fractional float is true rather than being truncated.
         {
             int target = sinkA.onCount.load() + 1;
-            sender.send("/cs/E/4/finger5/on", 0.5f);
+            sender.send("/cs/E/4/finger0/on", 0.5f);
             const bool floatOn = waitForCount(sinkA.onCount, target) && sinkA.active.load();
 
             target = sinkA.onCount.load() + 1;
-            sender.send("/cs/E/4/finger5/off", 123);
+            sender.send("/cs/E/4/finger0/off", 123);
             const bool numericOff = waitForCount(sinkA.onCount, target) && ! sinkA.active.load();
 
             target = sinkA.onCount.load() + 1;
-            sender.send("/cs/E/4/finger5/on", 1);
+            sender.send("/cs/E/4/finger0/on", 1);
             const bool primed = waitForCount(sinkA.onCount, target) && sinkA.active.load();
 
             target = sinkA.onCount.load() + 1;
-            sender.send("/cs/E/4/finger5/off");
+            sender.send("/cs/E/4/finger0/off");
             const bool emptyOff = waitForCount(sinkA.onCount, target) && ! sinkA.active.load();
 
             expect(floatOn && numericOff && primed && emptyOff,
@@ -316,7 +361,7 @@ int main()
         // Non-numeric and non-finite values must not mutate any sink state.
         {
             const int x0 = sinkA.xCount.load();
-            sender.send("/cs/F/5/finger6/u", juce::String("bad"));
+            sender.send("/cs/F/5/finger0/u", juce::String("bad"));
             const bool barrierLanded = sendXBarrier();
             expect(barrierLanded && sinkA.xCount.load() == x0 + 1,
                    "non-numeric /u is dropped", failed);
@@ -324,7 +369,7 @@ int main()
 
         {
             const int x0 = sinkA.xCount.load();
-            sender.send("/cs/F/5/finger6/u", std::numeric_limits<float>::quiet_NaN());
+            sender.send("/cs/F/5/finger0/u", std::numeric_limits<float>::quiet_NaN());
             const bool barrierLanded = sendXBarrier();
             expect(barrierLanded && sinkA.xCount.load() == x0 + 1,
                    "NaN /u is dropped", failed);
@@ -332,7 +377,7 @@ int main()
 
         {
             const int y0 = sinkA.yCount.load();
-            sender.send("/cs/F/5/finger6/v", std::numeric_limits<float>::infinity());
+            sender.send("/cs/F/5/finger0/v", std::numeric_limits<float>::infinity());
             const bool barrierLanded = sendXBarrier();
             expect(barrierLanded && sinkA.yCount.load() == y0,
                    "infinite /v is dropped", failed);
@@ -340,7 +385,7 @@ int main()
 
         {
             const int on0 = sinkA.onCount.load();
-            sender.send("/cs/F/5/finger6/on", juce::String("yes"));
+            sender.send("/cs/F/5/finger0/on", juce::String("yes"));
             const bool barrierLanded = sendXBarrier();
             expect(barrierLanded && sinkA.onCount.load() == on0,
                    "non-numeric /on is dropped", failed);
@@ -348,7 +393,7 @@ int main()
 
         {
             const int on0 = sinkA.onCount.load();
-            sender.send("/cs/F/5/finger6/off", juce::String("ignored"));
+            sender.send("/cs/F/5/finger0/off", juce::String("ignored"));
             const bool barrierLanded = sendXBarrier();
             expect(barrierLanded && sinkA.onCount.load() == on0,
                    "non-numeric /off is dropped", failed);

@@ -56,6 +56,15 @@ public:
     int getActiveFingerCount() const noexcept;
     int getLastActiveSourceId() const noexcept;
 
+    // Flow forwards every motion packet for the legacy immediate response.
+    // Timed modes disable forwarding and sample the canonical latest-value
+    // ledger instead, preventing high-rate U/V traffic from filling the FIFO.
+    void setMotionEventForwardingEnabled (bool enabled) noexcept;
+    bool isMotionEventForwardingEnabled() const noexcept
+    {
+        return forwardMotionEvents.load(std::memory_order_acquire);
+    }
+
     // Source IDs are base-1 for channel assignment. Source 0 is accepted by
     // the OSC protocol and wraps backwards to channel 16. Invalid IDs return 0.
     static int midiChannelForSourceId (int sourceId) noexcept;
@@ -85,4 +94,5 @@ private:
     std::atomic<int> activeSourceCount { 0 };
     std::atomic<int> activeFingerCount { 0 };
     std::atomic<int> lastActiveSourceId { -1 };
+    std::atomic<bool> forwardMotionEvents { true };
 };

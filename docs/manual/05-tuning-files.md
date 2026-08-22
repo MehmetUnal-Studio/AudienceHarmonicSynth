@@ -1,6 +1,6 @@
 # 05 - Pitch Systems and External Tuning
 
-Cosmic Microwave 2.1 maps normalized horizontal position through one of two pitch
+Cosmic Microwave 2.2 maps normalized horizontal position through one of two pitch
 systems. **Tonal** provides seven conventional 12-TET scale tables. **Atomic** projects
 stored element emission spectra into playable one-octave degree banks. Both systems
 share **ROOT**, **OCTAVE**, and **RANGE**.
@@ -15,9 +15,9 @@ The selector in the **PITCH MAPPING** card switches between:
 - **Tonal** - choose a familiar scale under **SCALE**.
 - **Atomic** - choose an **ELEMENT** and a **DENSITY**.
 
-New sessions default to **Atomic / Helium / Extended**. Existing Cosmic Microwave 2.0
-schema-2 sessions migrate to Tonal so their established pitch mapping does not change
-when opened in 2.1.
+New sessions default to **Atomic / Helium / Extended**. The historical 2.0-to-2.1
+migration still restores schema-2 sessions as Tonal so their established pitch mapping
+does not change.
 
 ## The seven Tonal maps
 
@@ -105,12 +105,12 @@ step = floor(clamp(u, 0, 1) * table_size)
 step = min(step, table_size - 1)
 ```
 
-U=`0` selects the first step and U=`1` selects the last. Every finger stores its own
+U=`0` selects the first step and U=`1` selects the last. Every source touch stores its own
 current U/X position. Send U before `on` so the first note starts at the intended step.
 
 Movement inside one region updates CC74 but keeps the same pitch. Crossing a region
 selects a new pitch. Changing Pitch System, Root, Octave, Scale, Element, Density, or
-Range safely re-resolves held fingers in bounded batches.
+Range safely re-resolves held source touches in bounded batches.
 
 ## Normal MIDI versus MPE pitch
 
@@ -119,7 +119,7 @@ important difference:
 
 | Output | Atomic result |
 |---|---|
-| Normal MIDI | Send the nearest 12-TET MIDI note. No per-note pitch wheel is sent for OSC fingers. |
+| Normal MIDI | Send the nearest 12-TET MIDI note. No per-note pitch wheel is sent for OSC touches. |
 | MPE MIDI | Keep the element-derived target frequency. Send the nearest MIDI base note plus a per-note pitch-wheel offset before Note On. |
 
 MPE pitch wheel has finite 14-bit resolution, so “exact” means the catalog's exact
@@ -142,7 +142,7 @@ own tuning system. Keep these ownership boundaries in mind:
   and pitch-bend configuration.
 - Adding receiver tuning on top of Atomic MPE compounds both tunings; do this only when
   intentional.
-- CC74, CC11, velocity, pressure, source channels, and finger lifecycles are unaffected.
+- CC74, CC11, velocity, pressure, source channels, and touch lifecycles are unaffected.
 
 For Normal MIDI, receiver-side microtuning is one way to reinterpret the nearest notes.
 For MPE, ensure the receiver applies tuning independently per member channel and does
@@ -150,7 +150,8 @@ not discard Cosmic Microwave's pitch wheel.
 
 ## Session migration
 
-Cosmic Microwave 2.1 uses a new state schema for the Pitch System selector:
+Cosmic Microwave 2.2 uses state schema 4. Pitch migration remains compatible with the
+earlier schema-3 Pitch System transition:
 
 - new sessions start at Atomic / Helium / Extended;
 - existing schema-2 MIDI-only sessions receive an explicit Tonal selection;
@@ -160,5 +161,8 @@ Cosmic Microwave 2.1 uses a new state schema for the Pitch System selector:
   `atomicScaleMode` choice where possible; and
 - invalid or non-finite stored choice values are clamped to safe defaults.
 
+Schema 4 adds the Time Field. New 2.2 sessions start in Ensemble; any state that lacks
+the schema-4 timing parameters receives Flow so an older session's attacks stay direct.
+
 This migration restores pitch intent only. Removed sample, granular, timbre, and
-internal sound-generation controls do not return in the 2.1 flagship.
+internal sound-generation controls do not return in the 2.2 flagship.

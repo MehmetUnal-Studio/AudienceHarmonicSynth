@@ -42,6 +42,14 @@ namespace
     {
         return std::abs(a - b) < 1.0e-6f;
     }
+
+    int countParams (const juce::ValueTree& state, const char* id)
+    {
+        int count = state.getProperty("id").toString() == id ? 1 : 0;
+        for (int i = 0; i < state.getNumChildren(); ++i)
+            count += countParams(state.getChild(i), id);
+        return count;
+    }
 }
 
 int main()
@@ -170,6 +178,143 @@ int main()
         CosmicStateMigration::migrate(state);
         expect(valueOf(state, "scaleMode") == 0.0f,
                "non-finite legacy choice falls back deterministically");
+    }
+
+    {
+        auto state = makeState(3);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeMode"), 0.0f)
+                   && sameValue(valueOf(state, "clockSource"), 0.0f)
+                   && sameValue(valueOf(state, "internalBpm"), 120.0f)
+                   && sameValue(valueOf(state, "gridDivision"), 2.0f)
+                   && sameValue(valueOf(state, "maxAttacksPerStep"), 4.0f)
+                   && sameValue(valueOf(state, "maxActiveVoices"), 16.0f)
+                   && sameValue(valueOf(state, "gatePercent"), 70.0f)
+                   && sameValue(valueOf(state, "temporalSpread"), 2.0f),
+               "schema-3 state receives backward-compatible Time Field defaults");
+        expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
+                   == CosmicStateMigration::currentSchema,
+               "schema-3 Time Field migration advances to schema 4");
+
+        const int childCount = state.getNumChildren();
+        CosmicStateMigration::migrate(state);
+        expect(state.getNumChildren() == childCount
+                   && countParams(state, "timeMode") == 1
+                   && countParams(state, "temporalSpread") == 1
+                   && sameValue(valueOf(state, "internalBpm"), 120.0f),
+               "schema-4 migration is idempotent and does not duplicate Time Field nodes");
+    }
+
+    {
+        auto state = makeState(3);
+        addParam(state, "timeMode", 2.0f);
+        addParam(state, "internalBpm", 137.5f);
+        addParam(state, "gatePercent", 82.25f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeMode"), 2.0f)
+                   && sameValue(valueOf(state, "internalBpm"), 137.5f)
+                   && sameValue(valueOf(state, "gatePercent"), 82.25f)
+                   && sameValue(valueOf(state, "gridDivision"), 2.0f),
+               "schema-3 migration preserves existing valid Time Field values and fills gaps");
+    }
+
+    {
+        auto state = makeState(4);
+        addParam(state, "timeMode", 2.0f);
+        addParam(state, "clockSource", 1.0f);
+        addParam(state, "internalBpm", 178.5f);
+        addParam(state, "gridDivision", 3.0f);
+        addParam(state, "maxAttacksPerStep", 12.0f);
+        addParam(state, "maxActiveVoices", 9.0f);
+        addParam(state, "gatePercent", 84.25f);
+        addParam(state, "temporalSpread", 4.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeMode"), 2.0f)
+                   && sameValue(valueOf(state, "clockSource"), 1.0f)
+                   && sameValue(valueOf(state, "internalBpm"), 178.5f)
+                   && sameValue(valueOf(state, "gridDivision"), 3.0f)
+                   && sameValue(valueOf(state, "maxAttacksPerStep"), 12.0f)
+                   && sameValue(valueOf(state, "maxActiveVoices"), 9.0f)
+                   && sameValue(valueOf(state, "gatePercent"), 84.25f)
+                   && sameValue(valueOf(state, "temporalSpread"), 4.0f),
+               "schema-4 preserves valid denormalized Time Field values");
+    }
+
+    {
+        auto state = makeState(4);
+        addParam(state, "timeMode", std::numeric_limits<float>::max());
+        addParam(state, "clockSource", -100.0f);
+        addParam(state, "internalBpm", 999.0f);
+        addParam(state, "gridDivision", 99.0f);
+        addParam(state, "maxAttacksPerStep", -4.0f);
+        addParam(state, "maxActiveVoices", 99.0f);
+        addParam(state, "gatePercent", -200.0f);
+        addParam(state, "temporalSpread", 99.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeMode"), 2.0f)
+                   && sameValue(valueOf(state, "clockSource"), 0.0f)
+                   && sameValue(valueOf(state, "internalBpm"), 240.0f)
+                   && sameValue(valueOf(state, "gridDivision"), 3.0f)
+                   && sameValue(valueOf(state, "maxAttacksPerStep"), 1.0f)
+                   && sameValue(valueOf(state, "maxActiveVoices"), 16.0f)
+                   && sameValue(valueOf(state, "gatePercent"), 5.0f)
+                   && sameValue(valueOf(state, "temporalSpread"), 4.0f),
+               "schema-4 clamps hostile finite Time Field values in parameter units");
+    }
+
+    {
+        auto state = makeState(4);
+        addParam(state, "timeMode", std::numeric_limits<float>::quiet_NaN());
+        addParam(state, "clockSource", std::numeric_limits<float>::infinity());
+        addParam(state, "internalBpm", -std::numeric_limits<float>::infinity());
+        addParam(state, "gridDivision", std::numeric_limits<float>::quiet_NaN());
+        addParam(state, "maxAttacksPerStep", std::numeric_limits<float>::infinity());
+        addParam(state, "maxActiveVoices", -std::numeric_limits<float>::infinity());
+        addParam(state, "gatePercent", std::numeric_limits<float>::quiet_NaN());
+        addParam(state, "temporalSpread", std::numeric_limits<float>::infinity());
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeMode"), 0.0f)
+                   && sameValue(valueOf(state, "clockSource"), 0.0f)
+                   && sameValue(valueOf(state, "internalBpm"), 120.0f)
+                   && sameValue(valueOf(state, "gridDivision"), 2.0f)
+                   && sameValue(valueOf(state, "maxAttacksPerStep"), 4.0f)
+                   && sameValue(valueOf(state, "maxActiveVoices"), 16.0f)
+                   && sameValue(valueOf(state, "gatePercent"), 70.0f)
+                   && sameValue(valueOf(state, "temporalSpread"), 2.0f),
+               "non-finite Time Field values recover field-specific defaults");
+    }
+
+    {
+        auto state = makeState(4);
+        addParam(state, "maxAttacksPerStep", 3.6f);
+        addParam(state, "maxActiveVoices", 8.4f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "maxAttacksPerStep"), 4.0f)
+                   && sameValue(valueOf(state, "maxActiveVoices"), 8.0f),
+               "integer Time Field values are rounded after safe range clamping");
+    }
+
+    {
+        auto state = makeState();
+        state.setProperty("cosmicMicrowaveSchema",
+                          std::numeric_limits<double>::quiet_NaN(), nullptr);
+        CosmicStateMigration::migrate(state);
+        expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
+                   == CosmicStateMigration::currentSchema
+                   && sameValue(valueOf(state, "timeMode"), 0.0f),
+               "non-finite schema metadata safely falls back to legacy migration");
+    }
+
+    {
+        auto state = makeState(CosmicStateMigration::currentSchema + 1);
+        addParam(state, "timeMode", 2.0f);
+        const int childrenBefore = state.getNumChildren();
+        CosmicStateMigration::migrate(state);
+        expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
+                   == CosmicStateMigration::currentSchema + 1
+                   && state.getNumChildren() == childrenBefore
+                   && sameValue(valueOf(state, "timeMode"), 2.0f),
+               "future schemas are not destructively downgraded");
     }
 
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";

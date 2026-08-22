@@ -11,8 +11,9 @@
     OscBridge
 
     Owns a juce::OSCReceiver bound to a UDP port. Parses incoming
-    /cs/<row>/<source>/finger<n>/{on|off|u|v|line} messages and pokes the
-    seat target's atomic/event targets.
+    /cs/<row>/<source>/finger<n>/{on|off|u|v|line} messages. This installation
+    forwards finger0 only; syntactically valid finger1..finger9 traffic is
+    discarded before telemetry and before the seat target is touched.
 
     Listener uses JUCE's realtime OSC receiver callback so standalone tests
     and hosts do not need a message-pump dependency. The callback is not the

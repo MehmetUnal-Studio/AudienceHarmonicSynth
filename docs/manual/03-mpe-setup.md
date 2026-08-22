@@ -1,7 +1,7 @@
 # 03 - Normal MIDI and MPE Setup
 
 Cosmic Microwave offers two MIDI output models. Use **Normal MIDI** when source IDs
-must feed deterministic Channels 1-16. Use **MPE MIDI** when each active finger needs
+must feed deterministic Channels 1-16. Use **MPE MIDI** when each active source touch needs
 its own channel for independent CC, pressure, and pitch-wheel state.
 
 Pitch behaviour depends on **PITCH SYSTEM**. Tonal maps contain standard 12-TET notes,
@@ -16,10 +16,10 @@ In the **MIDI ROUTING** card, **OUTPUT** has three choices:
 - **Off** - OSC reception and UI monitoring remain active, but no MIDI is emitted.
 - **Normal MIDI** - conventional channel MIDI with source-based or fixed-channel
   routing.
-- **MPE MIDI** - one member channel per active finger, up to 15 simultaneous member
+- **MPE MIDI** - one member channel per active source touch, up to 15 simultaneous member
   channels.
 
-Cosmic Microwave 2.1 is always silent and MIDI-oriented.
+Cosmic Microwave 2.2 is always silent and MIDI-oriented.
 
 Incoming host MIDI is passed through unchanged whenever output is enabled. It is not
 quantized, remapped, or converted into MPE. Avoid routing a keyboard into the plugin if
@@ -51,10 +51,10 @@ Normal MIDI has two routing modes:
   is valid and maps to Channel 16.
 - **Single channel** sends every OSC source through the selected **FIXED CHANNEL**.
 
-The mapping belongs to source identity, not packet order. Every `u`, `v`, `on`, and
-`off` message, across all ten fingers of a source, stays on the same channel. Each
-finger remains an independent note owner, and reference counting prevents one finger
-from releasing a same-channel/same-note value still owned by another finger.
+The mapping belongs to source identity, not packet order. Every production `u`, `v`,
+and `on` message for the source's admitted `finger0` touch stays on the same channel.
+Reference counting still protects same-channel/same-note values shared by wrapped
+source IDs.
 
 Normal MIDI expression is channel-wide by definition:
 
@@ -63,7 +63,7 @@ Normal MIDI expression is channel-wide by definition:
 
 Sources wrap after 16, so source 1 and source 17 share Channel 1. Their channel
 controllers are therefore shared. Choose MPE when expression must be isolated per
-active finger.
+active source touch.
 
 ## 4. MPE zones
 
@@ -79,7 +79,7 @@ the other Upper, the receiver may treat member data as ordinary or global channe
 data.
 
 Changing zone, output protocol, bend range, fixed channel, source-routing mode, or
-destination triggers a safety reset before active fingers are re-established. This
+destination triggers a safety reset before active source touches are re-established. This
 prevents notes held under the previous channel contract from remaining stuck.
 
 ## 5. Bend range and Setup
@@ -103,7 +103,7 @@ selected bend range or the resulting frequency will be wrong.
 
 ## 6. Retrigger and Glide
 
-**PITCH MOTION** controls a held finger when horizontal movement selects another pitch:
+**PITCH MOTION** controls a held source touch when horizontal movement selects another pitch:
 
 - **Retrigger** - release the old mapped note and start the new one.
 - **Glide** - update pitch bend without retriggering when the target can remain on the
@@ -115,7 +115,7 @@ retriggering when two target frequencies share the same nearest base note.
 
 ## 7. Messages sent for an MPE note
 
-For a new active finger, member-channel messages are ordered as follows:
+For a new active source touch, member-channel messages are ordered as follows:
 
 1. `Pitch Wheel` - sent before the note-on.
 2. `CC74` - direct normalized U/X, converted to `0..127`.
@@ -136,13 +136,23 @@ control biases CC74, CC11, velocity, or pressure.
 
 ## 8. Member-channel allocation
 
-Each active finger owns one member channel until release. Free member channels are
+Each active source touch owns one member channel until release. Free member channels are
 allocated round-robin, beginning at the first channel in the selected zone. A recently
 released channel is visited after the others, reducing immediate channel-state reuse.
 
 When all 15 member channels are occupied, the oldest active MPE note receives a proper
-release and its channel is assigned to the new finger. The header's **MPE VOICES**
+release and its channel is assigned to the new source touch. The header's **MPE VOICES**
 metric shows the number of occupied member channels.
+
+The Time Field's **ACTIVE LIMIT** control reaches 16 so Normal MIDI can use all 16
+channels. In MPE mode Cosmic Microwave clamps the effective Time Field limit to 15,
+matching the available member-channel pool. This avoids scheduling a sixteenth voice
+only to steal one of the other 15 immediately.
+
+Flow sends OSC touch lifecycle and expression directly. Grid and Ensemble schedule
+OSC attacks, coalesce U/V bursts to the latest values sampled on musical boundaries,
+and preserve On/Off order. Incoming host MIDI thru is never quantized by the Time
+Field.
 
 ## 9. Receiver checklist
 
@@ -157,7 +167,7 @@ On the receiving instrument or application:
 - [ ] Confirm it receives one route, not both the host and virtual copies.
 
 Use the simulator and the receiving application's MIDI monitor to verify that messages
-for different fingers arrive on different member channels. The first MPE note after
+for different sources arrive on different member channels. The first MPE note after
 setup should have its pitch wheel and controllers before `Note On`.
 
 When validating an Atomic map, inspect the pitch wheel as well as Note On. A MIDI
@@ -184,7 +194,7 @@ have independent channel sets.
 3. Match the receiver's zone and bend range.
 
 Do not interpret MPE member channels as the stable source-to-channel map: member
-channels are allocated dynamically per active finger. Some DAW routing paths can
+channels are allocated dynamically per active source touch. Some DAW routing paths can
 remap or merge MIDI channels; if expression appears global, test the port-named virtual
 endpoint with a standalone MPE receiver or a host with explicit MPE routing.
 

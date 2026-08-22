@@ -1299,6 +1299,32 @@ int main()
                "bounded safety sweep carries All Notes Off and All Sound Off on all channels");
     }
 
+    // ---- Test 21: scheduled events retain their block sample offsets ----
+    {
+        MpeMidiOutput mpe;
+        auto config = participantNormalConfig();
+        auto on = participantNoteOn(10, 1, kA4);
+        on.sampleOffset = 37;
+
+        juce::MidiBuffer scheduled;
+        mpe.render(config, &on, 1, scheduled, 64);
+        bool everyMessageAt37 = ! scheduled.isEmpty();
+        for (const auto metadata : scheduled)
+            everyMessageAt37 = everyMessageAt37 && metadata.samplePosition == 37;
+        expect(everyMessageAt37,
+               "scheduled MIDI lifecycle and expression messages retain their sample offset");
+
+        auto off = noteOff(10);
+        off.sampleOffset = 999;
+        juce::MidiBuffer clamped;
+        mpe.render(config, &off, 1, clamped, 64);
+        bool everyMessageAtLastSample = ! clamped.isEmpty();
+        for (const auto metadata : clamped)
+            everyMessageAtLastSample = everyMessageAtLastSample && metadata.samplePosition == 63;
+        expect(everyMessageAtLastSample,
+               "scheduled MIDI sample offsets clamp to the current block boundary");
+    }
+
     std::cout << "\nSummary: " << (g_failed == 0 ? "ok" : "failed") << "\n";
     return g_failed == 0 ? 0 : 1;
 }

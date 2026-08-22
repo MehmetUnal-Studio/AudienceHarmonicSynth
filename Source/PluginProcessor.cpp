@@ -122,6 +122,36 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
         StringArray { "Retrigger", "Glide" }, 0));
 
     layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("timeMode", 1), "Time Field Mode",
+        StringArray { "Flow", "Grid", "Ensemble" }, 2));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("clockSource", 1), "Time Field Clock",
+        StringArray { "Host", "Internal" }, 0));
+
+    layout.add(std::make_unique<AudioParameterFloat>(
+        ParameterID("internalBpm", 1), "Internal BPM",
+        NormalisableRange<float>(40.0f, 240.0f, 0.1f), 120.0f));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("gridDivision", 1), "Grid Division",
+        StringArray { "1/4", "1/8", "1/16", "1/32" }, 2));
+
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("maxAttacksPerStep", 1), "Attacks Per Step", 1, 16, 4));
+
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("maxActiveVoices", 1), "Maximum Active Voices", 1, 16, 16));
+
+    layout.add(std::make_unique<AudioParameterFloat>(
+        ParameterID("gatePercent", 1), "Gate Length",
+        NormalisableRange<float>(5.0f, 100.0f, 1.0f), 70.0f));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("temporalSpread", 1), "Temporal Spread",
+        StringArray { "1", "2", "4", "8", "16" }, 2));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
         ParameterID("pitchSystem", 1), "Pitch System",
         StringArray { "Tonal", "Atomic" }, 1));
 
@@ -173,11 +203,24 @@ void AudienceProcessor::cacheParameterPointers()
     rawParams.mpePitchBendRange = apvts.getRawParameterValue("mpePitchBendRange");
     rawParams.mpeSendSetupMessages = apvts.getRawParameterValue("mpeSendSetupMessages");
     rawParams.mpePitchMode = apvts.getRawParameterValue("mpePitchMode");
+    rawParams.timeMode = apvts.getRawParameterValue("timeMode");
+    rawParams.clockSource = apvts.getRawParameterValue("clockSource");
+    rawParams.internalBpm = apvts.getRawParameterValue("internalBpm");
+    rawParams.gridDivision = apvts.getRawParameterValue("gridDivision");
+    rawParams.maxAttacksPerStep = apvts.getRawParameterValue("maxAttacksPerStep");
+    rawParams.maxActiveVoices = apvts.getRawParameterValue("maxActiveVoices");
+    rawParams.gatePercent = apvts.getRawParameterValue("gatePercent");
+    rawParams.temporalSpread = apvts.getRawParameterValue("temporalSpread");
 }
 
 void AudienceProcessor::prepareToPlay (double sampleRate, int)
 {
-    currentSampleRate = std::isfinite(sampleRate) && sampleRate > 0.0 ? sampleRate : 44100.0;
+    // Treat the host value as untrusted. Subnormal rates make the external
+    // MIDI due-time calculation overflow to infinity and can head-of-line
+    // block every later NoteOff in the FIFO.
+    currentSampleRate = std::isfinite(sampleRate)
+                      ? juce::jlimit(1.0, 768000.0, sampleRate)
+                      : 44100.0;
     // Do not cancel an unacknowledged releaseResources reset. A rapid
     // release->prepare sequence can happen before the 2 ms MIDI sender tick;
     // reopening here would let old-epoch NoteOns cross into the new epoch. The
@@ -192,6 +235,8 @@ void AudienceProcessor::prepareToPlay (double sampleRate, int)
     releaseAllIncomingMidiNotes();
     mpeOut.reset();
     mpeOut.markSetupDirty();
+    crowdTimeField.reset();
+    timeFieldRehydratePending = true;
     retriggerFingerMidi = true;
     fingerRetriggerCursor = 0;
     // A host can call prepareToPlay again without delivering note-offs from the
@@ -221,6 +266,7 @@ bool AudienceProcessor::isBusesLayoutSupported (const BusesLayout& layouts) cons
 
 void AudienceProcessor::updatePitchMap()
 {
+    pitchMapChangedThisBlock = false;
     const int root = juce::jlimit(0, 11, rawParamInt(rawParams.scaleRoot));
     const int rootOctave = juce::jlimit(0, 6, rawParamInt(rawParams.scaleRootOctave, 2));
     const int mode = juce::jlimit(0, MidiPitchMap::numScaleModes - 1,
@@ -263,6 +309,7 @@ void AudienceProcessor::updatePitchMap()
         }
         if (changed)
         {
+            pitchMapChangedThisBlock = true;
             retriggerFingerMidi = true;
             fingerRetriggerCursor = 0;
         }
@@ -378,6 +425,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // Preserve the host input before reclaiming the preallocated output buffer.
     const bool midiInputOverflowed = processIncomingMidi(midiMessages);
     updatePitchMap();
+    const bool pitchMapChanged = pitchMapChangedThisBlock;
 
     const int midiType = juce::jlimit(0, 2, rawParamInt(rawParams.midiOutputType, 1));
     const int routingMode = juce::jlimit(0, 1, rawParamInt(rawParams.normalMidiRoutingMode, 1));
@@ -386,19 +434,42 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone));
     const int setupEnabled = rawParamBool(rawParams.mpeSendSetupMessages, true) ? 1 : 0;
     const int pitchMode = juce::jlimit(0, 1, rawParamInt(rawParams.mpePitchMode));
+    const int timeMode = juce::jlimit(0, 2, rawParamInt(rawParams.timeMode, 2));
+    const int clockSource = juce::jlimit(0, 1, rawParamInt(rawParams.clockSource));
+    const float internalBpm = juce::jlimit(40.0f, 240.0f,
+                                           rawParamValue(rawParams.internalBpm, 120.0f));
+    const int gridDivision = juce::jlimit(0, 3, rawParamInt(rawParams.gridDivision, 2));
+    const int maxAttacks = juce::jlimit(1, 16, rawParamInt(rawParams.maxAttacksPerStep, 4));
+    const int maxActive = juce::jlimit(1, 16, rawParamInt(rawParams.maxActiveVoices, 16));
+    const float gatePercent = juce::jlimit(5.0f, 100.0f,
+                                           rawParamValue(rawParams.gatePercent, 70.0f));
+    const int temporalSpread = juce::jlimit(0, 4, rawParamInt(rawParams.temporalSpread, 2));
     const bool routeChanged = midiOutputRouteChangedPending.exchange(false, std::memory_order_acq_rel);
 
-    const bool configChanged = midiType != lastMidiOutputType
-                            || routingMode != lastNormalMidiRoutingMode
-                            || normalChannel != lastNormalMidiChannel
-                            || bendRange != lastMpeBendRange
-                            || zone.master != lastMpeMaster
-                            || zone.memberFirst != lastMpeMemberFirst
-                            || zone.memberLast != lastMpeMemberLast
-                            || setupEnabled != lastMpeSetupEnabled
-                            || pitchMode != lastMpePitchMode;
+    const bool midiConfigChanged = midiType != lastMidiOutputType
+                                || routingMode != lastNormalMidiRoutingMode
+                                || normalChannel != lastNormalMidiChannel
+                                || bendRange != lastMpeBendRange
+                                || zone.master != lastMpeMaster
+                                || zone.memberFirst != lastMpeMemberFirst
+                                || zone.memberLast != lastMpeMemberLast
+                                || setupEnabled != lastMpeSetupEnabled
+                                || pitchMode != lastMpePitchMode;
+    const bool internalTempoChanged = (clockSource == 1 || lastClockSource == 1)
+                                     && std::abs(internalBpm - lastInternalBpm) > 1.0e-4f;
+    const bool anyTimeValueChanged = timeMode != lastTimeMode
+                                  || clockSource != lastClockSource
+                                  || gridDivision != lastGridDivision
+                                  || maxAttacks != lastMaxAttacksPerStep
+                                  || maxActive != lastMaxActiveVoices
+                                  || temporalSpread != lastTemporalSpread
+                                  || internalTempoChanged
+                                  || std::abs(gatePercent - lastGatePercent) > 1.0e-4f;
+    const bool timeDomainChanged = anyTimeValueChanged
+                                && (timeMode != 0 || lastTimeMode != 0);
+    const bool configChanged = midiConfigChanged || timeDomainChanged;
     const bool hadActiveOutput = lastMidiOutputType != 0;
-    const bool needsSafetyReset = ((configChanged || routeChanged) && hadActiveOutput)
+    const bool needsSafetyReset = ((configChanged || routeChanged || pitchMapChanged) && hadActiveOutput)
                                || (midiInputOverflowed && (hadActiveOutput || midiType != 0));
 
     lastMidiOutputType = midiType;
@@ -410,13 +481,33 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     lastMpeMemberLast = zone.memberLast;
     lastMpeSetupEnabled = setupEnabled;
     lastMpePitchMode = pitchMode;
+    lastTimeMode = timeMode;
+    lastClockSource = clockSource;
+    lastInternalBpm = internalBpm;
+    lastGridDivision = gridDivision;
+    lastMaxAttacksPerStep = maxAttacks;
+    lastMaxActiveVoices = maxActive;
+    lastGatePercent = gatePercent;
+    lastTemporalSpread = temporalSpread;
+
+    audienceModel.setMotionEventForwardingEnabled(timeMode == 0);
 
     mpeOut.setMemberRange(zone.memberFirst, zone.memberLast);
-    if (configChanged || routeChanged || midiInputOverflowed)
+    if (configChanged || routeChanged || midiInputOverflowed || pitchMapChanged)
     {
         mpeOut.markSetupDirty();
-        retriggerFingerMidi = true;
-        fingerRetriggerCursor = 0;
+        if (timeMode == 0)
+        {
+            retriggerFingerMidi = true;
+            fingerRetriggerCursor = 0;
+            timeFieldRehydratePending = true;
+        }
+        else
+        {
+            retriggerFingerMidi = false;
+            fingerRetriggerCursor = 0;
+            timeFieldRehydratePending = true;
+        }
     }
 
     if (midiRenderScratchLoanedToHost)
@@ -450,7 +541,10 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             output.addEvent(metadata.data, metadata.numBytes, metadata.samplePosition);
     }
 
-    renderOutgoingMidi(output, buffer.getNumSamples(), outputEnabled);
+    const auto clockFrame = captureTimeFieldClock(buffer.getNumSamples(),
+                                                   externalBlockStartTimeMs * 0.001);
+    renderOutgoingMidi(output, buffer.getNumSamples(), outputEnabled,
+                       clockFrame, needsSafetyReset);
 #if COSMIC_MIDI_DIAGNOSTICS
     mpeOut.recordOutgoingMidiDebugEvents(output);
 #endif
@@ -476,10 +570,114 @@ MpeMidiOutput::MpeConfig AudienceProcessor::buildMpeConfig() const
     return config;
 }
 
+CrowdTimeField::Config AudienceProcessor::buildTimeFieldConfig() const noexcept
+{
+    static constexpr int spreadValues[] { 1, 2, 4, 8, 16 };
+
+    CrowdTimeField::Config config;
+    config.mode = static_cast<CrowdTimeField::Mode>(
+        juce::jlimit(0, 2, rawParamInt(rawParams.timeMode, 2)));
+    config.clockSource = static_cast<CrowdTimeField::ClockSource>(
+        juce::jlimit(0, 1, rawParamInt(rawParams.clockSource)));
+    config.division = static_cast<CrowdTimeField::Division>(
+        juce::jlimit(0, 3, rawParamInt(rawParams.gridDivision, 2)));
+    config.internalBpm = juce::jlimit(40.0, 240.0,
+                                      (double) rawParamValue(rawParams.internalBpm, 120.0f));
+    config.maxAttacksPerStep = juce::jlimit(1, 16,
+                                            rawParamInt(rawParams.maxAttacksPerStep, 4));
+    config.maxActive = juce::jlimit(1, 16,
+                                    rawParamInt(rawParams.maxActiveVoices, 16));
+    if (juce::jlimit(0, 2, rawParamInt(rawParams.midiOutputType, 1)) == 2)
+        config.maxActive = juce::jmin(config.maxActive, 15);
+    config.gatePercent = juce::jlimit(5.0, 100.0,
+                                      (double) rawParamValue(rawParams.gatePercent, 70.0f));
+    config.spreadSlots = spreadValues[juce::jlimit(0, 4,
+                                                   rawParamInt(rawParams.temporalSpread, 2))];
+    // Different zone instances commonly reuse the same participant IDs. Fold
+    // the stable UDP endpoint into Ensemble's lane phase so those zones do not
+    // all attack on the same host tick.
+    config.laneSeed = static_cast<std::uint32_t>(getUdpPort());
+    return CrowdTimeField::sanitiseConfig(config);
+}
+
+CrowdTimeField::ClockFrame AudienceProcessor::captureTimeFieldClock (
+    int numSamples, double monotonicSeconds) const noexcept
+{
+    CrowdTimeField::ClockFrame frame;
+    frame.sampleRate = currentSampleRate;
+    frame.numSamples = juce::jmax(0, numSamples);
+    frame.monotonicSeconds = std::isfinite(monotonicSeconds) ? monotonicSeconds : 0.0;
+
+    if (auto* playHead = getPlayHead())
+    {
+        if (const auto position = playHead->getPosition())
+        {
+            const auto bpm = position->getBpm();
+            const auto ppq = position->getPpqPosition();
+            if (bpm.hasValue() && ppq.hasValue()
+                && std::isfinite(*bpm) && *bpm > 0.0
+                && std::isfinite(*ppq))
+            {
+                frame.hostValid = true;
+                frame.bpm = *bpm;
+                frame.ppqPosition = *ppq;
+                frame.isPlaying = position->getIsPlaying();
+            }
+        }
+    }
+
+    return frame;
+}
+
+void AudienceProcessor::rehydrateTimeFieldFromCanonical() noexcept
+{
+    int heldCount = 0;
+    for (int voice = 0; voice < CrowdTimeField::kMaxVoices; ++voice)
+    {
+        const int sourceId = CrowdTimeField::sourceIdForVoice(voice);
+        const int finger = voice % CrowdTimeField::kFingersPerSource;
+        const auto canonical = audienceModel.getFingerSnapshot(sourceId, finger);
+        auto& midiState = fingerMidiStates[(size_t) voice];
+        midiState = {};
+        midiState.x = canonical.x;
+        midiState.y = canonical.y;
+
+        if (canonical.active && heldCount < (int) timeFieldHeldScratch.size())
+            timeFieldHeldScratch[(size_t) heldCount++] = { voice, sourceId };
+    }
+
+    crowdTimeField.rehydrate(timeFieldHeldScratch.data(), heldCount);
+    timeFieldRehydratePending = false;
+}
+
 void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
                                             int numSamples,
-                                            bool outputEnabled)
+                                            bool outputEnabled,
+                                            const CrowdTimeField::ClockFrame& clockFrame,
+                                            bool resetAlreadyEmitted)
 {
+    const auto timeConfig = buildTimeFieldConfig();
+    if (timeConfig.mode != CrowdTimeField::Mode::Flow)
+    {
+        renderTimedOutgoingMidi(midiMessages, numSamples, outputEnabled,
+                                clockFrame, resetAlreadyEmitted);
+        return;
+    }
+
+    if (timeFieldRehydratePending)
+    {
+        crowdTimeField.reset();
+        timeFieldRehydratePending = false;
+    }
+    timeFieldPending.store(0, std::memory_order_relaxed);
+    timeFieldActive.store(audienceModel.getActiveFingerCount(), std::memory_order_relaxed);
+    timeFieldMerged.store(0, std::memory_order_relaxed);
+    const bool hostLocked = clockFrame.hostValid && clockFrame.isPlaying;
+    const bool useHost = timeConfig.clockSource == CrowdTimeField::ClockSource::Host;
+    timeFieldClockLocked.store(useHost ? hostLocked : true, std::memory_order_relaxed);
+    timeFieldBpm.store(useHost && hostLocked ? clockFrame.bpm : timeConfig.internalBpm,
+                       std::memory_order_relaxed);
+
     const auto config = buildMpeConfig();
     // Bound semantic work by both the fixed scratch capacity and the current
     // audio deadline. Tiny host blocks (including pluginval's 1-sample case)
@@ -519,9 +717,12 @@ void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
         retriggerFingerMidi = hasHeldFinger;
         fingerRetriggerCursor = 0;
 
-        MpeMidiOutput::NoteEvent allOff;
-        allOff.type = MpeMidiOutput::NoteEvent::AllNotesOff;
-        appendEvent(allOff);
+        if (! resetAlreadyEmitted)
+        {
+            MpeMidiOutput::NoteEvent allOff;
+            allOff.type = MpeMidiOutput::NoteEvent::AllNotesOff;
+            appendEvent(allOff);
+        }
     }
 
     auto resolvePitch = [this] (float x, FingerMidiState& state) noexcept
@@ -542,12 +743,14 @@ void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
 
     auto appendFinger = [&] (MpeMidiOutput::NoteEvent::Type type,
                              int sourceId, int finger,
-                             const FingerMidiState& state) noexcept
+                             const FingerMidiState& state,
+                             int sampleOffset = 0) noexcept
     {
         MpeMidiOutput::NoteEvent event;
         event.type = type;
         event.sourceId = sourceId * OscFingerRouter::MAX_FINGERS + finger;
         event.participantId = sourceId;
+        event.sampleOffset = sampleOffset;
         event.frequencyHz = state.frequencyHz;
         event.velocity = state.y;
         event.x = state.x;
@@ -649,6 +852,194 @@ void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
 
     if (outputEnabled && noteEventCount > 0)
         mpeOut.render(config, midiNoteEventScratch.data(), noteEventCount,
+                      midiMessages, numSamples);
+}
+
+void AudienceProcessor::renderTimedOutgoingMidi (
+    juce::MidiBuffer& midiMessages, int numSamples, bool outputEnabled,
+    const CrowdTimeField::ClockFrame& clockFrame, bool resetAlreadyEmitted)
+{
+    const auto midiConfig = buildMpeConfig();
+    const auto timeConfig = buildTimeFieldConfig();
+    const int blockBudget = juce::jlimit(1, midiLifecycleEventBudget,
+                                         juce::jmax(1, numSamples));
+    int midiEventCount = 0;
+
+    auto appendMidi = [this, &midiEventCount, outputEnabled]
+                      (const MpeMidiOutput::NoteEvent& event) noexcept
+    {
+        if (outputEnabled && midiEventCount < (int) midiNoteEventScratch.size())
+            midiNoteEventScratch[(size_t) midiEventCount++] = event;
+    };
+
+    auto appendAllOff = [&]() noexcept
+    {
+        MpeMidiOutput::NoteEvent event;
+        event.type = MpeMidiOutput::NoteEvent::AllNotesOff;
+        appendMidi(event);
+    };
+
+    auto primeAndRehydrate = [&]() noexcept
+    {
+        crowdTimeField.reset();
+        CrowdTimeField::OutputBlock prime;
+        crowdTimeField.process(timeConfig, clockFrame, nullptr, 0, prime);
+        rehydrateTimeFieldFromCanonical();
+        timeFieldBpm.store(prime.effectiveBpm, std::memory_order_relaxed);
+        timeFieldClockLocked.store(prime.clockLocked, std::memory_order_relaxed);
+        timeFieldPending.store(crowdTimeField.getPendingCount(), std::memory_order_relaxed);
+        timeFieldActive.store(crowdTimeField.getActiveCount(), std::memory_order_relaxed);
+        timeFieldMerged.store(crowdTimeField.getMergedCount(), std::memory_order_relaxed);
+    };
+
+    const bool routerReset = fingerRouter.takeResetRequest();
+    if (routerReset || timeFieldRehydratePending)
+    {
+        fingerRouter.discardPendingEvents();
+        if (! resetAlreadyEmitted)
+            appendAllOff();
+        primeAndRehydrate();
+        if (midiEventCount > 0)
+            mpeOut.render(midiConfig, midiNoteEventScratch.data(), midiEventCount,
+                          midiMessages, numSamples);
+        return;
+    }
+
+    const int drained = fingerRouter.drain(fingerEventScratch.data(), blockBudget);
+    int inputCount = 0;
+    for (int index = 0; index < drained; ++index)
+    {
+        const auto& incoming = fingerEventScratch[(size_t) index];
+        const auto type = (OscFingerRouter::Event::Type) incoming.type;
+        if (type != OscFingerRouter::Event::On && type != OscFingerRouter::Event::Off)
+            continue;
+
+        const int sourceId = (int) incoming.sourceId;
+        const int finger = (int) incoming.finger;
+        if (sourceId < 0 || sourceId >= CrowdTimeField::kMaxSources
+            || finger < 0 || finger >= CrowdTimeField::kFingersPerSource)
+            continue;
+
+        auto& event = timeFieldInputScratch[(size_t) inputCount++];
+        event.type = type == OscFingerRouter::Event::On
+                   ? CrowdTimeField::InputEvent::Type::On
+                   : CrowdTimeField::InputEvent::Type::Off;
+        event.voiceId = CrowdTimeField::voiceIdFor(sourceId, finger);
+        event.sourceId = sourceId;
+        event.sampleOffset = 0;
+    }
+
+    crowdTimeField.process(timeConfig, clockFrame,
+                           timeFieldInputScratch.data(), inputCount,
+                           timeFieldOutputScratch);
+
+    timeFieldBpm.store(timeFieldOutputScratch.effectiveBpm, std::memory_order_relaxed);
+    timeFieldClockLocked.store(timeFieldOutputScratch.clockLocked, std::memory_order_relaxed);
+    timeFieldPending.store(timeFieldOutputScratch.pendingCount, std::memory_order_relaxed);
+    timeFieldActive.store(timeFieldOutputScratch.activeCount, std::memory_order_relaxed);
+    timeFieldMerged.store(timeFieldOutputScratch.mergedCount, std::memory_order_relaxed);
+
+    if (timeFieldOutputScratch.resetRequested)
+    {
+        // A seek/loop/clock-domain reset invalidates the undrained half of the
+        // old lifecycle stream too. Rebuild from the canonical finger ledger;
+        // events published concurrently after this snapshot remain queued and
+        // will be applied in their new order on the following block.
+        fingerRouter.discardPendingEvents();
+        if (! resetAlreadyEmitted)
+            appendAllOff();
+        primeAndRehydrate();
+        if (midiEventCount > 0)
+            mpeOut.render(midiConfig, midiNoteEventScratch.data(), midiEventCount,
+                          midiMessages, numSamples);
+        return;
+    }
+
+    auto resolvePitch = [this] (float x, FingerMidiState& state) noexcept
+    {
+        if (lastPitchSystem == 1)
+        {
+            const auto pitch = atomicPitchMap.xToPitch(x);
+            state.pitchKey = pitch.step;
+            state.frequencyHz = pitch.isValid() ? pitch.frequencyHz : 261.6255653005986;
+        }
+        else
+        {
+            const auto pitch = pitchMap.xToPitch(x);
+            state.pitchKey = pitch.step;
+            state.frequencyHz = pitch.isValid() ? pitch.frequencyHz : 261.6255653005986;
+        }
+    };
+
+    auto appendFinger = [&] (MpeMidiOutput::NoteEvent::Type type,
+                             int sourceId, int finger,
+                             const FingerMidiState& state,
+                             int sampleOffset) noexcept
+    {
+        MpeMidiOutput::NoteEvent event;
+        event.type = type;
+        event.sourceId = CrowdTimeField::voiceIdFor(sourceId, finger);
+        event.participantId = sourceId;
+        event.sampleOffset = sampleOffset;
+        event.frequencyHz = state.frequencyHz;
+        event.velocity = state.y;
+        event.x = state.x;
+        event.y = state.y;
+        appendMidi(event);
+    };
+
+    for (int index = 0; index < timeFieldOutputScratch.count; ++index)
+    {
+        const auto& scheduled = timeFieldOutputScratch.events[(size_t) index];
+        if (scheduled.voiceId < 0 || scheduled.voiceId >= CrowdTimeField::kMaxVoices
+            || scheduled.sourceId < 0 || scheduled.sourceId >= CrowdTimeField::kMaxSources)
+            continue;
+
+        const int finger = scheduled.voiceId % CrowdTimeField::kFingersPerSource;
+        auto& state = fingerMidiStates[(size_t) scheduled.voiceId];
+        const auto canonical = audienceModel.getFingerSnapshot(scheduled.sourceId, finger);
+        const int sampleOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1),
+                                               scheduled.sampleOffset);
+
+        switch (scheduled.type)
+        {
+            case CrowdTimeField::OutputEvent::Type::Attack:
+                state.x = canonical.x;
+                state.y = canonical.y;
+                state.active = true;
+                resolvePitch(state.x, state);
+                appendFinger(MpeMidiOutput::NoteEvent::NoteOn,
+                             scheduled.sourceId, finger, state, sampleOffset);
+                break;
+
+            case CrowdTimeField::OutputEvent::Type::Release:
+                if (state.active)
+                {
+                    appendFinger(MpeMidiOutput::NoteEvent::NoteOff,
+                                 scheduled.sourceId, finger, state, sampleOffset);
+                    state.active = false;
+                    state.pitchKey = -1;
+                }
+                break;
+
+            case CrowdTimeField::OutputEvent::Type::SampleMotion:
+                if (state.active)
+                {
+                    const int previousPitch = state.pitchKey;
+                    state.x = canonical.x;
+                    state.y = canonical.y;
+                    resolvePitch(state.x, state);
+                    appendFinger(state.pitchKey != previousPitch
+                                     ? MpeMidiOutput::NoteEvent::NoteOn
+                                     : MpeMidiOutput::NoteEvent::Expression,
+                                 scheduled.sourceId, finger, state, sampleOffset);
+                }
+                break;
+        }
+    }
+
+    if (midiEventCount > 0)
+        mpeOut.render(midiConfig, midiNoteEventScratch.data(), midiEventCount,
                       midiMessages, numSamples);
 }
 
@@ -1101,6 +1492,8 @@ void AudienceProcessor::panic()
     simulator.clearSilently();
     releaseAllIncomingMidiNotes();
     audienceModel.clear();
+    crowdTimeField.reset();
+    timeFieldRehydratePending = true;
     // Drop packets produced before the panic while the audio producer is
     // quiescent. Otherwise an old NoteOn could be drained after the immediate
     // all-off sweep and recreate a stuck external note.

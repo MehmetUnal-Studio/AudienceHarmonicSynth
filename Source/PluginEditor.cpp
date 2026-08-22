@@ -254,17 +254,10 @@ public:
         content.removeFromTop (30);
 
         auto subtitle = content.removeFromTop (19);
-        auto contextText = subtitle.removeFromLeft ((int) std::round ((double) subtitle.getWidth() * 0.62));
         g.setColour (cm::textMuted);
         g.setFont (juce::Font (juce::FontOptions (10.5f)));
-        g.drawText ("Each source keeps one MIDI channel",
-                    contextText, juce::Justification::centredLeft, true);
-
-        g.setColour (cm::textDim);
-        g.setFont (juce::Font (juce::FontOptions (9.5f).withStyle ("bold")));
-        g.drawText (juce::String (model.getActiveSourceCount()) + " SOURCES  /  "
-                    + juce::String (model.getActiveFingerCount()) + " FINGERS",
-                    subtitle, juce::Justification::centredRight, true);
+        g.drawText ("ID-locked source / MIDI channel map",
+                    subtitle, juce::Justification::centredLeft, true);
 
         content.removeFromTop (4);
         auto channelHeader = content.removeFromTop (22);
@@ -295,7 +288,9 @@ public:
             const auto colour = cm::channelColour (midiChannel);
             g.setColour (colour.withAlpha (0.90f));
             g.setFont (juce::Font (juce::FontOptions (9.0f).withStyle ("bold")));
-            g.drawText ("CH " + juce::String (midiChannel), heading.reduced (1.0f, 0.0f),
+            const auto channelText = columnWidth >= 32.0f ? "CH " + juce::String (midiChannel)
+                                                          : juce::String (midiChannel);
+            g.drawText (channelText, heading.reduced (1.0f, 0.0f),
                         juce::Justification::centred, false);
 
             for (int slot = 0; slot < 16; ++slot)
@@ -391,7 +386,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     setResizeLimits (900, 560, 2200, 1300);
     setOpaque (true);
     setTitle ("Cosmic Microwave OSC to MIDI router");
-    setDescription ("MIDI-only control surface for zone OSC input, source routing, pitch mapping and MIDI output.");
+    setDescription ("MIDI-only control surface for zone OSC input, source routing, pitch mapping, Time Field scheduling and MIDI output.");
 
     sourceMap = std::make_unique<SourceActivityMap> (proc.audienceModel);
     addAndMakeVisible (*sourceMap);
@@ -407,7 +402,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
         label.setTitle (title);
     };
     styleMetric (activeSourcesValue, "Active OSC sources");
-    styleMetric (activeFingersValue, "Active fingers");
+    styleMetric (activeFingersValue, "Active touches");
     styleMetric (notesSentValue, "MIDI notes sent");
     styleMetric (mpeVoicesValue, "Active MPE voices");
 
@@ -430,7 +425,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
         {
             portEditorDirty = portEditor.getText().trim() != juce::String (proc.getUdpPort());
             portEditor.setDescription ("UDP port for this Cosmic Microwave instance. Enter a number from 1 to 65535 and press Return or Apply.");
-            oscPathLabel.setText ("/cs/{zone}/{source}/finger{n}/{on|off|u|v}",
+            oscPathLabel.setText ("/cs/{zone}/{source}/finger0/{u|v|on}",
                                   juce::dontSendNotification);
             oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
             oscPathLabel.setTitle ("OSC address format");
@@ -453,7 +448,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     oscStatusLabel.setTitle ("OSC receiver status");
     addAndMakeVisible (oscStatusLabel);
 
-    styleLabel (oscPathLabel, "/cs/{zone}/{source}/finger{n}/{on|off|u|v}");
+    styleLabel (oscPathLabel, "/cs/{zone}/{source}/finger0/{u|v|on}");
     oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
     oscPathLabel.setFont (juce::Font (juce::FontOptions (9.5f)));
     oscPathLabel.setTitle ("OSC address format");
@@ -568,6 +563,89 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     pitchSystemCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
     atomicElementCombo.onChange = [this] { updateLiveText(); repaint (pitchCardBounds); };
     atomicModeCombo.onChange = [this] { updateLiveText(); repaint (pitchCardBounds); };
+
+    // Time Field -------------------------------------------------------------
+    addChoiceItems (timeModeCombo, { "Flow", "Grid", "Ensemble" });
+    addChoiceItems (clockSourceCombo, { "Host", "Internal" });
+    addChoiceItems (gridDivisionCombo, { "1/4", "1/8", "1/16", "1/32" });
+    addChoiceItems (temporalSpreadCombo, { "1", "2", "4", "8", "16" });
+
+    for (auto* combo : { &timeModeCombo, &clockSourceCombo,
+                         &gridDivisionCombo, &temporalSpreadCombo })
+    {
+        styleCombo (*combo);
+        addAndMakeVisible (*combo);
+    }
+
+    timeModeCombo.setTitle ("Time Field mode");
+    timeModeCombo.setDescription ("Flow passes attacks freely, Grid quantizes them, and Ensemble distributes them through the temporal field.");
+    clockSourceCombo.setTitle ("Time Field clock source");
+    clockSourceCombo.setDescription ("Follow the host transport tempo or use Cosmic Microwave's internal clock.");
+    gridDivisionCombo.setTitle ("Time Field grid division");
+    gridDivisionCombo.setDescription ("Temporal scheduling grid, from quarter notes to thirty-second notes.");
+    temporalSpreadCombo.setTitle ("Time Field temporal spread");
+    temporalSpreadCombo.setDescription ("Number of grid steps over which scheduled attacks may be distributed.");
+
+    auto styleTimeSlider = [this] (juce::Slider& slider, const juce::String& title,
+                                   const juce::String& description, const juce::String& suffix,
+                                   int decimalPlaces)
+    {
+        slider.setSliderStyle (juce::Slider::LinearHorizontal);
+        slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 46, 24);
+        slider.setColour (juce::Slider::trackColourId, cm::violet);
+        slider.setColour (juce::Slider::backgroundColourId, cm::line);
+        slider.setColour (juce::Slider::thumbColourId, cm::text);
+        slider.setColour (juce::Slider::textBoxTextColourId, cm::text);
+        slider.setColour (juce::Slider::textBoxBackgroundColourId, cm::cardRaised);
+        slider.setColour (juce::Slider::textBoxOutlineColourId, cm::line);
+        slider.setTextValueSuffix (suffix);
+        slider.setNumDecimalPlacesToDisplay (decimalPlaces);
+        slider.setTitle (title);
+        slider.setDescription (description);
+        addAndMakeVisible (slider);
+    };
+    styleTimeSlider (internalBpmSlider, "Internal tempo",
+                     "Internal Time Field tempo in beats per minute.", {}, 1);
+    styleTimeSlider (maxAttacksSlider, "Maximum attacks per step",
+                     "Maximum new MIDI attacks emitted on one Time Field grid step.", {}, 0);
+    styleTimeSlider (maxActiveVoicesSlider, "Maximum active voices",
+                     "Maximum simultaneous scheduled MIDI voices.", {}, 0);
+    styleTimeSlider (gatePercentSlider, "Gate length",
+                     "Scheduled note gate as a percentage of the selected grid division.", " %", 0);
+
+    styleLabel (timeModeLabel, "MODE");
+    styleLabel (clockSourceLabel, "CLOCK");
+    styleLabel (internalBpmLabel, "INTERNAL BPM");
+    styleLabel (gridDivisionLabel, "DIVISION");
+    styleLabel (maxAttacksLabel, "ATTACKS / STEP");
+    styleLabel (maxActiveVoicesLabel, "ACTIVE LIMIT");
+    styleLabel (gatePercentLabel, "GATE");
+    styleLabel (temporalSpreadLabel, "SPREAD / STEPS");
+    for (auto* label : { &timeModeLabel, &clockSourceLabel, &internalBpmLabel,
+                         &gridDivisionLabel, &maxAttacksLabel, &maxActiveVoicesLabel,
+                         &gatePercentLabel, &temporalSpreadLabel })
+        addAndMakeVisible (*label);
+
+    styleLabel (timeStatusLabel, {}, juce::Justification::centredLeft);
+    timeStatusLabel.setColour (juce::Label::textColourId, cm::green);
+    timeStatusLabel.setFont (juce::Font (juce::FontOptions (10.5f).withStyle ("bold")));
+    timeStatusLabel.setMinimumHorizontalScale (0.78f);
+    timeStatusLabel.setTitle ("Time Field live status");
+    timeStatusLabel.setDescription ("Clock, tempo, grid division, pending attacks, active voices and merged-attack telemetry.");
+    addAndMakeVisible (timeStatusLabel);
+
+    timeModeAttachment = std::make_unique<ComboAttachment> (proc.apvts, "timeMode", timeModeCombo);
+    clockSourceAttachment = std::make_unique<ComboAttachment> (proc.apvts, "clockSource", clockSourceCombo);
+    internalBpmAttachment = std::make_unique<SliderAttachment> (proc.apvts, "internalBpm", internalBpmSlider);
+    gridDivisionAttachment = std::make_unique<ComboAttachment> (proc.apvts, "gridDivision", gridDivisionCombo);
+    maxAttacksAttachment = std::make_unique<SliderAttachment> (proc.apvts, "maxAttacksPerStep", maxAttacksSlider);
+    maxActiveVoicesAttachment = std::make_unique<SliderAttachment> (proc.apvts, "maxActiveVoices", maxActiveVoicesSlider);
+    gatePercentAttachment = std::make_unique<SliderAttachment> (proc.apvts, "gatePercent", gatePercentSlider);
+    temporalSpreadAttachment = std::make_unique<ComboAttachment> (proc.apvts, "temporalSpread", temporalSpreadCombo);
+
+    timeModeCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
+    clockSourceCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
+    gridDivisionCombo.onChange = [this] { updateLiveText(); };
 
     // MIDI routing ------------------------------------------------------------
     addChoiceItems (midiTypeCombo, { "Off", "Normal MIDI", "MPE MIDI" });
@@ -734,6 +812,7 @@ void AudienceEditor::paint (juce::Graphics& g)
     cm::drawCard (g, routingCardBounds, "SOURCE ROUTING", "ID-LOCKED");
     cm::drawCard (g, simulatorCardBounds, "SIMULATOR");
     cm::drawCard (g, pitchCardBounds, "PITCH MAPPING");
+    cm::drawCard (g, timeCardBounds, "TIME FIELD", "CLOCK / DENSITY");
     cm::drawCard (g, midiCardBounds, "MIDI ROUTING", "NORMAL / MPE");
     cm::drawCard (g, destinationCardBounds, "MIDI OUTPUT");
 }
@@ -769,6 +848,10 @@ void AudienceEditor::resized()
     const int sidebarWidth = juce::jlimit (348, 430, (int) std::round ((double) area.getWidth() * 0.38));
     auto sidebar = area.removeFromRight (sidebarWidth);
     area.removeFromRight (11);
+    const int timeWidth = juce::jlimit (244, 292,
+                                        (int) std::round ((double) area.getWidth() * 0.42));
+    timeCardBounds = area.removeFromRight (timeWidth);
+    area.removeFromRight (9);
     mapCardBounds = area;
     if (sourceMap != nullptr)
         sourceMap->setBounds (mapCardBounds);
@@ -827,6 +910,73 @@ void AudienceEditor::resized()
         }
         inner.removeFromTop (5);
         simMoveButton.setBounds (inner.removeFromTop (25));
+    }
+
+    // Time Field: a dedicated two-column scheduling surface. Keeping it beside
+    // the source matrix gives all eight parameters full-height controls even at
+    // the 900x560 minimum editor size.
+    {
+        auto inner = timeCardBounds.reduced (13);
+        inner.removeFromTop (27);
+        timeStatusLabel.setBounds (inner.removeFromTop (24));
+        inner.removeFromTop (2);
+
+        auto layoutPair = [] (juce::Rectangle<int> row,
+                              juce::Label& leftLabel, juce::Component& leftControl,
+                              juce::Label& rightLabel, juce::Component& rightControl)
+        {
+            constexpr int gap = 7;
+            auto labels = row.removeFromTop (12);
+            auto controls = row;
+            const int leftWidth = (labels.getWidth() - gap) / 2;
+            leftLabel.setBounds (labels.removeFromLeft (leftWidth));
+            labels.removeFromLeft (gap);
+            rightLabel.setBounds (labels);
+            leftControl.setBounds (controls.removeFromLeft (leftWidth));
+            controls.removeFromLeft (gap);
+            rightControl.setBounds (controls);
+        };
+
+        const int rowGap = 3;
+        const int rowHeight = juce::jlimit (39, 47,
+                                            juce::jmax (1, (inner.getHeight() - rowGap * 3) / 4));
+        const int controlsHeight = rowHeight * 4 + rowGap * 3;
+        inner.removeFromTop (juce::jmax (0, (inner.getHeight() - controlsHeight) / 2));
+        layoutPair (inner.removeFromTop (rowHeight),
+                    timeModeLabel, timeModeCombo, clockSourceLabel, clockSourceCombo);
+        inner.removeFromTop (rowGap);
+
+        auto clockRow = inner.removeFromTop (rowHeight);
+        const int selectedMode = timeModeCombo.getSelectedItemIndex();
+        const bool timedMode = selectedMode >= 0
+                                 ? selectedMode != 0
+                                 : cm::choiceValue (proc.apvts, "timeMode") != 0;
+        const int selectedClock = clockSourceCombo.getSelectedItemIndex();
+        const bool internalClock = selectedClock >= 0
+                                     ? selectedClock == 1
+                                     : cm::choiceValue (proc.apvts, "clockSource") == 1;
+        if (timedMode && internalClock)
+        {
+            layoutPair (clockRow, internalBpmLabel, internalBpmSlider,
+                        gridDivisionLabel, gridDivisionCombo);
+        }
+        else
+        {
+            auto label = clockRow.removeFromTop (12);
+            gridDivisionLabel.setBounds (label);
+            gridDivisionCombo.setBounds (clockRow);
+            internalBpmLabel.setBounds ({});
+            internalBpmSlider.setBounds ({});
+        }
+        inner.removeFromTop (rowGap);
+
+        layoutPair (inner.removeFromTop (rowHeight),
+                    maxAttacksLabel, maxAttacksSlider,
+                    maxActiveVoicesLabel, maxActiveVoicesSlider);
+        inner.removeFromTop (rowGap);
+        layoutPair (inner.removeFromTop (rowHeight),
+                    gatePercentLabel, gatePercentSlider,
+                    temporalSpreadLabel, temporalSpreadCombo);
     }
 
     // Pitch mapping card: the system selector lives in the card header; the
@@ -1002,7 +1152,7 @@ void AudienceEditor::restoreUdpPortEditor()
     portEditorDirty = false;
     portEditor.setColour (juce::TextEditor::outlineColourId, cm::line);
     portEditor.setDescription ("UDP port for this Cosmic Microwave instance. Enter a number from 1 to 65535 and press Return or Apply.");
-    oscPathLabel.setText ("/cs/{zone}/{source}/finger{n}/{on|off|u|v}", juce::dontSendNotification);
+    oscPathLabel.setText ("/cs/{zone}/{source}/finger0/{u|v|on}", juce::dontSendNotification);
     oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
     oscPathLabel.setTitle ("OSC address format");
     oscPathLabel.setDescription ("Expected OSC address format for this UDP input.");
@@ -1039,11 +1189,23 @@ void AudienceEditor::updateModeVisibility()
 {
     const int midiType = cm::choiceValue (proc.apvts, "midiOutputType");
     const bool atomicPitch = cm::choiceValue (proc.apvts, "pitchSystem") == 1;
+    const int selectedTimeMode = timeModeCombo.getSelectedItemIndex();
+    const int timeMode = selectedTimeMode >= 0
+                           ? selectedTimeMode
+                           : cm::choiceValue (proc.apvts, "timeMode");
+    const bool timed = timeMode != 0;
+    const int selectedClock = clockSourceCombo.getSelectedItemIndex();
+    const bool internalClock = selectedClock >= 0
+                                 ? selectedClock == 1
+                                 : cm::choiceValue (proc.apvts, "clockSource") == 1;
     const bool normal = midiType == 1;
     const bool mpe = midiType == 2;
     const bool fixedChannel = normal
                            && cm::choiceValue (proc.apvts, "normalMidiRoutingMode") == 0;
-    const int visibilityKey = (atomicPitch ? 100 : 0) + midiType * 10 + (fixedChannel ? 1 : 0);
+    const int visibilityKey = timeMode * 10000
+                            + (internalClock ? 1000 : 0)
+                            + (atomicPitch ? 100 : 0)
+                            + midiType * 10 + (fixedChannel ? 1 : 0);
 
     scaleLabel.setVisible (! atomicPitch);
     scaleCombo.setVisible (! atomicPitch);
@@ -1051,6 +1213,26 @@ void AudienceEditor::updateModeVisibility()
     atomicElementCombo.setVisible (atomicPitch);
     atomicModeLabel.setVisible (atomicPitch);
     atomicModeCombo.setVisible (atomicPitch);
+
+    internalBpmLabel.setVisible (timed && internalClock);
+    internalBpmSlider.setVisible (timed && internalClock);
+
+    // Flow is intentionally direct. Keep the timing configuration visible as
+    // a stable layout, but make it unmistakably unavailable until Grid or
+    // Ensemble is selected (and remove disabled controls from keyboard use).
+    for (auto* component : { static_cast<juce::Component*> (&clockSourceCombo),
+                             static_cast<juce::Component*> (&gridDivisionCombo),
+                             static_cast<juce::Component*> (&maxAttacksSlider),
+                             static_cast<juce::Component*> (&maxActiveVoicesSlider),
+                             static_cast<juce::Component*> (&gatePercentSlider),
+                             static_cast<juce::Component*> (&temporalSpreadCombo),
+                             static_cast<juce::Component*> (&clockSourceLabel),
+                             static_cast<juce::Component*> (&gridDivisionLabel),
+                             static_cast<juce::Component*> (&maxAttacksLabel),
+                             static_cast<juce::Component*> (&maxActiveVoicesLabel),
+                             static_cast<juce::Component*> (&gatePercentLabel),
+                             static_cast<juce::Component*> (&temporalSpreadLabel) })
+        component->setEnabled (timed);
 
     normalRoutingLabel.setVisible (normal);
     normalRoutingCombo.setVisible (normal);
@@ -1069,7 +1251,7 @@ void AudienceEditor::updateModeVisibility()
     {
         lastVisibilityKey = visibilityKey;
         resized();
-        repaint (pitchCardBounds.getUnion (midiCardBounds));
+        repaint (timeCardBounds.getUnion (pitchCardBounds).getUnion (midiCardBounds));
     }
 }
 
@@ -1081,7 +1263,7 @@ void AudienceEditor::updateLiveText()
     const int mpeVoices = proc.getActiveMpeVoices();
 
     activeSourcesValue.setText (juce::String (activeSources) + "  SOURCES", juce::dontSendNotification);
-    activeFingersValue.setText (juce::String (activeFingers) + "  FINGERS", juce::dontSendNotification);
+    activeFingersValue.setText (juce::String (activeFingers) + "  TOUCHES", juce::dontSendNotification);
     notesSentValue.setText (cm::compactCount (notesSent) + "  NOTES", juce::dontSendNotification);
     mpeVoicesValue.setText (juce::String (mpeVoices) + "  MPE VOICES", juce::dontSendNotification);
 
@@ -1105,34 +1287,94 @@ void AudienceEditor::updateLiveText()
         pitchSystemCombo.setDescription (pitchSystemCombo.getTooltip());
     }
 
+    static constexpr const char* divisions[] { "1/4", "1/8", "1/16", "1/32" };
+    const int selectedTimeClock = clockSourceCombo.getSelectedItemIndex();
+    const bool hostClock = selectedTimeClock >= 0
+                             ? selectedTimeClock == 0
+                             : cm::choiceValue (proc.apvts, "clockSource") == 0;
+    const int selectedDivision = gridDivisionCombo.getSelectedItemIndex();
+    const int divisionIndex = juce::jlimit (0, 3,
+                                            selectedDivision >= 0
+                                              ? selectedDivision
+                                              : cm::choiceValue (proc.apvts, "gridDivision"));
+    const int selectedMode = timeModeCombo.getSelectedItemIndex();
+    const int liveTimeMode = selectedMode >= 0
+                               ? selectedMode
+                               : cm::choiceValue (proc.apvts, "timeMode");
+    const auto clockName = hostClock ? juce::String ("HOST") : juce::String ("INTERNAL");
+    const auto clockAndGrid = clockName + " " + juce::String (proc.getTimeFieldBpm(), 1)
+                            + " BPM / " + divisions[divisionIndex];
+    const auto queueState = "PENDING " + juce::String (proc.getTimeFieldPending())
+                          + " / ACTIVE " + juce::String (proc.getTimeFieldActive())
+                          + " / MERGED " + juce::String (proc.getTimeFieldMerged());
+    const auto fullTimeFieldStatus = liveTimeMode == 0
+                                   ? juce::String ("Flow direct | active ")
+                                       + juce::String (proc.getTimeFieldActive())
+                                   : clockAndGrid + " | " + queueState;
+    const auto compactTimeFieldStatus = liveTimeMode == 0
+                                      ? juce::String ("FLOW / DIRECT  |  A")
+                                          + juce::String (proc.getTimeFieldActive())
+                                      : (proc.getTimeFieldClockLocked() ? "LOCK / " : "WAIT / ")
+                                          + clockName + " "
+                                          + juce::String (proc.getTimeFieldBpm(), 0)
+                                          + " / " + divisions[divisionIndex]
+                                          + "  |  P" + juce::String (proc.getTimeFieldPending())
+                                          + " A" + juce::String (proc.getTimeFieldActive())
+                                          + " M" + juce::String (proc.getTimeFieldMerged());
+    timeStatusLabel.setText (compactTimeFieldStatus, juce::dontSendNotification);
+    timeStatusLabel.setTooltip (fullTimeFieldStatus);
+    timeStatusLabel.setDescription (fullTimeFieldStatus
+                                    + (liveTimeMode == 0
+                                         ? ". Timing controls are bypassed."
+                                         : proc.getTimeFieldClockLocked()
+                                             ? ". Clock is locked."
+                                             : ". Waiting for a stable clock."));
+    const bool timeFieldReady = liveTimeMode == 0 || proc.getTimeFieldClockLocked();
+    timeStatusLabel.setColour (juce::Label::textColourId,
+                               timeFieldReady ? cm::green : cm::amber);
+
     const bool listening = proc.osc.isRunning() && proc.osc.isReceiving();
     const auto messageCount = proc.osc.getValidMessageCount();
     const auto age = proc.osc.getLastValidMessageAgeMs();
     juce::String oscText;
+    juce::String oscDetail;
     juce::Colour oscColour;
     if (! listening)
     {
-        oscText = proc.osc.oscStatus().isNotEmpty() ? proc.osc.oscStatus() : "OSC receiver stopped";
+        oscDetail = proc.osc.oscStatus().isNotEmpty() ? proc.osc.oscStatus() : "OSC receiver stopped";
+        oscText = "ERR / " + oscDetail;
         oscColour = cm::red;
     }
     else if (messageCount == 0)
     {
-        oscText = "Listening on UDP " + juce::String (proc.getUdpPort()) + " | waiting for data";
+        oscText = "WAIT / UDP " + juce::String (proc.getUdpPort());
+        oscDetail = "Listening on UDP " + juce::String (proc.getUdpPort())
+                  + " and waiting for valid OSC data";
         oscColour = cm::amber;
     }
     else if (age <= 1500u)
     {
-        oscText = "Receiving | " + juce::String (messageCount) + " valid messages";
+        const auto messageSummary = messageCount < 1000u
+                                  ? juce::String ((int) messageCount)
+                                  : juce::String ((double) messageCount / 1000.0, 1) + "k";
+        oscText = "RX / " + messageSummary + " MSG";
+        oscDetail = "Receiving on UDP " + juce::String (proc.getUdpPort())
+                  + " | " + juce::String (messageCount) + " valid messages";
         oscColour = cm::green;
     }
     else
     {
-        oscText = "Listening | last message " + juce::String ((double) age / 1000.0, 1) + " s ago";
+        oscText = "STALE / " + juce::String ((double) age / 1000.0, 1) + " s";
+        oscDetail = "Listening on UDP " + juce::String (proc.getUdpPort())
+                  + " | last valid message "
+                  + juce::String ((double) age / 1000.0, 1) + " seconds ago";
         oscColour = cm::textMuted;
     }
     oscStatusLabel.setText (juce::String::fromUTF8 ("\xe2\x80\xa2  ") + oscText,
                             juce::dontSendNotification);
     oscStatusLabel.setColour (juce::Label::textColourId, oscColour);
+    oscStatusLabel.setTooltip (oscDetail);
+    oscStatusLabel.setDescription (oscDetail);
 
     const int midiType = cm::choiceValue (proc.apvts, "midiOutputType");
     if (midiType == 1)
@@ -1149,14 +1391,14 @@ void AudienceEditor::updateLiveText()
         else
         {
             const int channel = cm::choiceValue (proc.apvts, "normalMidiChannel") + 1;
-            routingDetailLabel.setText ("Every source and finger uses MIDI Channel " + juce::String (channel),
+            routingDetailLabel.setText ("Every source/finger0 uses MIDI Channel " + juce::String (channel),
                                         juce::dontSendNotification);
         }
     }
     else if (midiType == 2)
     {
         const bool upper = cm::choiceValue (proc.apvts, "mpeZone") == 1;
-        routingSummaryLabel.setText ("Source fingers  ->  MPE voices", juce::dontSendNotification);
+        routingSummaryLabel.setText ("Source finger0  ->  MPE voices", juce::dontSendNotification);
         routingDetailLabel.setText (upper ? "Upper zone  /  master 16  /  members 1-15"
                                                : "Lower zone  /  master 1  /  members 2-16",
                                     juce::dontSendNotification);
@@ -1170,7 +1412,7 @@ void AudienceEditor::updateLiveText()
     const auto observedZones = proc.osc.getObservedZoneMask();
     zoneStatusLabel.setText (cm::zonesFromMask (observedZones)
                              + "  /  " + juce::String (activeSources) + " sources  /  "
-                             + juce::String (activeFingers) + " fingers",
+                             + juce::String (activeFingers) + " touches",
                              juce::dontSendNotification);
     zoneStatusLabel.setColour (juce::Label::textColourId,
                                observedZones != 0 ? cm::green : cm::textDim);

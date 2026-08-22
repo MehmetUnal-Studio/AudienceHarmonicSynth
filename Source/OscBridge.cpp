@@ -185,7 +185,10 @@ void OscBridge::oscMessageReceived (const juce::OSCMessage& msg)
     const char* raw = addr.toRawUTF8();
 
     const auto parsed = osc_wire::parseAddress(raw, SeatEventSink::MAX_OSC_SOURCES);
-    if (! parsed.valid)
+    // This installation intentionally treats each phone as one voice. Reject
+    // secondary fingers before telemetry or audience state is touched, so
+    // finger1..finger9 cannot inflate the visible crowd or create MIDI owners.
+    if (! parsed.valid || parsed.finger != 0)
         return;
 
     const int   row   = parsed.row;

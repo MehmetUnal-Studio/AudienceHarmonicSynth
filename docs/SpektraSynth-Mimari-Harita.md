@@ -1,6 +1,6 @@
-# Cosmic Microwave 2.1 Mimari Harita
+# Cosmic Microwave 2.2 Mimari Harita
 
-Bu belge, `AudienceHarmonicSynth` hedefinin güncel 2.1 kaynak sınırına göre yeniden
+Bu belge, `AudienceHarmonicSynth` hedefinin güncel 2.2 kaynak sınırına göre yeniden
 yazılmıştır. Eski SpektraSynth mimarisinin ses üretim yolu artık bayrak ürünün çalışma
 zamanına dahil değildir. Hangi dosyanın ürüne dahil olduğunu belirleyen otorite
 `CMakeLists.txt` içindeki `target_sources(AudienceHarmonicSynth ...)` listesidir.
@@ -8,7 +8,7 @@ zamanına dahil değildir. Hangi dosyanın ürüne dahil olduğunu belirleyen ot
 ## 1. Genel bakış
 
 Cosmic Microwave, izleyici sunucusundan OSC/UDP alan ve Normal MIDI veya MPE üreten
-finger-aware bir JUCE ürünüdür.
+tek-dokunuş odaklı bir JUCE ürünüdür.
 
 Temel çalışma modeli:
 
@@ -27,7 +27,7 @@ kimliği korunabilsin diye sessiz mono/stereo instrument bus sözleşmesi devam 
 
 | CMake hedefi | Ürün adı | Format | Rol |
 |---|---|---|---|
-| `AudienceHarmonicSynth` | Cosmic Microwave | VST3 + Standalone | Güncel finger-aware Normal MIDI/MPE bayrak ürün. |
+| `AudienceHarmonicSynth` | Cosmic Microwave | VST3 + Standalone | Güncel tek-dokunuş Normal MIDI/MPE bayrak ürün. |
 | `AudienceHarmonicMidi` | Cosmic Microwave MIDI | VST3 + Standalone | Ayrı `MidiEngine` kullanan MIDI-effect. |
 | `AudienceMidiGenerator` | Cosmic Microwave MIDI Generator | VST3 | Scale correction/remap içeren Ableton odaklı MIDI-effect. |
 | `AudienceMidiDevice` | Cosmic Microwave MIDI Device | Standalone | Hafif UDP->MIDI uygulaması. |
@@ -56,6 +56,7 @@ Source/MpeMidiOutput.cpp
 Source/PluginEditor.cpp
 Source/AtomicScaleMap.cpp
 Source/AtomicScaleCatalog.cpp
+Source/CrowdTimeField.cpp
 Source/MidiAudienceModel.cpp
 Source/MidiPitchMap.cpp
 Source/OscBridge.cpp
@@ -71,12 +72,13 @@ veya dosya-formatı modülü yoktur.
 
 | Bileşen | Sorumluluk | Ana dosya |
 |---|---|---|
-| `AudienceProcessor` | APVTS, process lifecycle, MIDI thru, pitch map, finger durumu, Normal/MPE render, host/harici çıkış, state migration. | `PluginProcessor.*` |
-| `CosmicStateMigration` | Released 1.x ve schema-2 state'leri schema 3'e güvenli taşıma. | `PluginStateMigration.*` |
+| `AudienceProcessor` | APVTS, process lifecycle, MIDI thru, pitch map, touch durumu, Normal/MPE render, host/harici çıkış, state migration. | `PluginProcessor.*` |
+| `CosmicStateMigration` | Released 1.x'den schema 4'e kadar state'leri güvenli taşıma; eski state'lerde Time Field'ı Flow açma. | `PluginStateMigration.*` |
 | `AudienceEditor` | MIDI-only kontrol ve izleme arayüzü. | `PluginEditor.*` |
 | `OscBridge` | Paylaşımlı UDP listener, OSC parse/validation, değer clamp, zone/traffic telemetrisi. | `OscBridge.*`, `OscWireFormat.h` |
-| `MidiAudienceModel` | 256 source için atomic UI/control snapshot ve aktif finger maskesi. | `MidiAudienceModel.*` |
+| `MidiAudienceModel` | 256 source için atomic UI/control snapshot ve aktif `finger0` maskesi. | `MidiAudienceModel.*` |
 | `OscFingerRouter` | Control/OSC thread'lerinden audio thread'e sabit kapasiteli event aktarımı. | `OscFingerRouter.*` |
+| `CrowdTimeField` | Flow/Grid/Ensemble scheduling, host/monotonic clock çözümü, fairness, lane, gate ve telemetry. | `CrowdTimeField.*` |
 | `MidiPitchMap` | Yedi tonal 12-TET tablo ve normalize X lookup. | `MidiPitchMap.*` |
 | `AtomicScaleCatalog` | 29 element x 5 density için immutable, önceden üretilmiş degree katalogu. | `AtomicScaleCatalog.*`, `AtomicScaleCatalogData.h` |
 | `AtomicScaleMap` | En fazla 128 degree/768 pitch-step içeren exact-frequency lookup. | `AtomicScaleMap.*` |
@@ -95,6 +97,9 @@ OSC UDP callback                          Simulator / UI thread
                     OscFingerRouter FIFO
                             |
                     AUDIO PROCESS BLOCK
+                            |
+                    CrowdTimeField
+                 Flow / Grid / Ensemble
                             |
                     FingerMidiState[2560]
                             |
@@ -118,34 +123,39 @@ audio buffer     -> sessiz uyumluluk çıkışı
 
 `AudienceProcessor::processBlock` ana hatlarıyla:
 
-1. Host MIDI input'u önceden reserve edilmiş scratch buffer'a kopyalar.
-2. APVTS raw pointer değerlerinden Tonal `MidiPitchMap` veya Atomic `AtomicScaleMap`
+1. Host MIDI input'u önceden reserve edilmiş scratch buffer'a kopyalar ve JUCE
+   `PositionInfo` üzerinden host BPM/PPQ/transport durumunu örnekler.
+2. APVTS raw pointer değerlerinden Time Field ile Tonal `MidiPitchMap` veya Atomic `AtomicScaleMap`
    konfigürasyonunu günceller.
 3. MIDI protokolü/kanal/zone/route değişimlerini karşılaştırır.
-4. Gerekirse safety reset üretir ve aktif OSC finger'larını yeniden kurmak üzere
+4. Gerekirse safety reset üretir ve aktif OSC touch'larını yeniden kurmak üzere
    retrigger işaretler.
 5. Audio buffer'ı sessizler, host MIDI output buffer'ını yeniden kullanıma hazırlar.
 6. Output açıksa host MIDI input'u değişmeden geçirir.
-7. Bir block'ta en fazla 1024 OSC finger event'i drain eder.
-8. Finger state değişimlerini `MpeMidiOutput::NoteEvent` dizisine çevirir.
-9. Normal MIDI veya MPE mesajlarını host buffer'a yazar.
-10. Aynı kısa MIDI mesajlarını seçilmiş harici endpoint için FIFO'ya kopyalar.
+7. Bir block'ta en fazla `min(64, max(1, block sample sayısı))` OSC lifecycle event'i
+   drain eder. Flow hareket event'lerini doğrudan işler; Grid/Ensemble yalnız On/Off'u
+   scheduler'a verir ve güncel U/V snapshot'ını grid sınırlarında örnekler.
+8. `CrowdTimeField`, direct veya sample-offset'li Attack/Release/SampleMotion istekleri
+   üretir.
+9. Touch state değişimlerini `MpeMidiOutput::NoteEvent` dizisine çevirir.
+10. Normal MIDI veya MPE mesajlarını host buffer'a yazar.
+11. Aynı kısa MIDI mesajlarını seçilmiş harici endpoint için FIFO'ya kopyalar.
 
 ## 6. Kimlik modeli
 
-### 6.1 Zone, source ve finger
+### 6.1 Zone, source ve touch
 
 Canonical adres:
 
 ```text
-/cs/<zone>/<source>/finger<n>/<param>
+/cs/<zone>/<source>/finger0/<param>
 ```
 
 | Alan | Aralık |
 |---|---|
 | Zone | `A..Z` |
 | Source ID | `0..255` |
-| Finger | `0..9` |
+| Live finger | yalnız `0`; `1..9` bridge'de state/telemetry öncesi düşürülür |
 | Param | `u`, `v`, `on`, `off`, legacy `line` |
 
 Bayrak üründe realtime voice anahtarı:
@@ -154,8 +164,10 @@ Bayrak üründe realtime voice anahtarı:
 voice_id = source_id * 10 + finger
 ```
 
-Toplam 2560 sabit voice-state slotu vardır. Zone bu anahtarın parçası değildir; çünkü
-instance'ın upstream'de tek zone'a ayrılmış olması beklenir.
+Toplam 2560 sabit voice-state slotu geriye uyumluluk ve sabit-kapasiteli core sınırı
+olarak korunur; canlı ürün yalnız `source_id * 10 + 0` anahtarlarını besler. Zone bu
+anahtarın parçası değildir; çünkü instance'ın upstream'de tek zone'a ayrılmış olması
+beklenir.
 
 `SeatEventSink` içinde eski yardımcı ürünlerle uyumluluk için 26x100 seat sabitleri
 bulunmaya devam eder. Fakat bayrak ürünün geçerli OSC source kapasitesi 256'dır ve
@@ -180,13 +192,13 @@ channel = positive_mod(source_id - 1, 16) + 1
 
 Kritik invariant: **source 0, Channel 16'ya gider.**
 
-Tüm finger'lar source'un Normal MIDI kanalını paylaşır; ancak note ownership anahtarı
-finger bazında ayrıdır. `normalNoteRefCounts[16 * 128]`, aynı channel/note'u tutan son
+Canlı `finger0` touch source'un Normal MIDI kanalını kullanır.
+`normalNoteRefCounts[16 * 128]`, aynı channel/note'u tutan son
 semantic owner bırakana kadar fiziksel Note Off gönderilmesini erteler.
 
 ### 6.3 MPE kimliği
 
-MPE kanalını source ID doğrudan belirlemez. Her aktif `source/finger` çifti bir member
+MPE kanalını source ID doğrudan belirlemez. Her aktif source touch bir member
 channel alır:
 
 | Zone | Master | Members |
@@ -195,7 +207,7 @@ channel alır:
 | Upper | 16 | 1..15 |
 
 15 member doluysa en yaşlı aktif MPE note önce düzgün biçimde bırakılır, sonra kanalı
-yeni finger'a atanır. Free channel taraması round-robin'dir ve yeni bırakılan kanalı
+yeni source touch'a atanır. Free channel taraması round-robin'dir ve yeni bırakılan kanalı
 diğerlerinden sonra tekrar kullanır.
 
 ## 7. OSC ingress
@@ -206,7 +218,7 @@ diğerlerinden sonra tekrar kullanır.
 
 - `/cs/`, zone ve param isimleri case-insensitive;
 - `finger` literal'i lower-case ve tam eşleşmeli;
-- source 256 ve finger10 geçersiz;
+- source 256 ve `finger0` dışındaki finger token'ları geçersizdir;
 - `u/v`: `0..1` aralığına clamp;
 - `line`: 127'ye böl, sonra clamp;
 - `on`: numeric ve sıfır değilse aktif;
@@ -284,23 +296,84 @@ X her iki sistemde eşit genişlikli pitch-step bölgelerine bölünür; X=0 ilk
 geçerli step'i seçer. Üst MIDI sınırını aşan tablo güvenli biçimde truncate edilir.
 
 Pitch System, root, octave, tonal Scale, Atomic Element/Density veya Range değiştiğinde
-aktif finger'lar yeni tabloyla yeniden çözülür. Bir block'ta en fazla 256 retrigger
+aktif source touch'ları yeni tabloyla yeniden çözülür. Bir block'ta en fazla 256 retrigger
 üretilerek büyük durum geçişi bounded tutulur.
 
-## 9. MIDI emission
+## 9. Crowd Time Field
+
+`CrowdTimeField`, OSC lifecycle ile pitch/MIDI render arasındaki saf C++ realtime
+scheduler'dır. Canlı bridge 256 source için yalnız `finger0`'ı kabul eder; core ise
+2560 sabit voice-state rezervini, 16 aktif-ID slotunu ve block başına en fazla 64 çıkış
+event'ini korur. `process()` allocation, lock, log, I/O veya message-thread çağrısı
+yapmaz.
+
+### Modlar
+
+| Mod | Davranış |
+|---|---|
+| Flow | On/Off'u block offset'inde doğrudan üretir; U/V mevcut hareket event hattından geçer. Timing kontrolleri bypass edilir. |
+| Grid | Attack'i seçili division sınırına kuyruğa alır; fair cursor ile pending voice seçer; attacks/step ve active limit uygular. Held note ordered Off ile, admission alan kısa tap minimum gate ile bırakılır. |
+| Ensemble | Source'u spread içindeki deterministik lane'e koyar, fixed gate uygular ve hâlâ held olan voice'u sonraki pulse için yeniden pending yapar. |
+
+Yeni 2.2 instance varsayılanları Ensemble, Host, 1/16, step başına 4 attack, 16 aktif,
+%70 gate ve 4 spread slotudur. MPE seçildiğinde efektif aktif limit 15'e clamp edilir;
+çünkü Lower/Upper zone yalnız 15 member channel sağlar. Schema 4 öncesi session'lara
+Flow eklenir ve böylece mevcut doğrudan timing grid'e taşınmaz.
+
+### Clock domain
+
+Host yalnız finite BPM/PPQ mevcutken ve transport playing durumundayken primary'dir.
+Bu durumda block beat origin host PPQ'dur. Sürekli tempo automation reset üretmez;
+seek, loop veya clock-domain sınırı safety reset ve canonical held-state rehydrate
+tetikler.
+
+Host seçili ama kullanılamıyor ya da durmuşsa scheduler, process-wide monotonic
+timestamp'i Internal BPM ile beat'e çevirir. Çalışmaya devam eder fakat host lock false
+raporlar. Internal seçimi aynı ortak monotonic zamanı açıkça kullanır ve locked raporlar.
+Absolute time kullanıldığı için instance'ların ayrı free-running accumulator'ları yoktur.
+
+### Admission, lane ve kısa tap
+
+Her grid tick'inde yeni attack sayısı hem `maxAttacksPerStep` hem de kalan `maxActive`
+kapasitesiyle sınırlanır. Fair cursor yoğunluk altında düşük source ID'lerin sürekli
+öncelik almasını engeller. Ensemble lane hesabı kavramsal olarak:
+
+```text
+lane = (source_id + hash(udp_port) mod spread_slots) mod spread_slots
+```
+
+Port seed, farklı zone instance'larında aynı source ID'lerin aynı host tick'ine
+yığılmasını azaltır; zone harfini tahmin veya filtre etmez. Ensemble pending lifetime,
+en az bir tam `division * spread_slots` lane cycle'dır ve hiçbir zaman bir quarter-note
+beat'ten kısa değildir. Böylece kısa tap expire olmadan önce en az bir tam lane-cycle
+fırsatı bulur. Grid pending fırsatı bir beat'tir.
+
+### Movement coalescing ve telemetry
+
+Grid/Ensemble'da `MidiAudienceModel` canonical son U/V değerini güncellemeye devam
+eder, fakat her hareket paketi için FIFO event'i üretmez. Attack ve grid-boundary
+`SampleMotion`, o andaki en son snapshot'ı örnekler. On/Off FIFO sırası korunur ve
+best-effort hareket update'lerinden daha önceliklidir; source/touch ownership ile
+Normal MIDI channel kuralı değişmez.
+
+PENDING bekleyen attack, ACTIVE çalan scheduler voice sayısıdır. MERGED, kapasite
+bulamayıp coalesce veya expire edilen scheduled work için saturating telemetry
+counter'ıdır. Herhangi bir CC, Crowd Energy değeri ya da başka MIDI mesajı üretmez.
+
+## 10. MIDI emission
 
 ### Normal MIDI
 
 - Note On velocity doğrudan V/Y'den gelir (`1..127`).
 - CC74 doğrudan U/X'ten gelir (`0..127`).
 - CC11 doğrudan V/Y'den gelir (`0..127`).
-- OSC finger'ları için pitch wheel gönderilmez.
+- OSC touch'ları için pitch wheel gönderilmez.
 - Tonal map exact 12-TET note üretir; Atomic map exact target'ın en yakın semitone'unu
   gönderir.
 - Fixed Channel veya Per source 1-16 seçilebilir.
 
 Normal CC'ler channel-wide olduğu için Channel 1'i paylaşan source 1 ve 17 birbirinin
-son CC74/CC11 değerini etkileyebilir. Per-finger expression izolasyonu için MPE gerekir.
+son CC74/CC11 değerini etkileyebilir. Per-source-touch expression izolasyonu için MPE gerekir.
 
 ### MPE
 
@@ -339,12 +412,12 @@ Bu nedenle host çıkışı block/sample pozisyonunu korurken harici/virtual ç�
 granülaritesine sahiptir. Hassas timestamp gerektiren kullanımda host yolu daha
 deterministiktir.
 
-## 10. Thread modeli
+## 11. Thread modeli
 
 | Thread/context | İş | Senkronizasyon |
 |---|---|---|
 | OSC realtime callback | Parse, telemetry, source atomic update, event enqueue. | Shared client `CriticalSection` + producer `SpinLock`; audio thread değil. |
-| Audio processing | MIDI input copy, Tonal/Atomic fixed map seçimi, event drain, Normal/MPE host üretimi, external FIFO write. | Fixed array/FIFO ve pre-reserved `MidiBuffer`; katalog üretimi, parse ve device I/O yok. |
+| Audio processing | MIDI input copy, host clock capture, Tonal/Atomic fixed map seçimi, bounded lifecycle drain, Time Field scheduling, sample-offset'li Normal/MPE host üretimi, external FIFO write. | Fixed array/FIFO/scheduler ve pre-reserved `MidiBuffer`; katalog üretimi, parse ve device I/O yok. |
 | Message/UI | Editor 8 Hz telemetry, simulator ~30 Hz, destination/state değişimi, 60 Hz external drain. | Atomics, kısa pending-state lock; destructive route işlemlerinde processor suspension. |
 
 Kapasiteler:
@@ -352,11 +425,12 @@ Kapasiteler:
 | Kaynak | Kapasite |
 |---|---:|
 | Source | 256 |
-| Finger/source | 10 |
+| Canlı touch/source | 1 (`finger0`); core rezervi 10 slot/source |
 | Semantic MIDI state | 2560 |
-| OSC finger FIFO | 8192 |
-| Audio block event drain | 1024 |
-| NoteEvent scratch | 8192 |
+| OSC touch FIFO | 8192 |
+| Audio block lifecycle drain | `min(64, max(1, block sample sayısı))` |
+| CrowdTimeField block çıkışı | 64 |
+| NoteEvent scratch | 64 |
 | External MIDI FIFO | 8192 |
 | MIDI scratch reserve | buffer başına 262144 byte |
 | SharedPort client | 16 |
@@ -367,7 +441,7 @@ Kapasiteler:
 geçici olarak suspend eder. `releaseResources` doğrudan device I/O yapmak yerine reset
 isteğini message timer'a yayınlar.
 
-## 11. State ve migration
+## 12. State ve migration
 
 ### APVTS parametreleri
 
@@ -380,6 +454,14 @@ isteğini message timer'a yayınlar.
 | `mpePitchBendRange` | 2 / 12 / 24 / 48 st | 2 st |
 | `mpeSendSetupMessages` | bool | On |
 | `mpePitchMode` | Retrigger / Glide | Retrigger |
+| `timeMode` | Flow / Grid / Ensemble | Ensemble |
+| `clockSource` | Host / Internal | Host |
+| `internalBpm` | 40..240 BPM | 120 |
+| `gridDivision` | 1/4 / 1/8 / 1/16 / 1/32 | 1/16 |
+| `maxAttacksPerStep` | 1..16 | 4 |
+| `maxActiveVoices` | 1..16 | 16; MPE efektif en fazla 15 |
+| `gatePercent` | %5..100 | %70 |
+| `temporalSpread` | 1 / 2 / 4 / 8 / 16 | 4 |
 | `pitchSystem` | Tonal / Atomic | Atomic |
 | `scaleRoot` | C..B | C |
 | `scaleRootOctave` | 0..6 | 2 |
@@ -392,7 +474,7 @@ ValueTree ek alanları:
 
 - `udpPort` (6060)
 - `midiOutputOption` (Host)
-- `cosmicMicrowaveSchema` (3)
+- `cosmicMicrowaveSchema` (4)
 
 Eski state migration:
 
@@ -405,21 +487,25 @@ Eski state migration:
   gelen element index'i `spectralElement` üzerine taşınır;
 - eski element-engine session'ları Atomic'e taşınırken stabil `spectralElement` ve
   `atomicScaleMode` değerleri korunur;
+- schema-4 Time Field parametreleri olmayan tüm eski state'lere Flow, Host, 120 BPM,
+  1/16, attack 4, active 16, gate %70 ve spread 4 eklenir;
 - bozuk/non-finite choice değerleri güvenli sınırlara clamp edilir;
 - UDP port ve destination'ın dış dünyaya etkisi message timer üzerinden uygulanır.
 
-## 12. UI mimarisi
+## 13. UI mimarisi
 
 `AudienceEditor` yalnızca `AudienceProcessor`, APVTS attachment'ları ve
 `MidiAudienceModel` snapshot'larını kullanır.
 
 Görünür modüller:
 
-- Header: SOURCES, FINGERS, NOTES, MPE VOICES;
+- Header: SOURCES, TOUCHES, NOTES, MPE VOICES;
 - OSC INPUT;
 - SOURCE ROUTING + observed zones;
 - SIMULATOR;
 - 256-source / 16-channel SOURCE MATRIX;
+- TIME FIELD: Flow/Grid/Ensemble, Host/Internal, BPM/division, attack/active limit,
+  gate/spread ve PENDING/ACTIVE/MERGED telemetry;
 - PITCH MAPPING: Tonal/Atomic selector, ortak root/octave/range ve moda göre
   Scale veya Element/Density;
 - Normal/MPE mode-specific MIDI ROUTING;
@@ -428,9 +514,9 @@ Görünür modüller:
 UI timer'ı 8 Hz'de telemetry çeker. Paint yolu network receiver'a veya MIDI device'a
 doğrudan dokunmaz. Source map hücreleri seçim kontrolü değil, read-only görseldir.
 
-## 13. Test kapsamı
+## 14. Test kapsamı
 
-CMake on iki CTest hedefi tanımlar:
+CMake on beş CTest hedefi tanımlar:
 
 | Test | Kapsam |
 |---|---|
@@ -445,7 +531,10 @@ CMake on iki CTest hedefi tanımlar:
 | `AudienceAtomicScaleBuilderTests` | Offline wavelength normalize/seçim, density cap ve hostile numeric input. |
 | `AudienceAtomicScaleMapTests` | Fixed exact-frequency map, 768-step sınırı ve hostile numeric input. |
 | `AudienceAtomicScaleCatalogTests` | 29x5 generated katalog bütünlüğü, metadata ve mode cap'leri. |
-| `AudiencePluginStateMigrationTests` | Released channel/scale formatı, schema-2 Tonal koruma, 1.x Atomic recovery, clamp ve idempotence. |
+| `AudienceAtomicMidiIntegrationTests` | Atomic exact-frequency map'in Normal/MPE renderer ile entegrasyonu. |
+| `AudienceCrowdTimeFieldTests` | Flow/Grid/Ensemble, host/internal/fallback clock, fairness, lane seed, short tap, gate, overflow, reset/rehydrate. |
+| `AudienceCrowdMidiIntegrationTests` | Host PPQ sample offset'i ve timed path içinde değişmeyen source-channel ownership. |
+| `AudiencePluginStateMigrationTests` | Released channel/scale formatı, schema-2 Tonal, schema-4 Flow uyumluluğu, clamp ve idempotence. |
 
 Önemli kalan entegrasyon boşlukları:
 
@@ -454,16 +543,16 @@ CMake on iki CTest hedefi tanımlar:
 - uzun süreli yüksek hızlı OSC soak testi;
 - resizable editor snapshot/interaction regresyonu.
 
-## 14. Operasyonel riskler ve teknik borç
+## 15. Operasyonel riskler ve teknik borç
 
 ### Yüksek önem
 
 1. **Zone source collision:** İki zone aynı porta gelirse zone kimliği source anahtarında
    olmadığı için aynı ID'ler ortak state kullanır. Çözüm upstream split'tir.
-2. **MPE 15-channel limiti:** 16. aktif finger oldest-note steal tetikler. Bu bir
-   allocation sınırıdır, bug değildir.
-3. **Event overflow:** 8192 event üstü burst safety reset üretir; upstream U/V rate
-   limiti gerekir.
+2. **MPE 15-channel limiti:** Timed modlarda active limit efektif 15'e clamp edilir.
+   Flow'da 16. aktif source touch oldest-note steal tetikleyebilir; bu allocation sınırıdır.
+3. **Event overflow:** Grid/Ensemble U/V burst'ünü latest-value olarak coalesce eder;
+   buna rağmen aşırı lifecycle burst'ü 8192-event FIFO'da safety reset üretebilir.
 
 ### Orta önem
 
@@ -483,19 +572,21 @@ CMake on iki CTest hedefi tanımlar:
 - Simulator source aralığını konfigüre edilebilir bir test namespace'ine taşımak.
 - Plugin validation ve farklı hostlarda MIDI-output lifecycle matrisi.
 
-## 15. 2.1 yükseltme notu
+## 16. 2.2 yükseltme notu
 
 1. Eski VST3 bundle'ını scanned plugin klasörü dışına yedekle.
-2. Cosmic Microwave 2.1'i kur ve host'u rescan et.
+2. Cosmic Microwave 2.2'yi kur ve host'u rescan et.
 3. Önce Ableton set'in bir kopyasını aç.
-4. Her instance için UDP port, MIDI Format, source routing, destination, Pitch System
-   ve Tonal/Atomic map'i doğrula.
+4. Her instance için UDP port, Time Field/clock, MIDI Format, source routing,
+   destination, Pitch System ve Tonal/Atomic map'i doğrula.
 5. MIDI alan instrument track'lerini kur; bayrak ürünün kendisi ses üretmez.
 6. Audience server bağlanmadan önce Simulator, her channel ve Panic'i test et.
 
-Yeni session'lar Atomic / Helium / Extended açılır. Schema-2 MIDI-only session'lar
-Tonal'a, released 1.x spectral seçimler karşılık gelen elementle Atomic'e migrate olur.
-Atomic MPE kullanılıyorsa receiver bend range performans öncesi yeniden doğrulanmalıdır.
+Yeni session'lar Ensemble / Host / 1/16, attack 4, active 16 (MPE'de 15), gate %70,
+spread 4 ve Atomic / Helium / Extended açılır. Schema 3 ve daha eski session'lar Time
+Field için Flow alır. Önceki schema-2 Tonal ve released 1.x Atomic migration kuralları
+korunur. Atomic MPE kullanılıyorsa receiver bend range performans öncesi yeniden
+doğrulanmalıdır.
 
 Kullanıcı akışları için `docs/manual/README.md`, ayrıntılı İngilizce teknik referans
 için kökteki `WIKI.md` kullanılmalıdır.

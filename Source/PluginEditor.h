@@ -72,6 +72,13 @@ private:
     juce::ComboBox atomicElementCombo, atomicModeCombo;
     juce::Slider octavesSlider;
 
+    // Temporal note scheduling
+    juce::Label timeStatusLabel;
+    juce::Label timeModeLabel, clockSourceLabel, internalBpmLabel, gridDivisionLabel;
+    juce::Label maxAttacksLabel, maxActiveVoicesLabel, gatePercentLabel, temporalSpreadLabel;
+    juce::ComboBox timeModeCombo, clockSourceCombo, gridDivisionCombo, temporalSpreadCombo;
+    juce::Slider internalBpmSlider, maxAttacksSlider, maxActiveVoicesSlider, gatePercentSlider;
+
     // MIDI mode / channel routing card
     juce::Label midiTypeLabel, normalRoutingLabel, normalChannelLabel;
     juce::Label mpeZoneLabel, mpeBendRangeLabel, mpePitchModeLabel;
@@ -91,6 +98,7 @@ private:
     juce::Rectangle<int> routingCardBounds;
     juce::Rectangle<int> simulatorCardBounds;
     juce::Rectangle<int> mapCardBounds;
+    juce::Rectangle<int> timeCardBounds;
     juce::Rectangle<int> pitchCardBounds;
     juce::Rectangle<int> midiCardBounds;
     juce::Rectangle<int> destinationCardBounds;
@@ -115,6 +123,14 @@ private:
     std::unique_ptr<ComboAttachment> atomicElementAttachment;
     std::unique_ptr<ComboAttachment> atomicModeAttachment;
     std::unique_ptr<SliderAttachment> octavesAttachment;
+    std::unique_ptr<ComboAttachment> timeModeAttachment;
+    std::unique_ptr<ComboAttachment> clockSourceAttachment;
+    std::unique_ptr<SliderAttachment> internalBpmAttachment;
+    std::unique_ptr<ComboAttachment> gridDivisionAttachment;
+    std::unique_ptr<SliderAttachment> maxAttacksAttachment;
+    std::unique_ptr<SliderAttachment> maxActiveVoicesAttachment;
+    std::unique_ptr<SliderAttachment> gatePercentAttachment;
+    std::unique_ptr<ComboAttachment> temporalSpreadAttachment;
     std::unique_ptr<ComboAttachment> midiTypeAttachment;
     std::unique_ptr<ComboAttachment> normalRoutingAttachment;
     std::unique_ptr<ComboAttachment> normalChannelAttachment;

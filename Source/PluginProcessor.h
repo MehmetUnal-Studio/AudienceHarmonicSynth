@@ -7,6 +7,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "AtomicScaleCatalog.h"
 #include "AtomicScaleMap.h"
+#include "CrowdTimeField.h"
 #include "MidiAudienceModel.h"
 #include "MidiPitchMap.h"
 #include "MpeMidiOutput.h"
@@ -88,6 +89,26 @@ public:
     juce::String getAtomicModeName (int index) const;
     int getSelectedAtomicDegreeCount() const noexcept;
     double getSelectedAtomicReferenceWavelengthNm() const noexcept;
+    double getTimeFieldBpm() const noexcept
+    {
+        return timeFieldBpm.load(std::memory_order_relaxed);
+    }
+    int getTimeFieldPending() const noexcept
+    {
+        return timeFieldPending.load(std::memory_order_relaxed);
+    }
+    int getTimeFieldActive() const noexcept
+    {
+        return timeFieldActive.load(std::memory_order_relaxed);
+    }
+    uint32_t getTimeFieldMerged() const noexcept
+    {
+        return timeFieldMerged.load(std::memory_order_relaxed);
+    }
+    bool getTimeFieldClockLocked() const noexcept
+    {
+        return timeFieldClockLocked.load(std::memory_order_relaxed);
+    }
     int getMidiOutputOptionIndex() const noexcept { return midiOutputOptionIndex.load(std::memory_order_relaxed); }
     int getResolvedMidiOutputOptionIndex();
     uint32_t getMidiOutputRouteRevision() const noexcept { return midiOutputRouteRevision.load(std::memory_order_acquire); }
@@ -101,8 +122,19 @@ private:
     void updatePitchMap();
     bool processIncomingMidi (const juce::MidiBuffer&);
     void releaseAllIncomingMidiNotes() noexcept;
-    void renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples, bool outputEnabled);
+    void renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples,
+                             bool outputEnabled,
+                             const CrowdTimeField::ClockFrame& clockFrame,
+                             bool resetAlreadyEmitted);
+    void renderTimedOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples,
+                                  bool outputEnabled,
+                                  const CrowdTimeField::ClockFrame& clockFrame,
+                                  bool resetAlreadyEmitted);
     MpeMidiOutput::MpeConfig buildMpeConfig() const;
+    CrowdTimeField::Config buildTimeFieldConfig() const noexcept;
+    CrowdTimeField::ClockFrame captureTimeFieldClock (int numSamples,
+                                                       double monotonicSeconds) const noexcept;
+    void rehydrateTimeFieldFromCanonical() noexcept;
     void recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
     void queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages,
                                     double blockStartTimeMs,
@@ -130,6 +162,9 @@ private:
     bool midiRenderScratchLoanedToHost = false;
     std::array<OscFingerRouter::Event, midiLifecycleEventBudget> fingerEventScratch {};
     std::array<MpeMidiOutput::NoteEvent, midiLifecycleEventBudget> midiNoteEventScratch {};
+    std::array<CrowdTimeField::InputEvent, midiLifecycleEventBudget> timeFieldInputScratch {};
+    std::array<CrowdTimeField::HeldVoice, CrowdTimeField::kMaxVoices> timeFieldHeldScratch {};
+    CrowdTimeField::OutputBlock timeFieldOutputScratch;
 
     struct FingerMidiState
     {
@@ -142,8 +177,11 @@ private:
     std::array<FingerMidiState, OscFingerRouter::MAX_VOICES> fingerMidiStates {};
     MidiPitchMap pitchMap;
     AtomicScaleMap atomicPitchMap;
+    CrowdTimeField crowdTimeField;
     bool retriggerFingerMidi = false;
     int fingerRetriggerCursor = 0;
+    bool pitchMapChangedThisBlock = false;
+    bool timeFieldRehydratePending = true;
 
     struct PackedMidiEvent
     {
@@ -202,6 +240,20 @@ private:
     int lastMpeMemberLast = 16;
     int lastMpeSetupEnabled = 1;
     int lastMpePitchMode = 0;
+    int lastTimeMode = 2;
+    int lastClockSource = 0;
+    int lastGridDivision = 2;
+    int lastMaxAttacksPerStep = 4;
+    int lastMaxActiveVoices = 16;
+    int lastTemporalSpread = 2;
+    float lastInternalBpm = 120.0f;
+    float lastGatePercent = 70.0f;
+
+    std::atomic<double> timeFieldBpm { 120.0 };
+    std::atomic<int> timeFieldPending { 0 };
+    std::atomic<int> timeFieldActive { 0 };
+    std::atomic<uint32_t> timeFieldMerged { 0 };
+    std::atomic<bool> timeFieldClockLocked { false };
 
     int lastScaleRootPitchClass = -1;
     int lastScaleRootOctave = -1;
@@ -235,6 +287,14 @@ private:
         std::atomic<float>* mpePitchBendRange = nullptr;
         std::atomic<float>* mpeSendSetupMessages = nullptr;
         std::atomic<float>* mpePitchMode = nullptr;
+        std::atomic<float>* timeMode = nullptr;
+        std::atomic<float>* clockSource = nullptr;
+        std::atomic<float>* internalBpm = nullptr;
+        std::atomic<float>* gridDivision = nullptr;
+        std::atomic<float>* maxAttacksPerStep = nullptr;
+        std::atomic<float>* maxActiveVoices = nullptr;
+        std::atomic<float>* gatePercent = nullptr;
+        std::atomic<float>* temporalSpread = nullptr;
     } rawParams;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceProcessor)

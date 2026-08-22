@@ -555,9 +555,13 @@ void MpeMidiOutput::render (const MpeConfig& config,
     if (outputType == 2)
         sendMpeSetupIfNeeded(config, midiMessages, 0);
 
-    const int sampleOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1), 0);
     for (int i = 0; i < count; ++i)
-        handleMidiSourceEvent(config, events[(size_t) i], midiMessages, sampleOffset);
+    {
+        const auto& event = events[(size_t) i];
+        const int sampleOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1),
+                                               event.sampleOffset);
+        handleMidiSourceEvent(config, event, midiMessages, sampleOffset);
+    }
 }
 
 void MpeMidiOutput::recordOutgoingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept

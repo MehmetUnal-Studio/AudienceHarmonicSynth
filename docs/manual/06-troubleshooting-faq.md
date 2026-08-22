@@ -1,7 +1,7 @@
 # 06 - Troubleshooting & FAQ
 
 Start with the visible state in Cosmic Microwave: OSC status, observed zone letters,
-source/finger/note counters, the activity map, MIDI mode, and destination status. Then
+source/touch/note counters, the activity map, MIDI mode, and destination status. Then
 check the receiving application's MIDI monitor and track configuration.
 
 If Ableton lists both the old and new product names, remove one bundle from the scanned
@@ -10,7 +10,7 @@ class identity for old-session recall and must not be installed side by side.
 
 ## Cosmic Microwave itself makes no sound
 
-That is expected in version 2.1. Cosmic Microwave is an OSC-to-MIDI router with a
+That is expected in version 2.2. Cosmic Microwave is an OSC-to-MIDI router with a
 silent stereo instrument shell. It must feed a sound-producing instrument or hardware
 receiver.
 
@@ -31,7 +31,7 @@ Check these items in order:
 
 1. **OUTPUT** must be **Normal MIDI** or **MPE MIDI**, not **Off**.
 2. A source must receive `on 1`; `u` and `v` alone only update stored control state.
-3. The source/finger counters should rise. If they stay at zero, use **+ Source** to
+3. The source/touch counters should rise. If they stay at zero, use **+ Source** to
    separate an OSC-input problem from a MIDI-output problem.
 4. The VST3 track must be active so the host processes the plugin. Inactive, frozen,
    or disabled tracks may not run its MIDI generation path.
@@ -39,6 +39,35 @@ Check these items in order:
 
 Incoming host MIDI is passed through only when output is enabled. It does not create a
 source cell because it is MIDI thru, not an OSC audience source.
+
+## A touch is delayed, gated, or repeats
+
+Check **TIME FIELD -> MODE**:
+
+- **Flow** renders the OSC lifecycle directly.
+- **Grid** starts attacks on the selected division. A held note stays active until its
+  ordered Off; an admitted short tap receives the configured minimum gate.
+- **Ensemble** assigns the source to a spread lane, applies a fixed gate, and queues a
+  still-held source touch for another pulse.
+
+New 2.2 sessions intentionally default to Ensemble. Use Flow when diagnosing raw
+sender timing. Projects saved before state schema 4 migrate to Flow, so opening an old
+set does not silently quantize it.
+
+If too few notes begin, inspect **PENDING**, lower the spread or division, raise
+**ATTACKS / STEP**, or raise **ACTIVE LIMIT**. In MPE, the effective active limit is
+always at most 15 even if the saved control reads 16.
+
+## The Time Field says WAIT instead of LOCK
+
+With **Host** clock selected, LOCK requires a valid host tempo and PPQ position while
+the transport is playing. A stopped transport or unavailable clock displays WAIT.
+Cosmic Microwave still schedules safely from its process-wide monotonic fallback at
+the Internal BPM; it simply is not locked to host PPQ.
+
+Start the host transport for PPQ lock, or select **Internal** to use the common
+monotonic clock explicitly. Separate instances in the same process use that shared
+absolute time reference rather than unrelated free-running counters.
 
 ## MIDI is generated but does not reach the receiver
 
@@ -96,7 +125,7 @@ Switch to Normal MIDI when receiving tracks depend on stable source-channel grou
    /cs/A/1/finger0/on  1
    ```
 
-4. The source range is `0..255`; the finger range is `finger0..finger9`.
+4. The source range is `0..255`; only exact lower-case `finger0` is admitted.
 5. The literal `finger` token must be lower-case. Unknown parameters are ignored.
 6. OSC values must be finite `int32` or `float32` values.
 7. Allow inbound UDP for Ableton or the Standalone app in the system firewall.
@@ -115,7 +144,7 @@ the server/deployment, not automatic plugin assignments.
 
 Inside one instance, source ID owns state independently of the zone letter. If two
 zones send the same source ID to one port, their controls can share that source's
-finger state. Fix the split rather than relying on the observed-zone display alone.
+touch state. Fix the split rather than relying on the observed-zone display alone.
 
 ## The OSC port is unavailable
 
@@ -139,18 +168,19 @@ safety messages to the host and selected external destination.
 Then check the sender:
 
 - Every successful `on 1` lifecycle needs `off` or `on 0` for the same source and
-  finger.
-- Do not send the release under a different source ID or finger index.
+  touch.
+- Do not send the release under a different source ID or any token other than `finger0`.
 - Send U/V before On, but do not substitute movement messages for Off.
 - UDP has no delivery guarantee. Keep Panic available for sender/network failure.
 
-Cosmic Microwave keys note ownership by source and finger, so packet-by-packet channel
+Cosmic Microwave keys live note ownership by source and its `finger0` touch, so packet-by-packet channel
 round-robin is not used. In Normal MIDI, same-channel/same-note owners are reference
-counted so one finger cannot prematurely release another held owner.
+counted so one wrapped source cannot prematurely release another held owner.
 
 Changing MIDI protocol, Normal routing mode/channel, MPE zone/range, destination, or
-UDP port triggers safety reset handling. If a receiver ignores All Notes Off, use its
-own panic control as well.
+UDP port triggers safety reset handling. Changing the active Time Field domain also
+releases and rehydrates canonical held touches under the new schedule. If a receiver
+ignores All Notes Off, use its own panic control as well.
 
 ## Expression affects more than one note
 
@@ -158,14 +188,14 @@ own panic control as well.
 
 CC74 and CC11 are channel messages. In **Single channel**, every source shares them.
 In **Per source 1-16**, each source owns one channel, but IDs wrap after 16; source 1
-and source 17 both use Channel 1. Multiple fingers of one source also share its channel.
+and source 17 both use Channel 1.
 
 This is expected MIDI behaviour. Use MPE when expression must be independent for each
-active finger.
+active source touch.
 
 ### MPE
 
-Each active finger gets one member channel, so CC74, CC11, and channel pressure are
+Each active source touch gets one member channel, so CC74, CC11, and channel pressure are
 isolated when the receiver handles MPE correctly. If expression still feels global:
 
 - enable MPE/per-note expression in the receiver;
@@ -178,12 +208,12 @@ removed sound-generation parameter is blended into those values.
 
 ## MPE notes are released when the crowd grows
 
-Lower and Upper zones each provide 15 member channels. When a sixteenth active finger
+Lower and Upper zones each provide 15 member channels. When a sixteenth active source touch
 needs a member channel, Cosmic Microwave releases the oldest active MPE note and reuses
 its channel. This is expected voice stealing in the MIDI allocator.
 
 The header's **MPE VOICES** metric shows occupied member channels. Use Normal MIDI if
-more than 15 simultaneous fingers are required and per-finger channel isolation is not.
+more than 15 simultaneous source touches are required and per-touch channel isolation is not.
 
 ## Pitch or MPE tuning is unexpected
 
@@ -203,16 +233,19 @@ out of tune:
 - confirm the receiver treats the selected channels as the same MPE zone; and
 - check for another pitch-wheel source on the route.
 
-Normal MIDI sends no per-note pitch-wheel data for OSC fingers. A MIDI monitor that
+Normal MIDI sends no per-note pitch-wheel data for OSC touches. A MIDI monitor that
 shows only Note On names will therefore show Atomic's nearest semitone even when an MPE
 stream is correct; inspect Pitch Wheel as well. External receiver tuning is explained
 in [05 - Pitch Systems & External Tuning](05-tuning-files.md).
 
 ## Heavy OSC traffic causes resets or missed movement
 
-The input path is bounded to protect the realtime MIDI path. Excessive duplicate U/V
-traffic can fill its fixed-capacity event queue; recovery requests a reset so a dropped
-release cannot leave notes held indefinitely.
+The input path is bounded to protect the realtime MIDI path. In Grid and Ensemble,
+duplicate U/V bursts are collapsed to the latest position and sampled on attacks and
+grid boundaries. On/Off remains ordered and is not replaced by movement coalescing.
+Flow forwards movement directly, and an extreme lifecycle burst can still fill the
+fixed-capacity input queue; recovery requests a reset so a dropped release cannot
+leave notes held indefinitely.
 
 - Throttle continuous U/V updates to a musically useful rate.
 - Do not resend unchanged values unnecessarily.
@@ -222,6 +255,11 @@ release cannot leave notes held indefinitely.
 
 Lifecycle messages are more important than redundant movement messages. Design the
 upstream sender so On/Off are delivered promptly and keep Panic available.
+
+The **MERGED** figure is cumulative load telemetry. It means scheduled work was
+coalesced or expired after missing available capacity. It does not send a Crowd Energy
+CC, change velocity, or alter another MIDI controller. A pending Ensemble short tap is
+kept for at least one full lane-cycle opportunity before expiry.
 
 ## FAQ
 
@@ -255,14 +293,15 @@ note-off messages.
 
 ### Why did a new session open on Helium / Extended?
 
-Cosmic Microwave 2.1 intentionally defaults new sessions to **Atomic / Helium /
-Extended**. Choose **Tonal** for the seven conventional 12-TET maps. Existing schema-2
-MIDI-only sessions migrate explicitly to Tonal, while released 1.x element/spectral
-scale choices migrate to Atomic and recover their corresponding element.
+Cosmic Microwave 2.2 intentionally defaults new sessions to **Atomic / Helium /
+Extended**. Choose **Tonal** for the seven conventional 12-TET maps. The historical
+schema-2 migration still selects Tonal, while released 1.x element/spectral choices
+migrate to Atomic and recover their corresponding element. Separately, schema-3 and
+older state receives Flow for the new Time Field.
 
 ### What happened to the previous sound-generation controls?
 
-They were removed from the 2.0 flagship and remain absent in 2.1. Old repositories may
+They were removed from the 2.0 flagship and remain absent in 2.2. Old repositories may
 retain archival media or implementation files, but the current flagship target neither
 compiles nor loads them.
 

@@ -42,7 +42,8 @@ void MidiAudienceModel::setFingerX (int, int sourceId, int finger, float xNorm) 
     auto& source = sources[(size_t) sourceId];
     source.fingerX[(size_t) finger].store(value, std::memory_order_release);
     source.x.store(value, std::memory_order_release);
-    router.pushX(sourceId, finger, value);
+    if (forwardMotionEvents.load(std::memory_order_acquire))
+        router.pushX(sourceId, finger, value);
 }
 
 void MidiAudienceModel::setFingerY (int, int sourceId, int finger, float yNorm) noexcept
@@ -55,7 +56,8 @@ void MidiAudienceModel::setFingerY (int, int sourceId, int finger, float yNorm) 
     auto& source = sources[(size_t) sourceId];
     source.fingerY[(size_t) finger].store(value, std::memory_order_release);
     source.y.store(value, std::memory_order_release);
-    router.pushY(sourceId, finger, value);
+    if (forwardMotionEvents.load(std::memory_order_acquire))
+        router.pushY(sourceId, finger, value);
 }
 
 void MidiAudienceModel::setFingerOn (int, int sourceId, int finger, bool on) noexcept
@@ -163,6 +165,15 @@ int MidiAudienceModel::getActiveFingerCount() const noexcept
 int MidiAudienceModel::getLastActiveSourceId() const noexcept
 {
     return lastActiveSourceId.load(std::memory_order_acquire);
+}
+
+void MidiAudienceModel::setMotionEventForwardingEnabled (bool enabled) noexcept
+{
+    if (forwardMotionEvents.load(std::memory_order_acquire) == enabled)
+        return;
+
+    if (forwardMotionEvents.exchange(enabled, std::memory_order_acq_rel) != enabled)
+        router.requestReset();
 }
 
 int MidiAudienceModel::midiChannelForSourceId (int sourceId) noexcept
