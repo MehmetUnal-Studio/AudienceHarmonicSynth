@@ -329,17 +329,14 @@ CrowdTimeField::ResolvedClock CrowdTimeField::resolveClock (const Config& config
     return result;
 }
 
-bool CrowdTimeField::configsEqual (const Config& a, const Config& b) noexcept
+bool CrowdTimeField::domainConfigsEqual (const Config& a, const Config& b) noexcept
 {
     return a.mode == b.mode
         && a.clockSource == b.clockSource
         && a.division == b.division
         && (a.clockSource == ClockSource::Host
             || std::abs(a.internalBpm - b.internalBpm) <= 1.0e-9)
-        && a.maxAttacksPerStep == b.maxAttacksPerStep
-        && a.maxActive == b.maxActive
         && std::abs(a.gatePercent - b.gatePercent) <= 1.0e-9
-        && a.spreadSlots == b.spreadSlots
         && a.laneSeed == b.laneSeed;
 }
 
@@ -403,7 +400,7 @@ bool CrowdTimeField::domainChanged (const Config& config,
     if (! domainInitialised_)
         return false;
 
-    if (! configsEqual(config_, config)
+    if (! domainConfigsEqual(config_, config)
         || clock.hostPrimary != lastHostPrimary_
         || clock.running != lastRunning_
         || std::abs(clock.sampleRate - lastSampleRate_)
@@ -431,6 +428,29 @@ bool CrowdTimeField::domainChanged (const Config& config,
     const double toleranceSeconds = std::max(0.050, expectedSeconds * 4.0);
     return actualSeconds < -1.0e-9
         || std::abs(actualSeconds - expectedSeconds) > toleranceSeconds;
+}
+
+void CrowdTimeField::applySoftPolicy (const Config& config,
+                                      const ResolvedClock& clock) noexcept
+{
+    // Admission policy changes are not transport boundaries. Governor/manual
+    // automation must never panic, release or reassign an existing voice. When
+    // spread grows, retain pending requests for at least one complete new lane
+    // cycle so no source loses its scheduling opportunity.
+    if (config.spreadSlots > config_.spreadSlots && pendingCount_ > 0)
+    {
+        const double minimumDeadline = clock.beatStart
+                                     + pendingLifetimeBeats(config);
+        for (auto& voice : voices_)
+            if (voice.pending)
+                voice.pendingDeadlineBeat = std::max(voice.pendingDeadlineBeat,
+                                                     minimumDeadline);
+        refreshNextPendingExpiry();
+    }
+
+    config_.maxAttacksPerStep = config.maxAttacksPerStep;
+    config_.maxActive = config.maxActive;
+    config_.spreadSlots = config.spreadSlots;
 }
 
 int CrowdTimeField::rehydrate (const HeldVoice* held, int count) noexcept
@@ -997,6 +1017,10 @@ void CrowdTimeField::process (const Config& requestedConfig,
         output.resetRequested = true;
         fillStatus();
         return;
+    }
+    else
+    {
+        applySoftPolicy(config, clock);
     }
 
     if (pendingAnchorDeferred_)

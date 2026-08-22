@@ -80,8 +80,10 @@ private:
     // Temporal note scheduling
     juce::Label timeStatusLabel;
     juce::Label timeTelemetryLabel;
+    juce::TextButton governorModeButton { "ADAPTIVE" };
     juce::Label timeModeLabel, clockSourceLabel, internalBpmLabel, gridDivisionLabel;
     juce::Label maxAttacksLabel, maxActiveVoicesLabel, gatePercentLabel, temporalSpreadLabel;
+    juce::Label governorAttacksValue, governorActiveVoicesValue, governorSpreadValue;
     juce::ComboBox timeModeCombo, clockSourceCombo, gridDivisionCombo, temporalSpreadCombo;
     juce::Slider internalBpmSlider, maxAttacksSlider, maxActiveVoicesSlider, gatePercentSlider;
 
@@ -139,6 +141,7 @@ private:
     std::unique_ptr<SliderAttachment> maxActiveVoicesAttachment;
     std::unique_ptr<SliderAttachment> gatePercentAttachment;
     std::unique_ptr<ComboAttachment> temporalSpreadAttachment;
+    std::unique_ptr<ButtonAttachment> governorModeAttachment;
     std::unique_ptr<ComboAttachment> midiTypeAttachment;
     std::unique_ptr<ComboAttachment> normalRoutingAttachment;
     std::unique_ptr<ComboAttachment> normalChannelAttachment;

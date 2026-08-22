@@ -126,6 +126,8 @@ namespace cm
                                    bool highlighted, bool down) override
         {
             auto bounds = button.getLocalBounds().toFloat().reduced (0.5f);
+            const auto radius = button.getComponentID() == "governorPill"
+                                  ? bounds.getHeight() * 0.5f : 6.0f;
             const auto accent = button.findColour (juce::TextButton::buttonOnColourId).withAlpha (1.0f);
             const auto enabledAlpha = button.isEnabled() ? 1.0f : 0.34f;
             auto fill = backgroundColour.withMultipliedAlpha (enabledAlpha);
@@ -135,11 +137,11 @@ namespace cm
                 fill = fill.interpolatedWith (accent, 0.09f);
 
             g.setColour (fill);
-            g.fillRoundedRectangle (bounds, 6.0f);
+            g.fillRoundedRectangle (bounds, radius);
             g.setColour ((highlighted || button.hasKeyboardFocus (true))
                            ? accent.withAlpha (0.72f * enabledAlpha)
                            : line.withAlpha (0.88f * enabledAlpha));
-            g.drawRoundedRectangle (bounds, 6.0f,
+            g.drawRoundedRectangle (bounds, radius,
                                     button.hasKeyboardFocus (true) ? 1.2f : 0.8f);
         }
 
@@ -689,6 +691,31 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     timeTelemetryLabel.setDescription ("Pending attacks, active scheduled voices and merged same-step attacks.");
     addAndMakeVisible (timeTelemetryLabel);
 
+    styleButton (governorModeButton);
+    governorModeButton.setComponentID ("governorPill");
+    governorModeButton.setClickingTogglesState (true);
+    governorModeButton.setColour (juce::TextButton::textColourOnId, cm::cyan);
+    governorModeButton.setTitle ("Adaptive Crowd Governor");
+    governorModeButton.setDescription ("Manual uses the saved Time Field limits. Adaptive derives attacks, active voices and temporal spread from the observed crowd density.");
+    governorModeButton.setTooltip (governorModeButton.getDescription());
+    addAndMakeVisible (governorModeButton);
+
+    auto styleGovernorValue = [this] (juce::Label& value, const juce::String& title)
+    {
+        value.setJustificationType (juce::Justification::centred);
+        value.setColour (juce::Label::backgroundColourId, cm::cardRaised);
+        value.setColour (juce::Label::outlineColourId, cm::line);
+        value.setColour (juce::Label::textColourId, cm::cyan);
+        value.setFont (juce::Font (juce::FontOptions (11.0f).withStyle ("bold")));
+        value.setTitle (title);
+        value.setInterceptsMouseClicks (false, false);
+        value.setWantsKeyboardFocus (false);
+        addAndMakeVisible (value);
+    };
+    styleGovernorValue (governorAttacksValue, "Effective attacks per step");
+    styleGovernorValue (governorActiveVoicesValue, "Effective active-voice limit");
+    styleGovernorValue (governorSpreadValue, "Effective temporal spread");
+
     timeModeAttachment = std::make_unique<ComboAttachment> (proc.apvts, "timeMode", timeModeCombo);
     clockSourceAttachment = std::make_unique<ComboAttachment> (proc.apvts, "clockSource", clockSourceCombo);
     internalBpmAttachment = std::make_unique<SliderAttachment> (proc.apvts, "internalBpm", internalBpmSlider);
@@ -697,10 +724,12 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     maxActiveVoicesAttachment = std::make_unique<SliderAttachment> (proc.apvts, "maxActiveVoices", maxActiveVoicesSlider);
     gatePercentAttachment = std::make_unique<SliderAttachment> (proc.apvts, "gatePercent", gatePercentSlider);
     temporalSpreadAttachment = std::make_unique<ComboAttachment> (proc.apvts, "temporalSpread", temporalSpreadCombo);
+    governorModeAttachment = std::make_unique<ButtonAttachment> (proc.apvts, "crowdGovernorEnabled", governorModeButton);
 
     timeModeCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
     clockSourceCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
     gridDivisionCombo.onChange = [this] { updateLiveText(); };
+    governorModeButton.onClick = [this] { updateModeVisibility(); updateLiveText(); };
 
     // MIDI routing ------------------------------------------------------------
     addChoiceItems (midiTypeCombo, { "Off", "Normal MIDI", "MPE MIDI" });
@@ -877,7 +906,7 @@ void AudienceEditor::paint (juce::Graphics& g)
     cm::drawCard (g, routingCardBounds, "SOURCE ROUTING", "ID-LOCKED");
     cm::drawCard (g, simulatorCardBounds, "SIMULATOR", "LOCAL TEST");
     cm::drawCard (g, pitchCardBounds, "PITCH MAPPING");
-    cm::drawCard (g, timeCardBounds, "TIME FIELD", "SYNC / LOAD");
+    cm::drawCard (g, timeCardBounds, "TIME FIELD");
     cm::drawCard (g, midiCardBounds, "MIDI ROUTING", "NORMAL / MPE");
     cm::drawCard (g, destinationCardBounds, "MIDI OUTPUT");
 
@@ -999,6 +1028,8 @@ void AudienceEditor::resized()
     // the source matrix gives all eight parameters full-height controls even at
     // the 900x560 minimum editor size.
     {
+        governorModeButton.setBounds (timeCardBounds.getRight() - 109,
+                                      timeCardBounds.getY() + 6, 96, 24);
         auto inner = timeCardBounds.reduced (13);
         inner.removeFromTop (27);
         timeStatusLabel.setBounds (inner.removeFromTop (21));
@@ -1061,6 +1092,13 @@ void AudienceEditor::resized()
         layoutPair (inner.removeFromTop (rowHeight),
                     gatePercentLabel, gatePercentSlider,
                     temporalSpreadLabel, temporalSpreadCombo);
+
+        // Adaptive readouts replace only the three governed policy controls.
+        // Their APVTS-attached manual controls keep their values off-screen, so
+        // enabling the Governor never overwrites automation or session state.
+        governorAttacksValue.setBounds (maxAttacksSlider.getBounds());
+        governorActiveVoicesValue.setBounds (maxActiveVoicesSlider.getBounds());
+        governorSpreadValue.setBounds (temporalSpreadCombo.getBounds());
     }
 
     // Pitch mapping card: the system selector lives in the card header; the
@@ -1285,11 +1323,13 @@ void AudienceEditor::updateModeVisibility()
     const bool internalClock = selectedClock >= 0
                                  ? selectedClock == 1
                                  : cm::choiceValue (proc.apvts, "clockSource") == 1;
+    const bool adaptive = cm::choiceValue (proc.apvts, "crowdGovernorEnabled") != 0;
     const bool normal = midiType == 1;
     const bool mpe = midiType == 2;
     const bool fixedChannel = normal
                            && cm::choiceValue (proc.apvts, "normalMidiRoutingMode") == 0;
-    const int visibilityKey = timeMode * 10000
+    const int visibilityKey = (adaptive ? 100000 : 0)
+                            + timeMode * 10000
                             + (internalClock ? 1000 : 0)
                             + (atomicPitch ? 100 : 0)
                             + midiType * 10 + (fixedChannel ? 1 : 0);
@@ -1303,6 +1343,10 @@ void AudienceEditor::updateModeVisibility()
 
     internalBpmLabel.setVisible (timed && internalClock);
     internalBpmSlider.setVisible (timed && internalClock);
+
+    governorModeButton.setButtonText (adaptive ? "ADAPTIVE" : "MANUAL");
+    governorModeButton.setColour (juce::TextButton::textColourOffId,
+                                  adaptive ? cm::cyan : cm::textMuted);
 
     // Flow is intentionally direct. Keep the timing configuration visible as
     // a stable layout, but make it unmistakably unavailable until Grid or
@@ -1320,6 +1364,16 @@ void AudienceEditor::updateModeVisibility()
                              static_cast<juce::Component*> (&gatePercentLabel),
                              static_cast<juce::Component*> (&temporalSpreadLabel) })
         component->setEnabled (timed);
+
+    maxAttacksSlider.setVisible (! adaptive);
+    maxActiveVoicesSlider.setVisible (! adaptive);
+    temporalSpreadCombo.setVisible (! adaptive);
+    governorAttacksValue.setVisible (adaptive);
+    governorActiveVoicesValue.setVisible (adaptive);
+    governorSpreadValue.setVisible (adaptive);
+    governorAttacksValue.setEnabled (timed);
+    governorActiveVoicesValue.setEnabled (timed);
+    governorSpreadValue.setEnabled (timed);
 
     normalRoutingLabel.setVisible (normal);
     normalRoutingCombo.setVisible (normal);
@@ -1392,6 +1446,13 @@ void AudienceEditor::updateLiveText()
     const int liveTimeMode = selectedMode >= 0
                                ? selectedMode
                                : cm::choiceValue (proc.apvts, "timeMode");
+    const bool governorAdaptive = cm::choiceValue (proc.apvts, "crowdGovernorEnabled") != 0;
+    const int observedCrowd = juce::jmax (0, proc.getGovernorObservedDensity());
+    const int effectiveAttacks = juce::jmax (1, proc.getGovernorEffectiveAttacksPerStep());
+    const int effectiveActiveLimit = juce::jmax (1, proc.getGovernorEffectiveActiveVoices());
+    const int effectiveSpread = juce::jmax (1, proc.getGovernorEffectiveSpreadSlots());
+    const auto observedSourceWord = observedCrowd == 1 ? " source" : " sources";
+    const auto spreadStepWord = effectiveSpread == 1 ? " grid step" : " grid steps";
     const bool clockLocked = proc.getTimeFieldClockLocked();
     const int pending = proc.getTimeFieldPending();
     const int scheduledActive = proc.getTimeFieldActive();
@@ -1434,6 +1495,32 @@ void AudienceEditor::updateLiveText()
                                liveTimeMode != 0 && hostClock && ! clockLocked
                                  ? cm::amber : cm::green);
 
+    governorAttacksValue.setText ("AUTO  /  " + juce::String (effectiveAttacks),
+                                  juce::dontSendNotification);
+    governorActiveVoicesValue.setText ("AUTO  /  " + juce::String (effectiveActiveLimit),
+                                       juce::dontSendNotification);
+    governorSpreadValue.setText ("AUTO  /  " + juce::String (effectiveSpread),
+                                 juce::dontSendNotification);
+    governorAttacksValue.setDescription (
+        "Adaptive Crowd Governor currently allows " + juce::String (effectiveAttacks)
+        + " new attacks per grid step for an observed crowd density of "
+        + juce::String (observedCrowd) + observedSourceWord + ".");
+    governorActiveVoicesValue.setDescription (
+        "Adaptive Crowd Governor currently allows " + juce::String (effectiveActiveLimit)
+        + " simultaneous scheduled voices for an observed crowd density of "
+        + juce::String (observedCrowd) + observedSourceWord + ".");
+    governorSpreadValue.setDescription (
+        "Adaptive Crowd Governor currently distributes attacks across "
+        + juce::String (effectiveSpread) + spreadStepWord + " for "
+        + juce::String (observedCrowd) + observedSourceWord + ".");
+    const auto governorDescription = governorAdaptive
+        ? (liveTimeMode == 0
+             ? "Adaptive Crowd Governor is prepared but bypassed in Flow mode. Select Grid or Ensemble to apply crowd-aware limits."
+             : "Adaptive Crowd Governor is active and derives attacks, active voices and temporal spread from observed crowd density.")
+        : "Manual uses the saved attacks, active-voice and temporal-spread limits.";
+    governorModeButton.setDescription (governorDescription);
+    governorModeButton.setTooltip (governorDescription);
+
     const auto nowMs = juce::Time::getMillisecondCounterHiRes();
     if (merged < lastTimeFieldMerged)
         mergeActivityUntilMs = 0.0;
@@ -1441,16 +1528,21 @@ void AudienceEditor::updateLiveText()
         mergeActivityUntilMs = nowMs + 1400.0;
     lastTimeFieldMerged = merged;
 
-    const int configuredActiveLimit = juce::jmax (
-        1, (int) std::lround (maxActiveVoicesSlider.getValue()));
-    // An MPE zone has one master plus only fifteen member channels. Reflect the
-    // processor's effective cap in load telemetry instead of waiting for an
-    // impossible sixteenth active voice before showing queue pressure.
-    const int activeLimit = cm::choiceValue (proc.apvts, "midiOutputType") == 2
-                          ? juce::jmin (15, configuredActiveLimit)
-                          : configuredActiveLimit;
-    const int attacksPerStep = juce::jmax (1, (int) std::lround (maxAttacksSlider.getValue()));
-    const int spreadSteps = juce::jmax (1, temporalSpreadCombo.getText().getIntValue());
+    // Adaptive telemetry is authoritative only while the Governor is selected.
+    // Manual mode continues to reflect the saved/automated controls, including
+    // the fifteen-member MPE ceiling.
+    const int manualActiveLimit = cm::choiceValue (proc.apvts, "midiOutputType") == 2
+                                ? juce::jmin (15, juce::jmax (
+                                      1, (int) std::lround (maxActiveVoicesSlider.getValue())))
+                                : juce::jmax (
+                                      1, (int) std::lround (maxActiveVoicesSlider.getValue()));
+    const int activeLimit = governorAdaptive ? effectiveActiveLimit : manualActiveLimit;
+    const int attacksPerStep = governorAdaptive
+                                 ? effectiveAttacks
+                                 : juce::jmax (1, (int) std::lround (maxAttacksSlider.getValue()));
+    const int spreadSteps = governorAdaptive
+                              ? effectiveSpread
+                              : juce::jmax (1, temporalSpreadCombo.getText().getIntValue());
     const int oneSpreadCapacity = attacksPerStep * spreadSteps;
     const bool atActiveLimit = liveTimeMode != 0 && pending > 0
                             && scheduledActive >= activeLimit;
@@ -1460,21 +1552,37 @@ void AudienceEditor::updateLiveText()
     const auto queueState = "PENDING " + juce::String (pending)
                           + "  /  ACTIVE " + juce::String (scheduledActive)
                           + "  /  MERGED " + juce::String (merged);
-    const auto loadDescription = liveTimeMode == 0
-                               ? "Direct signal path with " + juce::String (scheduledActive)
-                                   + " active touches."
-                               : queueState
-                                   + ". Merged counts same-step attack collisions combined safely; it is not a dropped-note count."
-                                   + (atActiveLimit
-                                        ? " The active-voice limit is currently full and attacks remain queued."
-                                        : queuePressure
-                                            ? " High load: the pending queue exceeds one selected temporal-spread window."
-                                        : mergeActivity
-                                            ? " Crowd attacks were consolidated during the latest scheduling window."
-                                            : " Scheduler load is within the selected limits.");
+    auto loadDescription = liveTimeMode == 0
+                         ? "Direct signal path with " + juce::String (scheduledActive)
+                             + " active touches."
+                         : queueState
+                             + ". Merged counts same-step attack collisions combined safely; it is not a dropped-note count."
+                             + (atActiveLimit
+                                  ? " The active-voice limit is currently full and attacks remain queued."
+                                  : queuePressure
+                                      ? " High load: the pending queue exceeds one selected temporal-spread window."
+                                  : mergeActivity
+                                      ? " Crowd attacks were consolidated during the latest scheduling window."
+                                      : " Scheduler load is within the selected limits.");
+    if (governorAdaptive)
+        loadDescription += " Adaptive Crowd Governor sees an observed crowd density of "
+                         + juce::String (observedCrowd)
+                         + observedSourceWord + " and currently applies "
+                         + juce::String (effectiveAttacks) + " attacks per step, "
+                         + juce::String (effectiveActiveLimit) + " active voices and "
+                         + juce::String (effectiveSpread) + spreadStepWord + "."
+                         + (liveTimeMode == 0 ? " These limits are bypassed in Flow mode." : "");
     timeTelemetryLabel.setText (liveTimeMode == 0
-                                  ? "ATTACKS PASS THROUGH  /  ACTIVE "
-                                      + juce::String (scheduledActive)
+                                  ? governorAdaptive
+                                      ? "GOVERNOR BYPASS  /  CROWD " + juce::String (observedCrowd)
+                                          + "  /  ACTIVE " + juce::String (scheduledActive)
+                                      : "ATTACKS PASS THROUGH  /  ACTIVE "
+                                          + juce::String (scheduledActive)
+                                  : governorAdaptive
+                                      ? "ADAPT  /  CROWD " + juce::String (observedCrowd)
+                                          + "  /  P" + juce::String (pending)
+                                          + "  A" + juce::String (scheduledActive)
+                                          + "  M" + juce::String (merged)
                                   : highLoad
                                       ? "HIGH LOAD  /  P" + juce::String (pending)
                                           + "  /  A" + juce::String (scheduledActive)
@@ -1484,7 +1592,9 @@ void AudienceEditor::updateLiveText()
     timeTelemetryLabel.setTooltip (loadDescription);
     timeTelemetryLabel.setDescription (loadDescription);
     timeTelemetryLabel.setColour (juce::Label::textColourId,
-                                  highLoad || mergeActivity ? cm::amber
+                                  liveTimeMode == 0 && governorAdaptive ? cm::textDim
+                                  : highLoad || mergeActivity ? cm::amber
+                                  : governorAdaptive ? cm::cyan
                                   : pending > 0 ? cm::violet : cm::textMuted);
 
     const bool listening = proc.osc.isRunning() && proc.osc.isReceiving();

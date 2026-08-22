@@ -1,3 +1,4 @@
+#include "../Source/AdaptiveCrowdGovernor.h"
 #include "../Source/CrowdTimeField.h"
 #include "../Source/MidiAudienceModel.h"
 #include "../Source/MpeMidiOutput.h"
@@ -58,6 +59,58 @@ namespace
                 return true;
         }
         return false;
+    }
+
+    int countOutputType (const CrowdTimeField::OutputBlock& output,
+                         CrowdTimeField::OutputEvent::Type type)
+    {
+        int count = 0;
+        for (int index = 0; index < output.count; ++index)
+            count += output.events[(size_t) index].type == type ? 1 : 0;
+        return count;
+    }
+
+    int makeMidiEvents (
+        const CrowdTimeField::OutputBlock& scheduled,
+        std::array<MpeMidiOutput::NoteEvent,
+                   CrowdTimeField::kMaxOutputEvents>& midiEvents)
+    {
+        int count = 0;
+        for (int index = 0; index < scheduled.count; ++index)
+        {
+            const auto& source = scheduled.events[(size_t) index];
+            auto& destination = midiEvents[(size_t) count++];
+            destination.sourceId = source.voiceId;
+            destination.participantId = source.sourceId;
+            destination.sampleOffset = source.sampleOffset;
+            destination.frequencyHz = frequencyForSource(source.sourceId);
+            destination.velocity = 0.8f;
+            destination.x = 0.5f;
+            destination.y = 0.8f;
+
+            switch (source.type)
+            {
+                case CrowdTimeField::OutputEvent::Type::Attack:
+                    destination.type = MpeMidiOutput::NoteEvent::NoteOn;
+                    break;
+                case CrowdTimeField::OutputEvent::Type::Release:
+                    destination.type = MpeMidiOutput::NoteEvent::NoteOff;
+                    break;
+                case CrowdTimeField::OutputEvent::Type::SampleMotion:
+                    destination.type = MpeMidiOutput::NoteEvent::Expression;
+                    break;
+            }
+        }
+        return count;
+    }
+
+    CrowdTimeField::ClockFrame integrationFrame (double ppq, int numSamples)
+    {
+        auto frame = frameAt(ppq);
+        frame.sampleRate = 1000.0;
+        frame.numSamples = numSamples;
+        frame.monotonicSeconds = ppq * 0.5;
+        return frame;
     }
 }
 
@@ -269,6 +322,228 @@ int main()
                mode == CrowdTimeField::Mode::Flow
                    ? "watchdog Off closes the source-owned channel in Flow"
                    : "watchdog Off closes the source-owned channel in timed Grid");
+    }
+
+    // A large audience selects the densest policy, while the effective active
+    // cap remains bounded by the available output-channel pool. Feed that exact
+    // recommendation into Grid to prove that it governs admissions rather than
+    // merely updating telemetry.
+    AdaptiveCrowdGovernor highCrowdGovernor;
+    AdaptiveCrowdGovernor::Config highCrowdGovernorConfig;
+    highCrowdGovernorConfig.voiceLimit = 15;
+    highCrowdGovernorConfig.promotionHoldSeconds = 0.0;
+    const auto highCrowd = highCrowdGovernor.update(
+        highCrowdGovernorConfig, { 200, 250, 0.0 });
+    expect(highCrowd.band == 4
+               && highCrowd.maxAttacksPerStep == 2
+               && highCrowd.spreadSlots == 16
+               && highCrowd.maxActive == 15,
+           "high crowd selects the densest profile within the MIDI voice cap");
+
+    {
+        CrowdTimeField governedField;
+        auto governedTiming = timing;
+        governedTiming.maxAttacksPerStep = highCrowd.maxAttacksPerStep;
+        governedTiming.maxActive = highCrowd.maxActive;
+        governedTiming.spreadSlots = highCrowd.spreadSlots;
+
+        std::array<CrowdTimeField::InputEvent, 16> crowdOns {};
+        for (int source = 1; source <= (int) crowdOns.size(); ++source)
+        {
+            auto& event = crowdOns[(size_t) (source - 1)];
+            event.type = CrowdTimeField::InputEvent::Type::On;
+            event.sourceId = source;
+            event.voiceId = CrowdTimeField::voiceIdFor(source, 0);
+        }
+
+        CrowdTimeField::OutputBlock governedOutput;
+        governedField.process(governedTiming, frameAt(0.24), crowdOns.data(),
+                              (int) crowdOns.size(), governedOutput);
+        expect(! governedOutput.resetRequested
+                   && countOutputType(governedOutput,
+                                      CrowdTimeField::OutputEvent::Type::Attack) == 2
+                   && governedOutput.activeCount == 2
+                   && governedOutput.pendingCount == 14,
+               "high-crowd attack recommendation controls real Grid admission");
+    }
+
+    // Exercise the complete Governor -> Time Field -> physical MIDI lifecycle.
+    // Start four owned channels under a dense policy, then let the Governor
+    // lower all three admission controls. Existing ownership must survive; a
+    // fifth participant waits until the population falls below the soft cap.
+    {
+        AdaptiveCrowdGovernor governor;
+        AdaptiveCrowdGovernor::Config governorConfig;
+        governorConfig.voiceLimit = 4;
+        governorConfig.riseSeconds = 0.05;
+        governorConfig.fallSeconds = 0.05;
+        governorConfig.promotionHoldSeconds = 0.0;
+        governorConfig.demotionHoldSeconds = 0.0;
+        governorConfig.demotionHysteresis = 0.0;
+        const auto dense = governor.update(governorConfig, { 200, 200, 0.0 });
+
+        CrowdTimeField governedField;
+        auto governedTiming = timing;
+        governedTiming.maxAttacksPerStep = dense.maxAttacksPerStep;
+        governedTiming.maxActive = dense.maxActive;
+        governedTiming.spreadSlots = dense.spreadSlots;
+
+        std::array<CrowdTimeField::InputEvent, 4> initialOns {};
+        for (int source = 1; source <= (int) initialOns.size(); ++source)
+        {
+            auto& event = initialOns[(size_t) (source - 1)];
+            event.type = CrowdTimeField::InputEvent::Type::On;
+            event.sourceId = source;
+            event.voiceId = CrowdTimeField::voiceIdFor(source, 0);
+        }
+
+        CrowdTimeField::OutputBlock scheduled;
+        governedField.process(governedTiming, integrationFrame(0.0, 126),
+                              initialOns.data(), (int) initialOns.size(), scheduled);
+        const bool fourStarted = ! scheduled.resetRequested
+                              && countOutputType(
+                                     scheduled,
+                                     CrowdTimeField::OutputEvent::Type::Attack) == 4
+                              && scheduled.activeCount == 4;
+
+        MpeMidiOutput governedMidi;
+        MpeMidiOutput::MpeConfig governedMidiConfig;
+        governedMidiConfig.outputType = 1;
+        governedMidiConfig.normalRoutingMode = 1;
+        std::array<MpeMidiOutput::NoteEvent,
+                   CrowdTimeField::kMaxOutputEvents> midiEvents {};
+        const int initialMidiCount = makeMidiEvents(scheduled, midiEvents);
+        juce::MidiBuffer initialMidi;
+        governedMidi.render(governedMidiConfig, midiEvents.data(),
+                            initialMidiCount, initialMidi, 126);
+        expect(fourStarted
+                   && hasPhysicalNote(initialMidi, true, 1)
+                   && hasPhysicalNote(initialMidi, true, 2)
+                   && hasPhysicalNote(initialMidi, true, 3)
+                   && hasPhysicalNote(initialMidi, true, 4),
+               "dense policy creates four stable participant-channel owners");
+
+        governorConfig.voiceLimit = 1;
+        const auto quiet = governor.update(governorConfig, { 0, 0, 1.0 });
+        governedTiming.maxAttacksPerStep = quiet.maxAttacksPerStep;
+        governedTiming.maxActive = quiet.maxActive;
+        governedTiming.spreadSlots = quiet.spreadSlots;
+        governedField.process(governedTiming, integrationFrame(0.252, 1),
+                              nullptr, 0, scheduled);
+
+        juce::MidiBuffer policyMidi;
+        const int policyMidiCount = makeMidiEvents(scheduled, midiEvents);
+        governedMidi.render(governedMidiConfig, midiEvents.data(),
+                            policyMidiCount, policyMidi, 1);
+        expect(quiet.band == 0
+                   && quiet.maxAttacksPerStep == 4
+                   && quiet.spreadSlots == 1
+                   && quiet.maxActive == 1
+                   && ! scheduled.resetRequested
+                   && scheduled.activeCount == 4
+                   && countOutputType(
+                        scheduled,
+                        CrowdTimeField::OutputEvent::Type::Release) == 0
+                   && ! hasPhysicalNote(policyMidi, false, 1)
+                   && ! hasPhysicalNote(policyMidi, false, 2)
+                   && ! hasPhysicalNote(policyMidi, false, 3)
+                   && ! hasPhysicalNote(policyMidi, false, 4),
+               "lower Governor policy changes are soft and never cut owned channels");
+
+        CrowdTimeField::InputEvent newcomer;
+        newcomer.type = CrowdTimeField::InputEvent::Type::On;
+        newcomer.sourceId = 5;
+        newcomer.voiceId = CrowdTimeField::voiceIdFor(5, 0);
+        governedField.process(governedTiming, integrationFrame(0.254, 1),
+                              &newcomer, 1, scheduled);
+        const bool queuedAboveCap = ! scheduled.resetRequested
+                                 && scheduled.activeCount == 4
+                                 && scheduled.pendingCount == 1
+                                 && countOutputType(
+                                      scheduled,
+                                      CrowdTimeField::OutputEvent::Type::Attack) == 0;
+
+        auto releaseSource = [&] (int source, double ppq,
+                                  juce::MidiBuffer& rendered)
+        {
+            CrowdTimeField::InputEvent release;
+            release.type = CrowdTimeField::InputEvent::Type::Off;
+            release.sourceId = source;
+            release.voiceId = CrowdTimeField::voiceIdFor(source, 0);
+            governedField.process(governedTiming, integrationFrame(ppq, 1),
+                                  &release, 1, scheduled);
+            const int count = makeMidiEvents(scheduled, midiEvents);
+            governedMidi.render(governedMidiConfig, midiEvents.data(), count,
+                                rendered, 1);
+        };
+
+        juce::MidiBuffer canonicalOffMidi;
+        releaseSource(3, 0.256, canonicalOffMidi);
+        expect(queuedAboveCap
+                   && hasPhysicalNote(canonicalOffMidi, false, 3),
+               "canonical Off still releases its stored channel under Governor control");
+
+        juce::MidiBuffer releaseOne;
+        juce::MidiBuffer releaseTwo;
+        releaseSource(1, 0.258, releaseOne);
+        releaseSource(2, 0.260, releaseTwo);
+        expect(! scheduled.resetRequested
+                   && scheduled.activeCount == 1
+                   && scheduled.pendingCount == 1
+                   && countOutputType(
+                        scheduled,
+                        CrowdTimeField::OutputEvent::Type::Attack) == 0,
+               "new attack remains pending while active population equals the lowered cap");
+
+        juce::MidiBuffer releaseFour;
+        releaseSource(4, 0.262, releaseFour);
+        const bool underCap = scheduled.activeCount == 0
+                           && scheduled.pendingCount == 1;
+        governedField.process(governedTiming, integrationFrame(0.264, 119),
+                              nullptr, 0, scheduled);
+        juce::MidiBuffer admittedMidi;
+        const int admittedCount = makeMidiEvents(scheduled, midiEvents);
+        governedMidi.render(governedMidiConfig, midiEvents.data(), admittedCount,
+                            admittedMidi, 119);
+        expect(underCap && ! scheduled.resetRequested
+                   && countOutputType(
+                        scheduled,
+                        CrowdTimeField::OutputEvent::Type::Attack) == 1
+                   && scheduled.activeCount == 1
+                   && scheduled.pendingCount == 0
+                   && hasPhysicalNote(admittedMidi, true, 5),
+               "pending participant enters on its original channel once below cap");
+    }
+
+    // Flow is explicitly outside the Governor's timing policy. Even if a caller
+    // supplies the densest recommendation, all lifecycle transitions still pass
+    // immediately instead of being capped or queued.
+    {
+        CrowdTimeField flowField;
+        auto flowTiming = timing;
+        flowTiming.mode = CrowdTimeField::Mode::Flow;
+        flowTiming.maxAttacksPerStep = highCrowd.maxAttacksPerStep;
+        flowTiming.maxActive = highCrowd.maxActive;
+        flowTiming.spreadSlots = highCrowd.spreadSlots;
+        std::array<CrowdTimeField::InputEvent, 16> flowOns {};
+        for (int source = 1; source <= (int) flowOns.size(); ++source)
+        {
+            auto& event = flowOns[(size_t) (source - 1)];
+            event.type = CrowdTimeField::InputEvent::Type::On;
+            event.sourceId = source;
+            event.voiceId = CrowdTimeField::voiceIdFor(source, 0);
+            event.sampleOffset = source - 1;
+        }
+
+        CrowdTimeField::OutputBlock flowOutput;
+        flowField.process(flowTiming, frameAt(0.0), flowOns.data(),
+                          (int) flowOns.size(), flowOutput);
+        expect(! flowOutput.resetRequested
+                   && countOutputType(flowOutput,
+                                      CrowdTimeField::OutputEvent::Type::Attack) == 16
+                   && flowOutput.activeCount == 16
+                   && flowOutput.pendingCount == 0,
+               "Flow bypasses Governor admission limits and preserves immediate lifecycle");
     }
 
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";

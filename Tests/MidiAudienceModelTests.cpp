@@ -189,6 +189,31 @@ int main()
                "stationary simulator touch is not enrolled in the live OSC watchdog");
     }
 
+    // Governor participation uses a rolling unique-source window rather than
+    // only the instantaneous held count. Any valid live packet refreshes that
+    // source, releases remain visible for eight seconds, and simulator-only
+    // sources do not masquerade as network audience history.
+    {
+        OscFingerRouter recentRouter;
+        MidiAudienceModel recentModel(recentRouter, &fakeMonotonicClock);
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        recentModel.setLiveFingerX(0, 3, 0, 0.2f);
+        recentModel.setLiveFingerOn(0, 7, 0, true);
+        recentModel.setLiveFingerOn(0, 7, 0, false);
+        recentModel.setFingerOn(0, 9, 0, true);
+
+        const bool initial = recentModel.getRecentLiveSourceCount() == 2
+                          && recentModel.getActiveSourceCount() == 1;
+        fakeNowMs.store(8099, std::memory_order_relaxed);
+        const bool beforeBoundary = recentModel.getRecentLiveSourceCount() == 2;
+        fakeNowMs.store(8100, std::memory_order_relaxed);
+        const bool atBoundary = recentModel.getRecentLiveSourceCount() == 0;
+        recentModel.clear();
+        expect(initial && beforeBoundary && atBoundary
+                   && recentModel.getRecentLiveSourceCount() == 0,
+               "recent live-source window is unique, exact and simulator-independent");
+    }
+
     // Live OSC starts tracking explicitly. Refresh packets preserve the touch,
     // the exact 3 s boundary expires it, and the synthetic Off is ordered.
     {

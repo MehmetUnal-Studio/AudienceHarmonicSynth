@@ -345,6 +345,63 @@ int main()
     }
 
     {
+        auto state = makeState(6);
+        addParam(state, "maxAttacksPerStep", 11.0f);
+        addParam(state, "maxActiveVoices", 9.0f);
+        addParam(state, "temporalSpread", 4.0f);
+        CosmicStateMigration::migrate(state);
+
+        expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
+                       == CosmicStateMigration::currentSchema
+                   && sameValue(valueOf(state, "crowdGovernorEnabled"), 0.0f),
+               "schema-6 sessions migrate with Adaptive Crowd Governor disabled");
+        expect(sameValue(valueOf(state, "maxAttacksPerStep"), 11.0f)
+                   && sameValue(valueOf(state, "maxActiveVoices"), 9.0f)
+                   && sameValue(valueOf(state, "temporalSpread"), 4.0f),
+               "Governor migration preserves manual crowd-control parameters");
+
+        const int childCount = state.getNumChildren();
+        CosmicStateMigration::migrate(state);
+        expect(state.getNumChildren() == childCount
+                   && countParams(state, "crowdGovernorEnabled") == 1
+                   && sameValue(valueOf(state, "crowdGovernorEnabled"), 0.0f),
+               "schema-7 Governor migration is idempotent");
+    }
+
+    {
+        auto state = makeState(6);
+        addParam(state, "crowdGovernorEnabled", 1.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "crowdGovernorEnabled"), 0.0f),
+               "pre-schema-7 state cannot silently enable the Governor");
+    }
+
+    {
+        auto state = makeState(7);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "crowdGovernorEnabled"), 1.0f)
+                   && countParams(state, "crowdGovernorEnabled") == 1,
+               "partial schema-7 state receives the new-instance Governor default");
+    }
+
+    {
+        auto state = makeState(7);
+        addParam(state, "crowdGovernorEnabled",
+                 std::numeric_limits<float>::quiet_NaN());
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "crowdGovernorEnabled"), 1.0f),
+               "non-finite schema-7 Governor state recovers its safe default");
+    }
+
+    {
+        auto state = makeState(7);
+        addParam(state, "crowdGovernorEnabled", -100.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "crowdGovernorEnabled"), 0.0f),
+               "finite hostile Governor state clamps to a valid bool value");
+    }
+
+    {
         auto state = makeState();
         state.setProperty("cosmicMicrowaveSchema",
                           std::numeric_limits<double>::quiet_NaN(), nullptr);
@@ -360,6 +417,7 @@ int main()
         addParam(state, "timeMode", 2.0f);
         addParam(state, "timeGateEnabled", 0.4f);
         addParam(state, "timeGateRateHz", 99.0f);
+        addParam(state, "crowdGovernorEnabled", 17.0f);
         const int childrenBefore = state.getNumChildren();
         CosmicStateMigration::migrate(state);
         expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
@@ -368,6 +426,7 @@ int main()
                    && sameValue(valueOf(state, "timeMode"), 2.0f)
                    && sameValue(valueOf(state, "timeGateEnabled"), 0.4f)
                    && sameValue(valueOf(state, "timeGateRateHz"), 99.0f)
+                   && sameValue(valueOf(state, "crowdGovernorEnabled"), 17.0f)
                    && ! CosmicStateMigration::containsParameter(state, "timeGateWaveform"),
                "future schemas are not destructively downgraded");
     }

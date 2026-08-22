@@ -5,6 +5,7 @@
 #include <memory>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "AdaptiveCrowdGovernor.h"
 #include "AtomicScaleCatalog.h"
 #include "AtomicScaleMap.h"
 #include "CrowdTimeField.h"
@@ -109,6 +110,30 @@ public:
     {
         return timeFieldClockLocked.load(std::memory_order_relaxed);
     }
+    int getGovernorRecentSourceCount() const noexcept
+    {
+        return governorRecentSourceCount.load(std::memory_order_relaxed);
+    }
+    int getGovernorObservedDensity() const noexcept
+    {
+        return governorObservedDensity.load(std::memory_order_relaxed);
+    }
+    int getGovernorEffectiveAttacksPerStep() const noexcept
+    {
+        return governorEffectiveAttacks.load(std::memory_order_relaxed);
+    }
+    int getGovernorEffectiveActiveVoices() const noexcept
+    {
+        return governorEffectiveActive.load(std::memory_order_relaxed);
+    }
+    int getGovernorEffectiveSpreadSlots() const noexcept
+    {
+        return governorEffectiveSpread.load(std::memory_order_relaxed);
+    }
+    int getGovernorBand() const noexcept
+    {
+        return governorBand.load(std::memory_order_relaxed);
+    }
     int getMidiOutputOptionIndex() const noexcept { return midiOutputOptionIndex.load(std::memory_order_relaxed); }
     int getResolvedMidiOutputOptionIndex();
     uint32_t getMidiOutputRouteRevision() const noexcept { return midiOutputRouteRevision.load(std::memory_order_acquire); }
@@ -184,6 +209,10 @@ private:
     MidiPitchMap pitchMap;
     AtomicScaleMap atomicPitchMap;
     CrowdTimeField crowdTimeField;
+    AdaptiveCrowdGovernor adaptiveCrowdGovernor;
+    double governorLastUpdateSeconds = 0.0;
+    bool governorControlClockInitialised = false;
+    int governorLastVoiceLimit = 16;
     bool retriggerFingerMidi = false;
     int fingerRetriggerCursor = 0;
     bool pitchMapChangedThisBlock = false;
@@ -249,9 +278,6 @@ private:
     int lastTimeMode = 2;
     int lastClockSource = 0;
     int lastGridDivision = 2;
-    int lastMaxAttacksPerStep = 4;
-    int lastMaxActiveVoices = 16;
-    int lastTemporalSpread = 2;
     float lastInternalBpm = 120.0f;
     float lastGatePercent = 70.0f;
 
@@ -260,6 +286,12 @@ private:
     std::atomic<int> timeFieldActive { 0 };
     std::atomic<uint32_t> timeFieldMerged { 0 };
     std::atomic<bool> timeFieldClockLocked { false };
+    std::atomic<int> governorRecentSourceCount { 0 };
+    std::atomic<int> governorObservedDensity { 0 };
+    std::atomic<int> governorEffectiveAttacks { 4 };
+    std::atomic<int> governorEffectiveActive { 8 };
+    std::atomic<int> governorEffectiveSpread { 1 };
+    std::atomic<int> governorBand { 0 };
 
     int lastScaleRootPitchClass = -1;
     int lastScaleRootOctave = -1;
@@ -301,6 +333,7 @@ private:
         std::atomic<float>* maxActiveVoices = nullptr;
         std::atomic<float>* gatePercent = nullptr;
         std::atomic<float>* temporalSpread = nullptr;
+        std::atomic<float>* crowdGovernorEnabled = nullptr;
     } rawParams;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceProcessor)

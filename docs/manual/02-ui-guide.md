@@ -12,13 +12,13 @@ all visible controls are MIDI-only.
 
 ```
 +--------------------------------------------------------------------------+
-| COSMIC MICROWAVE   MIDI ONLY   v2.3.1   SOURCES | TOUCHES | NOTES | MPE VOICES |
+| COSMIC MICROWAVE   MIDI ONLY   v2.4.0   SOURCES | TOUCHES | NOTES | MPE VOICES |
 +----------------------+------------------------+--------------------------+
 | OSC INPUT            | SOURCE ROUTING         | SIMULATOR                |
 +----------------------+------------------------+--------------------------+
 | SOURCE MATRIX                  | TIME FIELD           | PITCH MAPPING    |
 | 256 IDs / 16 channel columns   | Flow/Grid/Ensemble   +------------------+
-|                                | clock/density/gate   | MIDI ROUTING     |
+|                                | Manual/Adaptive      | MIDI ROUTING     |
 |                                | live P/A/M           +------------------+
 |                                |                      | MIDI OUTPUT      |
 +-------------------------------------------------------+------------------+
@@ -31,7 +31,7 @@ the routing controls stay together in the right column.
 
 The header identifies the device as **COSMIC MICROWAVE**, labels its role as
 **OSC / MIDI ROUTING**, shows a **MIDI ONLY** badge, and permanently displays the
-build-derived product version (for example **v2.3.1**). Four live metrics appear on
+build-derived product version (for example **v2.4.0**). Four live metrics appear on
 the right:
 
 - **SOURCES** - OSC or simulator source IDs with an active `finger0` touch.
@@ -127,10 +127,12 @@ system while keeping every source's single-touch lifecycle intact.
   Attacks receive a fixed gate; a source that remains held is queued for a later pulse.
   This is the default for new sessions.
 
-New 2.3.1 sessions use **Ensemble**, **Host**, **1/16**, four attacks per step, an active
-limit of 16, a 70% gate, and a four-step spread. MPE can use only 15 member channels,
-so its effective active limit is 15 even if the control reads 16. State saved before
-schema 4 opens in **Flow**, avoiding an unexpected timing change in an older set.
+New 2.4.0 sessions use **Ensemble**, **Host**, **1/16**, a 70% gate, and **Adaptive**
+crowd policy. The preserved Manual values begin at four attacks per step, an active
+limit of 16, and a four-step spread. MPE can use only 15 member channels, so its
+effective active limit is always capped at 15. State saved with schema 6 or earlier
+opens in **Manual**; state saved before schema 4 additionally opens in **Flow**. These
+migration rules avoid changing the established timing of an older set.
 
 ### CLOCK and DIVISION
 
@@ -155,6 +157,38 @@ when Internal clocking is selected in a timed mode.
 - **SPREAD / STEPS** (`1`, `2`, `4`, `8`, or `16`) defines Ensemble's lane cycle.
   Grid uses the base division directly.
 
+### Manual / Adaptive Crowd Governor
+
+The pill in the TIME FIELD header is the single policy switch:
+
+- **Manual** uses the saved or automated **ATTACKS / STEP**, **ACTIVE LIMIT**, and
+  **SPREAD / STEPS** controls.
+- **Adaptive** replaces those three control readouts with their current effective
+  `AUTO` values. Their Manual values remain stored and are restored exactly when you
+  switch back. **GATE** stays Manual in both policies.
+
+Adaptive uses the larger of the current held-source count and the number of unique live
+OSC sources active during the preceding eight seconds. It selects these inclusive
+bands:
+
+| Observed sources | Attacks / step | Spread / steps | Active voices |
+|---:|---:|---:|---:|
+| 0-8 | 4 | 1 | 8 |
+| 9-24 | 4 | 2 | 10 |
+| 25-64 | 3 | 4 | 12 |
+| 65-128 | 2 | 8 | 14 |
+| 129-256 | 2 | 16 | 16 |
+
+The active result is capped at 15 in MPE. A fast rising and slow falling density
+envelope, transition holds, and downward hysteresis stop short gaps or boundary jitter
+from making the policy flicker. The Governor applies only in Grid and Ensemble; Flow
+shows it as bypassed and keeps direct timing.
+
+These are soft admission changes. A lower recommendation controls future attacks but
+does not stop a voice already sounding. Spread changes preserve pending opportunities,
+and ordered Off, the live-source watchdog, and Panic always pass through their safety
+paths.
+
 In Ensemble, the instance's UDP port supplies a stable phase seed for the lane map.
 Zones that reuse the same source IDs on different ports are therefore decorrelated
 instead of all attacking on the same host tick. A pending short tap remains eligible
@@ -167,6 +201,9 @@ The compact status reports clock lock, effective BPM/division, and:
 - **P / PENDING** - lifecycle attacks waiting for a permitted grid/lane boundary.
 - **A / ACTIVE** - currently sounding Time Field voices.
 - **M / MERGED** - scheduled work coalesced or expired after it could not be admitted.
+
+With Adaptive selected, the status also shows the recent unique-source load and the
+effective attack, active, and spread values. In Flow it reports **GOVERNOR BYPASS**.
 
 MERGED is cumulative telemetry for judging crowd pressure; it is not converted into a
 MIDI CC or any other musical control. In every mode, incoming U/V bursts update one
@@ -279,8 +316,8 @@ a sender disconnect, a routing change, or any suspected missing `off` packet.
 2. Set the instance's UDP port, for example `6060` for Zone A and `6061` for Zone B.
 3. Choose **Normal MIDI -> Per source 1-16** for channel-separated routing, or choose
    **MPE MIDI** for per-note expression.
-4. Leave **Ensemble / Host / 1/16** for the starting crowd-control preset, or use
-   Flow while checking the raw end-to-end route.
+4. Leave **Ensemble / Host / 1/16 / Adaptive** for the starting crowd-control preset,
+   or use Flow while checking the raw end-to-end route.
 5. Select the port-named virtual destination for the clearest Ableton routing.
 6. Confirm the observed zone, Time Field status, source count, activity map, and
    destination status; then test **PANIC** before the audience connects.

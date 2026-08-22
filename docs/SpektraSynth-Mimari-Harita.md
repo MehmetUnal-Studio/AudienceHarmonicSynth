@@ -1,6 +1,6 @@
-# Cosmic Microwave 2.3.1 Mimari Harita
+# Cosmic Microwave 2.4.0 Mimari Harita
 
-Bu belge, `AudienceHarmonicSynth` hedefinin güncel 2.3.1 kaynak sınırına göre yeniden
+Bu belge, `AudienceHarmonicSynth` hedefinin güncel 2.4.0 kaynak sınırına göre yeniden
 yazılmıştır. Eski SpektraSynth mimarisinin ses üretim yolu artık bayrak ürünün çalışma
 zamanına dahil değildir. Hangi dosyanın ürüne dahil olduğunu belirleyen otorite
 `CMakeLists.txt` içindeki `target_sources(AudienceHarmonicSynth ...)` listesidir.
@@ -54,6 +54,7 @@ Source/PluginProcessor.cpp
 Source/PluginStateMigration.cpp
 Source/MpeMidiOutput.cpp
 Source/PluginEditor.cpp
+Source/AdaptiveCrowdGovernor.cpp
 Source/AtomicScaleMap.cpp
 Source/AtomicScaleCatalog.cpp
 Source/CrowdTimeField.cpp
@@ -73,12 +74,13 @@ veya dosya-formatı modülü yoktur.
 | Bileşen | Sorumluluk | Ana dosya |
 |---|---|---|
 | `AudienceProcessor` | APVTS, process lifecycle, MIDI thru, pitch map, touch durumu, Normal/MPE render, host/harici çıkış, state migration. | `PluginProcessor.*` |
-| `CosmicStateMigration` | Released 1.x'den schema 6'ya kadar state'leri güvenli taşıma; eski state'lerde Time Field'ı Flow açma. | `PluginStateMigration.*` |
+| `CosmicStateMigration` | Released 1.x'den schema 7'ye kadar state'leri güvenli taşıma; eski state'lerde Flow/Manual uyumluluğu. | `PluginStateMigration.*` |
 | `AudienceEditor` | MIDI-only kontrol ve izleme arayüzü. | `PluginEditor.*` |
 | `OscBridge` | Paylaşımlı UDP listener, strict OSC parse/validation, immediate-bundle policy, değer clamp ve zone/traffic telemetrisi. | `OscBridge.*`, `OscWireFormat.h` |
 | `MidiAudienceModel` | 256 source için atomic UI/control snapshot, aktif `finger0` maskesi ve 3 saniyelik live-touch watchdog. | `MidiAudienceModel.*` |
 | `OscFingerRouter` | Ayrı lifecycle/motion FIFO'ları, On/Off önceliği ve latest U/V coalescing ile audio thread'e sabit kapasiteli aktarım. | `OscFingerRouter.*` |
 | `CrowdTimeField` | Flow/Grid/Ensemble scheduling, host/monotonic clock çözümü, fairness, lane, gate ve telemetry. | `CrowdTimeField.*` |
+| `AdaptiveCrowdGovernor` | Son 8 saniyelik benzersiz live source ile held source yoğunluğunu yumuşatıp Grid/Ensemble admission profilini seçme. | `AdaptiveCrowdGovernor.*` |
 | `MidiPitchMap` | Yedi tonal 12-TET tablo ve normalize X lookup. | `MidiPitchMap.*` |
 | `AtomicScaleCatalog` | 29 element x 5 density için immutable, önceden üretilmiş degree katalogu. | `AtomicScaleCatalog.*`, `AtomicScaleCatalogData.h` |
 | `AtomicScaleMap` | En fazla 128 degree/768 pitch-step içeren exact-frequency lookup. | `AtomicScaleMap.*` |
@@ -97,6 +99,9 @@ OSC UDP callback                          Simulator / UI thread
            lifecycle FIFO + latest U/V FIFO
                             |
                     AUDIO PROCESS BLOCK
+                            |
+             AdaptiveCrowdGovernor policy
+                  (Grid / Ensemble only)
                             |
                     CrowdTimeField
                  Flow / Grid / Ensemble
@@ -127,19 +132,22 @@ audio buffer     -> sessiz uyumluluk çıkışı
    `PositionInfo` üzerinden host BPM/PPQ/transport durumunu örnekler.
 2. APVTS raw pointer değerlerinden Time Field ve Tonal `MidiPitchMap`
    veya Atomic `AtomicScaleMap` konfigürasyonunu günceller.
-3. MIDI protokolü/kanal/zone/route değişimlerini karşılaştırır.
-4. Gerekirse safety reset üretir ve aktif OSC touch'larını yeniden kurmak üzere
+3. Held source ile son 8 saniyelik unique live source sayısının maksimumunu
+   `AdaptiveCrowdGovernor` üzerinden geçirir; Adaptive ve timed mode seçiliyse soft
+   attack/active/spread politikasını Time Field config'e uygular.
+4. MIDI protokolü/kanal/zone/route değişimlerini karşılaştırır.
+5. Gerekirse safety reset üretir ve aktif OSC touch'larını yeniden kurmak üzere
    retrigger işaretler.
-5. Audio buffer'ı sessizler, host MIDI output buffer'ını yeniden kullanıma hazırlar.
-6. Output açıksa host MIDI input'u değişmeden geçirir.
-7. Bir block'ta en fazla `min(64, max(1, block sample sayısı))` OSC lifecycle event'i
+6. Audio buffer'ı sessizler, host MIDI output buffer'ını yeniden kullanıma hazırlar.
+7. Output açıksa host MIDI input'u değişmeden geçirir.
+8. Bir block'ta en fazla `min(64, max(1, block sample sayısı))` OSC lifecycle event'i
    drain eder. Flow hareket event'lerini doğrudan işler; Grid/Ensemble yalnız On/Off'u
    scheduler'a verir ve güncel U/V snapshot'ını grid sınırlarında örnekler.
-8. `CrowdTimeField`, direct veya sample-offset'li Attack/Release/SampleMotion istekleri
+9. `CrowdTimeField`, direct veya sample-offset'li Attack/Release/SampleMotion istekleri
    üretir.
-9. Touch state değişimlerini `MpeMidiOutput::NoteEvent` dizisine çevirir.
-10. Normal MIDI veya MPE mesajlarını host buffer'a yazar.
-11. Aynı kısa MIDI mesajlarını seçilmiş harici endpoint için FIFO'ya kopyalar.
+10. Touch state değişimlerini `MpeMidiOutput::NoteEvent` dizisine çevirir.
+11. Normal MIDI veya MPE mesajlarını host buffer'a yazar.
+12. Aynı kısa MIDI mesajlarını seçilmiş harici endpoint için FIFO'ya kopyalar.
 
 ## 6. Kimlik modeli
 
@@ -318,10 +326,42 @@ yapmaz.
 | Grid | Attack'i seçili division sınırına kuyruğa alır; fair cursor ile pending voice seçer; attacks/step ve active limit uygular. Held note ordered Off ile, admission alan kısa tap minimum gate ile bırakılır. |
 | Ensemble | Source'u spread içindeki deterministik lane'e koyar, fixed gate uygular ve hâlâ held olan voice'u sonraki pulse için yeniden pending yapar. |
 
-Yeni 2.3.1 instance varsayılanları Ensemble, Host, 1/16, step başına 4 attack, 16 aktif,
-%70 gate ve 4 spread slotudur. MPE seçildiğinde efektif aktif limit 15'e clamp edilir;
-çünkü Lower/Upper zone yalnız 15 member channel sağlar. Schema 4 öncesi session'lara
-Flow eklenir ve böylece mevcut doğrudan timing grid'e taşınmaz.
+Yeni 2.4.0 instance varsayılanları Ensemble, Host, 1/16, %70 gate ve Adaptive Crowd
+Governor'dır. Manual değerler attack 4, active 16 ve spread 4 olarak saklanır. MPE
+seçildiğinde her efektif aktif limit 15'e clamp edilir; çünkü Lower/Upper zone yalnız
+15 member channel sağlar. Schema 6 ve önceki session'lara Manual Governor atanır;
+schema 4 öncesi session'lara ayrıca Flow eklenir ve mevcut doğrudan timing grid'e
+taşınmaz.
+
+### Adaptive Crowd Governor
+
+Tek `crowdGovernorEnabled` bool parametresi UI'da **Manual / Adaptive** anahtarıdır.
+Governor'ın observed density tanımı:
+
+```text
+density = max(current_held_sources, unique_live_sources_in_last_8_seconds)
+```
+
+Inclusive profil tablosu:
+
+| Source | Attack/step | Spread | Active |
+|---:|---:|---:|---:|
+| 0-8 | 4 | 1 | 8 |
+| 9-24 | 4 | 2 | 10 |
+| 25-64 | 3 | 4 | 12 |
+| 65-128 | 2 | 8 | 14 |
+| 129-256 | 2 | 16 | 16 |
+
+MPE'de Active sonucu 15'e clamp edilir. Density envelope 0.5 saniyede hızlı yükselir,
+6 saniyede yavaş düşer; 0.5 saniyelik promotion hold, 4 saniyelik demotion hold ve
+%20 aşağı hysteresis band chatter'ını bastırır.
+
+Governor sadece Grid/Ensemble config'inde gelecekteki admission'ı etkiler; Flow bypass
+eder. `maxAttacksPerStep`, `maxActive` ve `spreadSlots` değişimi clock-domain reset
+değildir. Daha düşük active önerisi çalan voice'u kesmez; spread büyümesi pending
+deadline'ları en az yeni lane cycle'a uzatır. Ordered Off, üç saniyelik watchdog ve
+Panic hiçbir zaman governor tarafından engellenmez. Gate ve APVTS'deki Manual üçlü
+değişmeden kalır; Manual'a dönüldüğünde saklanan/automated değerler geri gelir.
 
 ### Clock domain
 
@@ -466,6 +506,7 @@ isteğini message timer'a yayınlar.
 | `maxActiveVoices` | 1..16 | 16; MPE efektif en fazla 15 |
 | `gatePercent` | %5..100 | %70 |
 | `temporalSpread` | 1 / 2 / 4 / 8 / 16 | 4 |
+| `crowdGovernorEnabled` | Manual / Adaptive | Adaptive |
 | `pitchSystem` | Tonal / Atomic | Atomic |
 | `scaleRoot` | C..B | C |
 | `scaleRootOctave` | 0..6 | 2 |
@@ -478,7 +519,7 @@ ValueTree ek alanları:
 
 - `udpPort` (6060)
 - `midiOutputOption` (Host)
-- `cosmicMicrowaveSchema` (6)
+- `cosmicMicrowaveSchema` (7)
 
 Eski state migration:
 
@@ -493,8 +534,11 @@ Eski state migration:
   `atomicScaleMode` değerleri korunur;
 - schema-4 Time Field parametreleri olmayan tüm eski state'lere Flow, Host, 120 BPM,
   1/16, attack 4, active 16, gate %70 ve spread 4 eklenir;
-- schema-5 state kabul edilir; kaldırılmış deneysel alanları atılır ve yeni state
-  schema 6 olarak damgalanır;
+- schema-5 state kabul edilir ve kaldırılmış deneysel alanları atılır;
+- schema 6 ve daha eski state'lere Manual Governor atanır; mevcut attack, active,
+  spread, gate, clock ve mode değerleri değiştirilmez;
+- yeni/partial schema-7 state Adaptive varsayımını alır ve yeni state schema 7 olarak
+  damgalanır;
 - bozuk/non-finite choice değerleri güvenli sınırlara clamp edilir;
 - UDP port ve destination'ın dış dünyaya etkisi message timer üzerinden uygulanır.
 
@@ -505,14 +549,15 @@ Eski state migration:
 
 Görünür modüller:
 
-- Header: build'den türetilen kalıcı versiyon etiketi (`v2.3.1`), SOURCES, TOUCHES,
+- Header: build'den türetilen kalıcı versiyon etiketi (`v2.4.0`), SOURCES, TOUCHES,
   NOTES, MPE VOICES;
 - OSC INPUT;
 - SOURCE ROUTING + observed zones;
 - SIMULATOR;
 - 256-source / 16-channel SOURCE MATRIX;
-- TIME FIELD: Flow/Grid/Ensemble, Host/Internal, BPM/division, attack/active limit,
-  gate/spread ve PENDING/ACTIVE/MERGED telemetry;
+- TIME FIELD: Flow/Grid/Ensemble, Host/Internal, BPM/division, tek Manual/Adaptive
+  anahtarı, manual veya efektif attack/active/spread, gate ve
+  PENDING/ACTIVE/MERGED telemetry;
 - PITCH MAPPING: Tonal/Atomic selector, ortak root/octave/range ve moda göre
   Scale veya Element/Density;
 - Normal/MPE mode-specific MIDI ROUTING;
@@ -523,7 +568,7 @@ doğrudan dokunmaz. Source map hücreleri seçim kontrolü değil, read-only gö
 
 ## 14. Test kapsamı
 
-CMake on beş CTest hedefi tanımlar:
+CMake on altı CTest hedefi tanımlar:
 
 | Test | Kapsam |
 |---|---|
@@ -539,9 +584,10 @@ CMake on beş CTest hedefi tanımlar:
 | `AudienceAtomicScaleMapTests` | Fixed exact-frequency map, 768-step sınırı ve hostile numeric input. |
 | `AudienceAtomicScaleCatalogTests` | 29x5 generated katalog bütünlüğü, metadata ve mode cap'leri. |
 | `AudienceAtomicMidiIntegrationTests` | Atomic exact-frequency map'in Normal/MPE renderer ile entegrasyonu. |
+| `AudienceAdaptiveCrowdGovernorTests` | Beş exact profil, smoothing, hysteresis, MPE cap, hostile input, reset ve allocation-free update. |
 | `AudienceCrowdTimeFieldTests` | Flow/Grid/Ensemble, host/internal/fallback clock, fairness, lane seed, short tap, gate, overflow, reset/rehydrate. |
 | `AudienceCrowdMidiIntegrationTests` | Host PPQ sample offset'i ve timed path içinde değişmeyen source-channel ownership. |
-| `AudiencePluginStateMigrationTests` | Released channel/scale formatı, schema-2 Tonal, schema-4 Flow, schema-5 giriş uyumluluğu, schema-6 stamp, clamp ve idempotence. |
+| `AudiencePluginStateMigrationTests` | Released channel/scale formatı, schema-2 Tonal, schema-4 Flow, schema-5 cleanup, schema-6 Manual Governor, schema-7 stamp, clamp ve idempotence. |
 
 Önemli kalan entegrasyon boşlukları:
 
@@ -580,22 +626,23 @@ CMake on beş CTest hedefi tanımlar:
 - Simulator source aralığını konfigüre edilebilir bir test namespace'ine taşımak.
 - Plugin validation ve farklı hostlarda MIDI-output lifecycle matrisi.
 
-## 16. 2.3.1 yükseltme notu
+## 16. 2.4.0 yükseltme notu
 
 1. Eski VST3 bundle'ını scanned plugin klasörü dışına yedekle.
-2. Cosmic Microwave 2.3.1'i kur ve host'u rescan et.
+2. Cosmic Microwave 2.4.0'ı kur ve host'u rescan et.
 3. Önce Ableton set'in bir kopyasını aç.
 4. Her instance için UDP port, Time Field/clock, MIDI Format, source
    routing, destination, Pitch System ve Tonal/Atomic map'i doğrula.
 5. MIDI alan instrument track'lerini kur; bayrak ürünün kendisi ses üretmez.
 6. Audience server bağlanmadan önce Simulator, her channel ve Panic'i test et.
 
-Yeni session'lar Ensemble / Host / 1/16, attack 4, active 16 (MPE'de 15), gate %70,
-spread 4 ve Atomic / Helium / Extended açılır. Schema 3 ve daha eski session'lar Time
-Field için Flow alır. Schema-5 state içindeki kaldırılmış deneysel alanlar yükseltmede
-atılır; yeni state schema 6 olarak damgalanır. Önceki schema-2 Tonal ve released 1.x Atomic
-migration kuralları korunur. Atomic MPE kullanılıyorsa receiver bend range performans
-öncesi yeniden doğrulanmalıdır.
+Yeni session'lar Ensemble / Host / 1/16, Adaptive Governor, gate %70 ve Atomic / Helium /
+Extended açılır. Manual politika attack 4, active 16 (MPE'de 15) ve spread 4 olarak
+saklanır. Schema 6 ve eski session'lar mevcut davranışı korumak için Manual alır;
+schema 3 ve daha eski session'lar ayrıca Time Field için Flow alır. Schema-5 içindeki
+kaldırılmış deneysel alanlar yükseltmede atılır; yeni state schema 7 olarak damgalanır.
+Önceki schema-2 Tonal ve released 1.x Atomic migration kuralları korunur. Atomic MPE
+kullanılıyorsa receiver bend range performans öncesi yeniden doğrulanmalıdır.
 
 Kullanıcı akışları için `docs/manual/README.md`, ayrıntılı İngilizce teknik referans
 için kökteki `WIKI.md` kullanılmalıdır.

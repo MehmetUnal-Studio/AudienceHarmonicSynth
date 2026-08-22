@@ -10,7 +10,7 @@ class identity for old-session recall and must not be installed side by side.
 
 ## Cosmic Microwave itself makes no sound
 
-That is expected in version 2.3.1. Cosmic Microwave is an OSC-to-MIDI router with a
+That is expected in version 2.4.0. Cosmic Microwave is an OSC-to-MIDI router with a
 silent stereo instrument shell. It must feed a sound-producing instrument or hardware
 receiver.
 
@@ -50,13 +50,31 @@ Check **TIME FIELD -> MODE**:
 - **Ensemble** assigns the source to a spread lane, applies a fixed gate, and queues a
   still-held source touch for another pulse.
 
-New 2.3.1 sessions intentionally default to Ensemble. Use Flow when diagnosing raw
-sender timing. Projects saved before state schema 4 migrate to Flow, so opening an old
-set does not silently quantize it.
+New 2.4.0 sessions intentionally default to Ensemble with Adaptive policy. Use Flow
+when diagnosing raw sender timing. Projects saved before state schema 4 migrate to
+Flow, so opening an old set does not silently quantize it.
 
-If too few notes begin, inspect **PENDING**, lower the spread or division, raise
-**ATTACKS / STEP**, or raise **ACTIVE LIMIT**. In MPE, the effective active limit is
-always at most 15 even if the saved control reads 16.
+If too few notes begin in Adaptive, inspect its effective `AUTO` values and recent
+source count. Switch to Manual before lowering spread or raising **ATTACKS / STEP** and
+**ACTIVE LIMIT**. In MPE, the effective active limit is always at most 15 even if the
+saved control reads 16.
+
+## Adaptive changes after people stop touching
+
+This is intentional. Adaptive uses the larger of currently held sources and unique
+live OSC sources seen during the previous eight seconds. Its density rises quickly but
+falls slowly, with transition holds and hysteresis, so a brief collective pause does
+not immediately collapse the musical texture. The displayed profile can therefore
+remain above the current held count for a while.
+
+Adaptive changes future admission in Grid and Ensemble only. It never releases an
+already sounding voice, replaces an ordered Off, suppresses the three-second watchdog,
+or blocks Panic. Flow bypasses the Governor. Select Manual when fixed attacks, active
+limit, and spread are required; the plugin preserves those Manual values while
+Adaptive is active.
+
+Projects saved by schema 6 or earlier intentionally open in Manual so an update cannot
+change an established performance. Only a new 2.4.0 instance defaults to Adaptive.
 
 ## The Time Field says WAIT instead of LOCK
 
@@ -293,16 +311,18 @@ note-off messages.
 
 ### Why did a new session open on Helium / Extended?
 
-Cosmic Microwave 2.3.1 intentionally defaults new sessions to **Atomic / Helium /
+Cosmic Microwave 2.4.0 intentionally defaults new sessions to **Atomic / Helium /
 Extended**. Choose **Tonal** for the seven conventional 12-TET maps. The historical
 schema-2 migration still selects Tonal, while released 1.x element/spectral choices
 migrate to Atomic and recover their corresponding element. Separately, schema-3 and
-older state receives Flow for the Time Field. Schema-5 input remains compatible;
-schema 6 discards its retired experimental fields during upgrade.
+older state receives Flow for the Time Field. Schema-5 input remains compatible and
+its retired experimental fields are discarded. Schema-6-or-earlier state receives
+Manual Governor mode without altering its saved Time Field controls; new state uses
+schema 7.
 
 ### What happened to the previous sound-generation controls?
 
-They were removed from the 2.0 flagship and remain absent in 2.3.1. Old repositories may
+They were removed from the 2.0 flagship and remain absent in 2.4.0. Old repositories may
 retain archival media or implementation files, but the current flagship target neither
 compiles nor loads them.
 

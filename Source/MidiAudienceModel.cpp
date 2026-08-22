@@ -74,8 +74,11 @@ void MidiAudienceModel::setLiveFingerX (
         1u << static_cast<unsigned int>(finger));
     const juce::SpinLock::ScopedLockType lock(producerLock);
     auto& state = sources[(size_t) sourceId];
+    const auto now = monotonicClock();
+    state.lastLiveSourceActivityMs.store(now, std::memory_order_release);
+    state.hasLiveSourceActivity.store(true, std::memory_order_release);
     if ((state.liveTrackedFingerMask.load(std::memory_order_acquire) & bit) != 0)
-        state.liveActivityMs[(size_t) finger].store(monotonicClock(),
+        state.liveActivityMs[(size_t) finger].store(now,
                                                      std::memory_order_release);
     setFingerXLocked(sourceId, finger, clampNormalized(xNorm));
 }
@@ -90,8 +93,11 @@ void MidiAudienceModel::setLiveFingerY (
         1u << static_cast<unsigned int>(finger));
     const juce::SpinLock::ScopedLockType lock(producerLock);
     auto& state = sources[(size_t) sourceId];
+    const auto now = monotonicClock();
+    state.lastLiveSourceActivityMs.store(now, std::memory_order_release);
+    state.hasLiveSourceActivity.store(true, std::memory_order_release);
     if ((state.liveTrackedFingerMask.load(std::memory_order_acquire) & bit) != 0)
-        state.liveActivityMs[(size_t) finger].store(monotonicClock(),
+        state.liveActivityMs[(size_t) finger].store(now,
                                                      std::memory_order_release);
     setFingerYLocked(sourceId, finger, clampNormalized(yNorm));
 }
@@ -106,10 +112,13 @@ void MidiAudienceModel::setLiveFingerOn (
         1u << static_cast<unsigned int>(finger));
     const juce::SpinLock::ScopedLockType lock(producerLock);
     auto& state = sources[(size_t) sourceId];
+    const auto now = monotonicClock();
+    state.lastLiveSourceActivityMs.store(now, std::memory_order_release);
+    state.hasLiveSourceActivity.store(true, std::memory_order_release);
 
     if (on)
     {
-        state.liveActivityMs[(size_t) finger].store(monotonicClock(),
+        state.liveActivityMs[(size_t) finger].store(now,
                                                      std::memory_order_release);
         state.liveTrackedFingerMask.fetch_or(bit, std::memory_order_acq_rel);
     }
@@ -271,6 +280,8 @@ void MidiAudienceModel::clear() noexcept
             value.store(0.0f, std::memory_order_relaxed);
         for (auto& value : source.liveActivityMs)
             value.store(0, std::memory_order_relaxed);
+        source.lastLiveSourceActivityMs.store(0, std::memory_order_relaxed);
+        source.hasLiveSourceActivity.store(false, std::memory_order_release);
         source.activeFingerMask.store(0, std::memory_order_release);
         source.liveTrackedFingerMask.store(0, std::memory_order_release);
     }
@@ -327,6 +338,27 @@ int MidiAudienceModel::getActiveFingerCount() const noexcept
 int MidiAudienceModel::getLastActiveSourceId() const noexcept
 {
     return lastActiveSourceId.load(std::memory_order_acquire);
+}
+
+int MidiAudienceModel::getRecentLiveSourceCount (std::uint32_t windowMs) const noexcept
+{
+    if (windowMs == 0)
+        return 0;
+
+    windowMs = juce::jmin(windowMs, std::uint32_t { 0x7fffffffu });
+    const auto now = monotonicClock();
+    int count = 0;
+    for (const auto& source : sources)
+    {
+        if (! source.hasLiveSourceActivity.load(std::memory_order_acquire))
+            continue;
+
+        const auto last = source.lastLiveSourceActivityMs.load(
+            std::memory_order_acquire);
+        if (static_cast<std::uint32_t>(now - last) < windowMs)
+            ++count;
+    }
+    return count;
 }
 
 void MidiAudienceModel::setMotionEventForwardingEnabled (bool enabled) noexcept

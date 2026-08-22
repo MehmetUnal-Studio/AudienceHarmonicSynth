@@ -18,6 +18,7 @@ public:
     static constexpr int MAX_SOURCES = OscFingerRouter::MAX_SOURCES;
     static constexpr int MAX_FINGERS = OscFingerRouter::MAX_FINGERS;
     static constexpr std::uint32_t liveTouchTimeoutMs = 3000;
+    static constexpr std::uint32_t recentSourceWindowMs = 8000;
     using MonotonicClock = std::uint32_t (*)() noexcept;
 
     struct SourceSnapshot
@@ -69,6 +70,13 @@ public:
     int getActiveFingerCount() const noexcept;
     int getLastActiveSourceId() const noexcept;
 
+    // Message/control-thread crowd telemetry. A live source remains recent for
+    // a short window after release so brief, asynchronous taps still represent
+    // the audience size seen by the Adaptive Crowd Governor. Simulator-held
+    // sources are represented separately by getActiveSourceCount().
+    int getRecentLiveSourceCount (
+        std::uint32_t windowMs = recentSourceWindowMs) const noexcept;
+
     // Flow forwards every motion packet for the legacy immediate response.
     // Timed modes disable forwarding and sample the canonical latest-value
     // ledger instead, preventing high-rate U/V traffic from filling the FIFO.
@@ -90,6 +98,8 @@ private:
         std::array<std::atomic<float>, MAX_FINGERS> fingerX;
         std::array<std::atomic<float>, MAX_FINGERS> fingerY;
         std::array<std::atomic<std::uint32_t>, MAX_FINGERS> liveActivityMs;
+        std::atomic<std::uint32_t> lastLiveSourceActivityMs { 0 };
+        std::atomic<bool> hasLiveSourceActivity { false };
         std::atomic<std::uint16_t> activeFingerMask { 0 };
         std::atomic<std::uint16_t> liveTrackedFingerMask { 0 };
     };

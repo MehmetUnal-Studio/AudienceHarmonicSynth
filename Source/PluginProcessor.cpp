@@ -175,6 +175,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
         ParameterID("temporalSpread", 1), "Temporal Spread",
         StringArray { "1", "2", "4", "8", "16" }, 2));
 
+    layout.add(std::make_unique<AudioParameterBool>(
+        ParameterID("crowdGovernorEnabled", 1), "Adaptive Crowd Governor", true));
+
     layout.add(std::make_unique<AudioParameterChoice>(
         ParameterID("pitchSystem", 1), "Pitch System",
         StringArray { "Tonal", "Atomic" }, 1));
@@ -235,6 +238,7 @@ void AudienceProcessor::cacheParameterPointers()
     rawParams.maxActiveVoices = apvts.getRawParameterValue("maxActiveVoices");
     rawParams.gatePercent = apvts.getRawParameterValue("gatePercent");
     rawParams.temporalSpread = apvts.getRawParameterValue("temporalSpread");
+    rawParams.crowdGovernorEnabled = apvts.getRawParameterValue("crowdGovernorEnabled");
 }
 
 void AudienceProcessor::prepareToPlay (double sampleRate, int)
@@ -260,6 +264,15 @@ void AudienceProcessor::prepareToPlay (double sampleRate, int)
     mpeOut.reset();
     mpeOut.markSetupDirty();
     crowdTimeField.reset();
+    adaptiveCrowdGovernor.reset();
+    governorLastUpdateSeconds = 0.0;
+    governorControlClockInitialised = false;
+    governorLastVoiceLimit = 16;
+    governorObservedDensity.store(0, std::memory_order_relaxed);
+    governorEffectiveAttacks.store(4, std::memory_order_relaxed);
+    governorEffectiveActive.store(8, std::memory_order_relaxed);
+    governorEffectiveSpread.store(1, std::memory_order_relaxed);
+    governorBand.store(0, std::memory_order_relaxed);
     timeFieldRehydratePending = true;
     retriggerFingerMidi = true;
     fingerRetriggerCursor = 0;
@@ -462,7 +475,50 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // a mid-block automation write switch routing without the matching safety
     // reset, corrupting normal-note refcounts or MPE channel ownership.
     const auto midiConfig = buildMpeConfig();
-    const auto timeConfig = buildTimeFieldConfig(midiConfig);
+    auto timeConfig = buildTimeFieldConfig(midiConfig);
+    const auto clockFrame = captureTimeFieldClock(buffer.getNumSamples(),
+                                                   externalBlockStartTimeMs * 0.001);
+    AdaptiveCrowdGovernor::Config governorConfig;
+    governorConfig.voiceLimit = midiConfig.outputType == 2 ? 15 : 16;
+    auto governorOutput = adaptiveCrowdGovernor.getOutput();
+    constexpr double governorControlPeriodSeconds = 0.1;
+    const bool governorClockMovedBack = governorControlClockInitialised
+                                     && clockFrame.monotonicSeconds
+                                          < governorLastUpdateSeconds;
+    const bool governorUpdateDue = ! governorControlClockInitialised
+                                || governorClockMovedBack
+                                || clockFrame.monotonicSeconds
+                                     - governorLastUpdateSeconds
+                                       >= governorControlPeriodSeconds
+                                || governorConfig.voiceLimit != governorLastVoiceLimit;
+    if (governorUpdateDue)
+    {
+        governorOutput = adaptiveCrowdGovernor.update(
+            governorConfig,
+            { audienceModel.getActiveSourceCount(),
+              governorRecentSourceCount.load(std::memory_order_acquire),
+              clockFrame.monotonicSeconds });
+        governorLastUpdateSeconds = clockFrame.monotonicSeconds;
+        governorControlClockInitialised = true;
+        governorLastVoiceLimit = governorConfig.voiceLimit;
+    }
+    governorEffectiveAttacks.store(governorOutput.maxAttacksPerStep,
+                                   std::memory_order_relaxed);
+    governorObservedDensity.store(governorOutput.observedDensity,
+                                  std::memory_order_relaxed);
+    governorEffectiveActive.store(governorOutput.maxActive,
+                                  std::memory_order_relaxed);
+    governorEffectiveSpread.store(governorOutput.spreadSlots,
+                                  std::memory_order_relaxed);
+    governorBand.store(governorOutput.band, std::memory_order_relaxed);
+
+    const bool governorEnabled = rawParamBool(rawParams.crowdGovernorEnabled, true);
+    if (governorEnabled && timeConfig.mode != CrowdTimeField::Mode::Flow)
+    {
+        timeConfig.maxAttacksPerStep = governorOutput.maxAttacksPerStep;
+        timeConfig.maxActive = governorOutput.maxActive;
+        timeConfig.spreadSlots = governorOutput.spreadSlots;
+    }
     const int midiType = midiConfig.outputType;
     const int routingMode = midiConfig.normalRoutingMode;
     const int normalChannel = midiConfig.normalMidiChannel;
@@ -474,13 +530,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const int clockSource = static_cast<int>(timeConfig.clockSource);
     const float internalBpm = static_cast<float>(timeConfig.internalBpm);
     const int gridDivision = static_cast<int>(timeConfig.division);
-    const int maxAttacks = timeConfig.maxAttacksPerStep;
-    const int maxActive = timeConfig.maxActive;
     const float gatePercent = static_cast<float>(timeConfig.gatePercent);
-    const int temporalSpread = timeConfig.spreadSlots <= 1 ? 0
-                             : timeConfig.spreadSlots <= 2 ? 1
-                             : timeConfig.spreadSlots <= 4 ? 2
-                             : timeConfig.spreadSlots <= 8 ? 3 : 4;
     const bool routeChanged = midiOutputRouteChangedPending.exchange(false, std::memory_order_acq_rel);
 
     const bool midiConfigChanged = midiType != lastMidiOutputType
@@ -497,9 +547,6 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const bool anyTimeValueChanged = timeMode != lastTimeMode
                                   || clockSource != lastClockSource
                                   || gridDivision != lastGridDivision
-                                  || maxAttacks != lastMaxAttacksPerStep
-                                  || maxActive != lastMaxActiveVoices
-                                  || temporalSpread != lastTemporalSpread
                                   || internalTempoChanged
                                   || std::abs(gatePercent - lastGatePercent) > 1.0e-4f;
     const bool timeDomainChanged = anyTimeValueChanged
@@ -522,10 +569,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     lastClockSource = clockSource;
     lastInternalBpm = internalBpm;
     lastGridDivision = gridDivision;
-    lastMaxAttacksPerStep = maxAttacks;
-    lastMaxActiveVoices = maxActive;
     lastGatePercent = gatePercent;
-    lastTemporalSpread = temporalSpread;
 
     audienceModel.setMotionEventForwardingEnabled(timeMode == 0);
 
@@ -578,8 +622,6 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             output.addEvent(metadata.data, metadata.numBytes, metadata.samplePosition);
     }
 
-    const auto clockFrame = captureTimeFieldClock(buffer.getNumSamples(),
-                                                   externalBlockStartTimeMs * 0.001);
     renderOutgoingMidi(output, buffer.getNumSamples(), outputEnabled,
                        midiConfig, timeConfig, clockFrame, needsSafetyReset);
 #if COSMIC_MIDI_DIAGNOSTICS
@@ -1223,6 +1265,8 @@ void AudienceProcessor::timerCallback()
     // the editor is closed. Three missing 1 Hz phone heartbeats synthesize one
     // ordered Off, preventing a disconnected client from holding a note forever.
     audienceModel.expireStaleLiveTouches();
+    governorRecentSourceCount.store(
+        audienceModel.getRecentLiveSourceCount(), std::memory_order_release);
 
     int restoredPort = 6060;
     int restoredOutput = 0;
@@ -1550,6 +1594,16 @@ void AudienceProcessor::panic()
     releaseAllIncomingMidiNotes();
     audienceModel.clear();
     crowdTimeField.reset();
+    adaptiveCrowdGovernor.reset();
+    governorLastUpdateSeconds = 0.0;
+    governorControlClockInitialised = false;
+    governorLastVoiceLimit = 16;
+    governorRecentSourceCount.store(0, std::memory_order_release);
+    governorObservedDensity.store(0, std::memory_order_relaxed);
+    governorEffectiveAttacks.store(4, std::memory_order_relaxed);
+    governorEffectiveActive.store(8, std::memory_order_relaxed);
+    governorEffectiveSpread.store(1, std::memory_order_relaxed);
+    governorBand.store(0, std::memory_order_relaxed);
     timeFieldRehydratePending = true;
     // Drop packets produced before the panic while the audio producer is
     // quiescent. Otherwise an old NoteOn could be drained after the immediate

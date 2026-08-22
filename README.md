@@ -2,7 +2,7 @@
 
 Formerly named **SpektraSynth**.
 
-Version 2.3.1
+Version 2.4.0
 
 Cosmic Microwave is a JUCE VST3 and standalone OSC-to-MIDI router for
 audience interaction. It receives already-separated zone streams over UDP, keeps each
@@ -10,7 +10,7 @@ source's single-touch lifecycle intact, maps normalized movement through either 
 element-derived Atomic Scale pitch maps, and sends Normal MIDI or MPE to Ableton, a
 virtual MIDI endpoint, or a system MIDI device.
 
-Cosmic Microwave 2.3.1 is behaviourally MIDI-only: it does not generate sound. The VST3
+Cosmic Microwave 2.4.0 is behaviourally MIDI-only: it does not generate sound. The VST3
 keeps a silent stereo instrument shell, its existing class identity, and its instrument
 placement so Ableton sets made with the earlier product can still resolve the device.
 
@@ -69,7 +69,7 @@ density, root C2, and a four-octave range.
 
 ## Crowd Time Field
 
-Cosmic Microwave 2.3.1 can turn an asynchronous crowd into a shared rhythmic field
+Cosmic Microwave 2.4.0 can turn an asynchronous crowd into a shared rhythmic field
 without changing source identity or note ownership:
 
 | Mode | Behaviour |
@@ -78,11 +78,14 @@ without changing source identity or note ownership:
 | **Grid** | Queue attacks to the next selected musical division, with fair selection, an attacks-per-step limit, and an active-voice limit. Held notes release with their ordered Off; an admitted short tap receives the configured minimum gate. |
 | **Ensemble** | Place each source in a deterministic lane across the selected spread, apply a fixed gate, and requeue a still-held source for later pulses. |
 
-New sessions default to **Ensemble / Host / 1/16**, with **4 attacks per step**,
-**16 active voices**, **70% gate**, and a **4-step spread**. MPE has only 15 member
-channels, so its effective active limit is 15 even when the saved control reads 16.
-Sessions saved before state schema 4 migrate to **Flow**, preserving their immediate
-timing rather than silently quantizing an existing performance.
+New sessions default to **Ensemble / Host / 1/16** with the **Adaptive Crowd
+Governor** enabled and a **70% gate**. The Governor adjusts attack admission, active
+voice capacity, and temporal spread from audience density; the saved Manual values
+remain **4 attacks per step**, **16 active voices**, and a **4-step spread**. MPE has
+only 15 member channels, so every effective active limit is capped at 15. Sessions
+saved with schema 6 or earlier open in **Manual**, preserving their established Time
+Field settings. State saved before schema 4 also receives **Flow**, preserving its
+immediate timing rather than silently quantizing an existing performance.
 
 With **Host** selected, a playing host's tempo and PPQ timeline define the grid. If
 that clock is missing or the transport is stopped, the scheduler continues from a
@@ -97,6 +100,28 @@ Ensemble, the UDP port supplies a stable lane seed so different zone instances d
 all place the same source ID on the same tick. A pending short tap remains eligible for
 at least one complete lane cycle. **MERGED** is monitoring only: it counts scheduled
 work coalesced or expired under pressure and does not produce a MIDI CC.
+
+### Adaptive Crowd Governor
+
+The Time Field header has one **Manual / Adaptive** switch. Adaptive measures the
+larger of the currently held source count and the number of unique live sources seen
+in the previous eight seconds, then applies this deterministic policy in Grid and
+Ensemble:
+
+| Observed sources | Attacks / step | Spread / steps | Active voices |
+|---:|---:|---:|---:|
+| 0-8 | 4 | 1 | 8 |
+| 9-24 | 4 | 2 | 10 |
+| 25-64 | 3 | 4 | 12 |
+| 65-128 | 2 | 8 | 14 |
+| 129-256 | 2 | 16 | 16 |
+
+Density rises quickly and falls slowly, with transition holds and hysteresis to prevent
+rapid switching near a band edge. Policy changes are soft: they affect future admission
+only and never cut an existing voice, replace an ordered Off, suppress the three-second
+watchdog, or block Panic. Flow bypasses the policy completely. Switching to Manual
+restores the saved/automated attack, active-limit, and spread values; Adaptive never
+overwrites them.
 
 ## Pitch systems
 
@@ -175,14 +200,15 @@ instead of treating its member channels as independent source channels.
 
 The MIDI-only editor contains:
 
-- a permanent build-derived **v2.3.1** version label in the header;
+- a permanent build-derived **v2.4.0** version label in the header;
 - live **SOURCES**, **TOUCHES**, **NOTES**, and **MPE VOICES** metrics;
 - an **OSC INPUT** card with port and validated-traffic status;
 - a source-routing summary with observed zone letters;
 - a simulator for source-count and movement tests;
 - a 256-source **SOURCE MATRIX** grouped into 16 MIDI-channel columns;
 - a **TIME FIELD** card for Flow/Grid/Ensemble timing, host/internal clocking,
-  density limits, gate, spread, and live Pending/Active/Merged telemetry;
+  Manual/Adaptive crowd policy, density limits, gate, spread, and live
+  Pending/Active/Merged telemetry;
 - a Tonal/Atomic pitch system with element and density selection;
 - Normal MIDI and MPE routing controls;
 - host, virtual, and hardware destination selection; and
@@ -207,6 +233,7 @@ The MIDI-only editor contains:
 | Maximum Active Voices | 1..16 | 16 (effective 15 in MPE) |
 | Gate Length | 5..100% | 70% |
 | Temporal Spread | 1, 2, 4, 8, 16 steps | 4 steps |
+| Adaptive Crowd Governor | Manual, Adaptive | Adaptive |
 | Pitch System | Tonal, Atomic | Atomic |
 | Root | C..B | C |
 | Root Octave | 0..6 | 2 |
@@ -257,6 +284,7 @@ already-separated OSC zone / simulator
   -> OscBridge validation
   -> MidiAudienceModel (256 sources x one admitted live touch)
   -> OscFingerRouter fixed-capacity event queue
+  -> AdaptiveCrowdGovernor (soft Grid/Ensemble admission policy)
   -> CrowdTimeField
        -> Flow: direct lifecycle/motion
        -> Grid: clocked attack queue
@@ -288,10 +316,13 @@ bundle identity for existing session lookup. Do not keep `SpektraSynth.vst3` and
 same plugin class. Back up the old bundle outside the plugin folder, install Cosmic
 Microwave, and rescan the host.
 
-New 2.3.1 sessions open on Ensemble timing and Atomic / Helium / Extended pitch
-mapping. Existing state from schema 3 or earlier receives Flow timing, so upgrading
-does not move established attacks onto a grid. Schema-5 input remains compatible;
-schema 6 discards its retired experimental fields when the session is upgraded.
+New 2.4.0 sessions open on Ensemble timing with the Adaptive Crowd Governor enabled,
+plus Atomic / Helium / Extended pitch mapping. Existing state from schema 6 or earlier
+receives Manual Governor mode, preserving its saved attack, active-limit, and spread
+behaviour. State from schema 3 or earlier additionally receives Flow timing, so
+upgrading does not move established attacks onto a grid. Schema-5 input remains
+compatible; schema 6 discarded its retired experimental fields, and migrated state is
+now stamped as schema 7.
 Existing schema-2 MIDI-only sessions still
 migrate explicitly to Tonal so they keep their previous pitch-map intent.
 Released 1.x sessions that selected an element spectrum migrate to Atomic and recover
@@ -299,7 +330,7 @@ the corresponding element; their stable `spectralElement` and `atomicScaleMode`
 parameter values are retained.
 
 Repositories upgraded from pre-2.0 versions may still contain old media, preparation
-tools, or implementation files. The `AudienceHarmonicSynth` 2.3.1 target does not load
+tools, or implementation files. The `AudienceHarmonicSynth` 2.4.0 target does not load
 or compile them; `CMakeLists.txt` is the authoritative runtime source list.
 
 ## Manual

@@ -8,13 +8,14 @@ touch for each source ID, maps normalized X/Y controls through Tonal or Atomic S
 pitch maps and expression, and sends MIDI to Ableton, a virtual endpoint, or a system
 MIDI device.
 
-Version 2.3.1 does not generate sound. It remains a silent stereo instrument shell for
+Version 2.4.0 does not generate sound. It remains a silent stereo instrument shell for
 Ableton placement and old-session compatibility; the product's behaviour and editor
 are MIDI-only. Put sound-producing instruments after it or on receiving MIDI tracks.
 
-The **TIME FIELD** provides Flow, Grid, and Ensemble timing. New 2.3.1 sessions begin in
-Ensemble on a host-synced 1/16 grid; projects saved before schema 4 open in Flow so
-their earlier direct timing is preserved.
+The **TIME FIELD** provides Flow, Grid, and Ensemble timing. New 2.4.0 sessions begin in
+Ensemble on a host-synced 1/16 grid with the Adaptive Crowd Governor enabled. Projects
+saved with schema 6 or earlier open with Manual policy, and projects saved before
+schema 4 also open in Flow, preserving their established behaviour.
 
 ## Chapters
 
@@ -39,12 +40,13 @@ their earlier direct timing is preserved.
   Chapter 5 explains all density modes and the Normal-MIDI-versus-MPE pitch result.
 - **Connecting the audience server?** Chapter 4 documents the exact OSC address and
   normalized value contract.
-- **Taming asynchronous crowd timing?** Start with Ensemble's default 1/16 grid,
-  then tune attacks per step, active limit, gate, and spread in Chapters 2 and 4.
+- **Taming asynchronous crowd timing?** Start with Ensemble's default 1/16 grid and
+  Adaptive policy; switch to Manual when you want fixed attack, active-limit, and
+  spread values. Chapters 2 and 4 explain both approaches.
 - **No result?** Chapter 6 starts with the shortest routing checklist.
 
 ---
 
-*This manual documents the Cosmic Microwave 2.3.1 flagship VST3 and Standalone products.
+*This manual documents the Cosmic Microwave 2.4.0 flagship VST3 and Standalone products.
 Other MIDI-oriented targets in the repository have their own, more specialized UI and
 parameter sets.*

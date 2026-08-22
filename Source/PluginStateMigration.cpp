@@ -197,6 +197,18 @@ void migrate (juce::ValueTree& state)
     if (! containsParameter(state, "temporalSpread"))
         appendParameterValue(state, "temporalSpread", 2.0f);       // 4 slots
 
+    // Schema 7 adds the Adaptive Crowd Governor, enabled by default for new instances.
+    // Existing projects must retain their exact manual Time Field behaviour,
+    // so every state written by schema 6 or earlier explicitly starts with the
+    // Governor disabled. A partial schema-7 state uses the new-instance default.
+    if (! containsParameter(state, "crowdGovernorEnabled"))
+        appendParameterValue(state, "crowdGovernorEnabled", schema <= 6 ? 0.0f : 1.0f);
+    else if (schema <= 6)
+    {
+        auto governorEnabled = findParameterNode(state, "crowdGovernorEnabled");
+        writeNumericValue(governorEnabled, 0.0f);
+    }
+
     // State blobs are untrusted input. Clamp every choice touched by this
     // migration before APVTS publishes it to parameter atomics.
     const auto sanitizeChoice = [&state] (const char* id, int maximum, int fallback)
@@ -215,6 +227,7 @@ void migrate (juce::ValueTree& state)
     sanitizeChoice("clockSource", 1, 0);
     sanitizeChoice("gridDivision", 3, 2);
     sanitizeChoice("temporalSpread", 4, 2);
+    sanitizeChoice("crowdGovernorEnabled", 1, schema <= 6 ? 0 : 1);
 
     const auto sanitizeNumeric = [&state] (const char* id,
                                            float minimum, float maximum,

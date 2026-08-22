@@ -158,12 +158,44 @@ inside each zone instance.
 | **Grid** | Queue each new attack to the selected musical division. Admit at most the configured attacks per step and active voices, using a fair rotating search through pending identities. Held notes follow their ordered Off; admitted short taps receive a minimum gate. |
 | **Ensemble** | Assign each source to one of the spread lanes, start it only when that lane reaches a grid boundary, apply a fixed gate, and requeue it while the touch remains held. |
 
-New sessions default to **Ensemble / Host / 1/16**, **4 attacks per step**, **16 active
-voices**, **70% gate**, and **4 spread steps**. MPE's effective active limit is 15,
-because its Lower or Upper zone has 15 member channels. Session state from schema 3 or
-earlier migrates to **Flow**, preserving the direct timing of existing Ableton sets.
-Schema-5 input remains compatible; schema 6 discards its retired experimental fields
-during upgrade.
+New 2.4.0 sessions default to **Ensemble / Host / 1/16**, **70% gate**, and the
+**Adaptive Crowd Governor**. Its starting low-density policy is four attacks per step,
+eight active voices, and one spread step. MPE's effective active limit is always capped
+at 15 because its Lower or Upper zone has 15 member channels. Session state from
+schema 6 or earlier opens in Manual Governor mode without changing its saved policy.
+State from schema 3 or earlier additionally migrates to **Flow**, preserving the direct
+timing of existing Ableton sets. New state is schema 7.
+
+### Adaptive crowd policy
+
+The single **Manual / Adaptive** switch chooses whether the three density controls are
+fixed or crowd-aware. Adaptive computes:
+
+```text
+observed density = max(currently held sources,
+                       unique live sources seen in the last 8 seconds)
+```
+
+It then applies these inclusive profiles:
+
+| Sources | Attacks / step | Spread / steps | Active voices |
+|---:|---:|---:|---:|
+| 0-8 | 4 | 1 | 8 |
+| 9-24 | 4 | 2 | 10 |
+| 25-64 | 3 | 4 | 12 |
+| 65-128 | 2 | 8 | 14 |
+| 129-256 | 2 | 16 | 16 |
+
+The density envelope rises quickly, falls slowly, and uses transition holds plus
+downward hysteresis. This gives a newly arriving crowd capacity promptly without
+collapsing the texture during brief pauses or oscillating at a band boundary.
+
+Adaptive affects Grid and Ensemble only. Flow bypasses it. The selected profile is a
+soft policy for future admission: lowering a band never cuts an existing voice, and a
+spread change preserves pending opportunities. Ordered Off, the three-second
+live-touch watchdog, and Panic are never governed. Gate length remains Manual. The
+fixed Manual attack, active-limit, and spread values are stored untouched while
+Adaptive is selected and return exactly when Manual is selected again.
 
 ### Clock behaviour
 
@@ -260,8 +292,9 @@ Use this layout for each zone:
 1. Place one Cosmic Microwave instance on its own Ableton track.
 2. Set the instance's UDP port to the already-separated stream for that zone.
 3. Select **Normal MIDI** and **Per source 1-16**.
-4. For the starting crowd preset, leave **TIME FIELD** at **Ensemble / Host / 1/16**.
-   Use Flow when inspecting the sender's raw timing.
+4. For the starting crowd preset, leave **TIME FIELD** at
+   **Ensemble / Host / 1/16 / Adaptive**. Use Flow when inspecting the sender's raw
+   timing, or Manual when fixed limits are required.
 5. Under **DESTINATION**, select **Virtual: Cosmic Microwave <port> Out**.
 6. On receiving Ableton MIDI tracks, choose that virtual endpoint under **MIDI From**
    and select Channel 1, Channel 2, and so on.

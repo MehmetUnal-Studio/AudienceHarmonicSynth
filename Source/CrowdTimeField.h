@@ -193,11 +193,12 @@ private:
     static bool validIdentity (int voiceId, int sourceId) noexcept;
     static int clampedOffset (int sampleOffset, int numSamples) noexcept;
     static ResolvedClock resolveClock (const Config&, const ClockFrame&) noexcept;
-    static bool configsEqual (const Config&, const Config&) noexcept;
+    static bool domainConfigsEqual (const Config&, const Config&) noexcept;
 
     void clearVoiceState() noexcept;
     void adoptDomain (const Config&, const ResolvedClock&) noexcept;
     bool domainChanged (const Config&, const ResolvedClock&) const noexcept;
+    void applySoftPolicy (const Config&, const ResolvedClock&) noexcept;
     void updateClockHistory (const ResolvedClock&) noexcept;
 
     void processFlow (const ResolvedClock&, const InputEvent*, int,

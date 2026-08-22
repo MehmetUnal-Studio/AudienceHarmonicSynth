@@ -877,6 +877,87 @@ int main()
                "invalid voice ids never alias a valid source");
     }
 
+    // Admission controls are soft policy, not transport state. Lowering the
+    // active limit must preserve sounding ownership and merely stop admitting
+    // new attacks until the population falls below the new cap.
+    {
+        CrowdTimeField field;
+        auto config = configFor(CrowdTimeField::Mode::Grid);
+        config.maxAttacksPerStep = 4;
+        config.maxActive = 4;
+        auto frame = hostFrame(1000.0, 1);
+        std::array<CrowdTimeField::InputEvent, 4> held {};
+        for (int source = 0; source < 4; ++source)
+            held[(size_t) source] = input(
+                CrowdTimeField::InputEvent::Type::On, source, 0, 0);
+
+        CrowdTimeField::OutputBlock output;
+        field.process(config, frame, held.data(), (int) held.size(), output);
+        const bool started = countType(
+            output, CrowdTimeField::OutputEvent::Type::Attack) == 4
+                          && output.activeCount == 4;
+
+        frame = nextFrame(frame, 1);
+        config.maxAttacksPerStep = 1;
+        config.maxActive = 1;
+        field.process(config, frame, nullptr, 0, output);
+        const bool preserved = ! output.resetRequested
+                            && countType(output,
+                                 CrowdTimeField::OutputEvent::Type::Release) == 0
+                            && output.activeCount == 4;
+
+        frame = nextFrame(frame, 124);
+        const auto newcomer = input(
+            CrowdTimeField::InputEvent::Type::On, 4, 0, 0);
+        field.process(config, frame, &newcomer, 1, output);
+        expect(started && preserved && ! output.resetRequested
+                   && firstOffset(output,
+                       CrowdTimeField::OutputEvent::Type::Attack, 4) < 0
+                   && output.activeCount == 4 && output.pendingCount == 1,
+               "soft attack/active policy changes preserve sounding voices without reset");
+    }
+
+    // Growing Ensemble spread changes lane admission on the next grid tick but
+    // extends existing pending lifetime. The request must neither reset nor
+    // expire before its new lane receives an opportunity.
+    {
+        CrowdTimeField field;
+        auto config = configFor(CrowdTimeField::Mode::Ensemble);
+        config.maxAttacksPerStep = 1;
+        config.maxActive = 1;
+        config.gatePercent = 50.0;
+        config.spreadSlots = 1;
+        auto frame = hostFrame(1000.0, 1);
+        const auto first = input(
+            CrowdTimeField::InputEvent::Type::On, 0, 0, 0);
+        CrowdTimeField::OutputBlock output;
+        field.process(config, frame, &first, 1, output);
+        const bool firstStarted = firstOffset(
+            output, CrowdTimeField::OutputEvent::Type::Attack, 0) == 0;
+
+        frame = nextFrame(frame, 1);
+        const auto pending = input(
+            CrowdTimeField::InputEvent::Type::On, 1, 0, 0);
+        field.process(config, frame, &pending, 1, output);
+        const bool queued = ! output.resetRequested && output.pendingCount == 1;
+
+        frame = nextFrame(frame, 1);
+        config.spreadSlots = 16;
+        field.process(config, frame, nullptr, 0, output);
+        const bool spreadChanged = ! output.resetRequested
+                                && output.pendingCount == 1;
+
+        frame = nextFrame(frame, 123);
+        field.process(config, frame, nullptr, 0, output);
+        expect(firstStarted && queued && spreadChanged && ! output.resetRequested
+                   && firstOffset(output,
+                       CrowdTimeField::OutputEvent::Type::Release, 0) >= 0
+                   && firstOffset(output,
+                       CrowdTimeField::OutputEvent::Type::Attack, 1) >= 0
+                   && output.activeCount == 1,
+               "spread growth retains pending source through its new lane cycle");
+    }
+
     // Performance gate: empty and 16-active Grid states process realistic runs
     // of one-sample callbacks without any per-callback 2,560-voice scan.
     {

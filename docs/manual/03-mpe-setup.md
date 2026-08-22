@@ -19,7 +19,7 @@ In the **MIDI ROUTING** card, **OUTPUT** has three choices:
 - **MPE MIDI** - one member channel per active source touch, up to 15 simultaneous member
   channels.
 
-Cosmic Microwave 2.3.1 is always silent and MIDI-oriented.
+Cosmic Microwave 2.4.0 is always silent and MIDI-oriented.
 
 Incoming host MIDI is passed through unchanged whenever output is enabled. It is not
 quantized, remapped, or converted into MPE. Avoid routing a keyboard into the plugin if
@@ -144,10 +144,11 @@ When all 15 member channels are occupied, the oldest active MPE note receives a 
 release and its channel is assigned to the new source touch. The header's **MPE VOICES**
 metric shows the number of occupied member channels.
 
-The Time Field's **ACTIVE LIMIT** control reaches 16 so Normal MIDI can use all 16
-channels. In MPE mode Cosmic Microwave clamps the effective Time Field limit to 15,
-matching the available member-channel pool. This avoids scheduling a sixteenth voice
-only to steal one of the other 15 immediately.
+The Time Field's Manual **ACTIVE LIMIT** reaches 16 so Normal MIDI can use all 16
+channels. Adaptive policy also recommends up to 16 at its largest crowd band. In MPE
+mode Cosmic Microwave clamps either effective Time Field limit to 15, matching the
+available member-channel pool. This avoids scheduling a sixteenth voice only to steal
+one of the other 15 immediately.
 
 Flow sends OSC touch lifecycle and expression directly. Grid and Ensemble schedule
 OSC attacks, coalesce U/V bursts to the latest values sampled on musical boundaries,

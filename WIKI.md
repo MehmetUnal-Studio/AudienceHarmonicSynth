@@ -1,4 +1,4 @@
-# Cosmic Microwave 2.3.1 WIKI
+# Cosmic Microwave 2.4.0 WIKI
 
 > **A single-touch, zone-oriented OSC-to-MIDI router for audience interaction.**
 
@@ -6,7 +6,7 @@
 |---|---|
 | Product | Cosmic Microwave (formerly SpektraSynth) |
 | CMake project/target | `AudienceHarmonicSynth` |
-| Version | 2.3.1 |
+| Version | 2.4.0 |
 | Formats | VST3 + Standalone |
 | Framework | JUCE 8.0.4, C++17, CMake 3.22+ |
 | Runtime role | MIDI-only OSC router with a silent mono/stereo instrument output shell |
@@ -67,6 +67,8 @@ receiving Cosmic Microwave's MIDI.
   on musical boundaries.
 - Separate instances can share host PPQ or a process-wide monotonic clock; Ensemble
   uses the UDP port only as a lane-phase seed, never as a zone filter.
+- Adaptive crowd policy changes future Grid/Ensemble admission only. It cannot cut an
+  existing voice or interfere with ordered Off, watchdog release, or Panic.
 
 ## 2. Products and host identity
 
@@ -252,11 +254,13 @@ from `process()`.
 | Grid | Queue attacks to the base division, select pending identities fairly, and obey attacks-per-step and active limits. Held notes release on ordered Off; an admitted short tap receives a minimum gate. |
 | Ensemble | Restrict each source to one deterministic spread lane, apply a fixed gate, and requeue a still-held voice after release. |
 
-New 2.3.1 instances default to **Ensemble**, **Host**, **1/16**, four attacks per step,
-16 active voices, 70% gate, and four spread slots. `AudienceProcessor` caps the
-effective Time Field active count at 15 in MPE mode because Lower and Upper zones each
-have 15 member channels. Serialized state from schema 3 or earlier receives Flow, so
-an existing session retains its direct timing.
+New 2.4.0 instances default to **Ensemble**, **Host**, **1/16**, 70% gate, and the
+**Adaptive Crowd Governor**. The saved Manual policy remains four attacks per step,
+16 active voices, and four spread slots. `AudienceProcessor` caps every effective
+Time Field active count at 15 in MPE mode because Lower and Upper zones each have 15
+member channels. Serialized state from schema 6 or earlier receives Manual Governor
+mode, preserving its exact saved timing policy. State from schema 3 or earlier also
+receives Flow, retaining direct timing.
 
 ### 5.2 Clock resolution
 
@@ -307,6 +311,37 @@ priority over best-effort motion output.
 The editor exposes Pending, Active, and Merged. Merged is a saturating monitoring count
 for scheduled work that was coalesced or expired after missing admission capacity. It
 does not emit a CC, Crowd Energy message, or other MIDI event.
+
+### 5.5 Adaptive Crowd Governor
+
+One **Manual / Adaptive** switch selects the policy. Adaptive observes:
+
+```text
+density = max(currently held sources,
+              unique live sources active during the previous 8 seconds)
+```
+
+It maps that bounded `0..256` density to the following inclusive bands:
+
+| Sources | Attacks / step | Spread / steps | Active voices |
+|---:|---:|---:|---:|
+| 0-8 | 4 | 1 | 8 |
+| 9-24 | 4 | 2 | 10 |
+| 25-64 | 3 | 4 | 12 |
+| 65-128 | 2 | 8 | 14 |
+| 129-256 | 2 | 16 | 16 |
+
+An MPE configuration clamps the final active recommendation to 15. Density has a fast
+rise and slow fall, plus promotion/demotion holds and 20% downward hysteresis, so brief
+dropouts and boundary jitter do not repeatedly switch profiles.
+
+Adaptive operates only in Grid and Ensemble. Flow keeps its direct path and reports the
+Governor as bypassed. Profile changes are soft admission-policy updates: lowering the
+active limit does not release a voice that already sounds, and spread changes retain
+pending scheduling opportunities. Ordered Off, the three-second live-touch watchdog,
+and Panic always retain authority. Gate remains the saved Manual setting. Adaptive
+also leaves all three Manual policy values untouched, so returning to Manual restores
+their saved or automated values exactly.
 
 ## 6. Normal MIDI and MPE
 
@@ -413,7 +448,8 @@ PluginProcessor.cpp      PluginEditor.cpp
 PluginStateMigration.cpp AtomicScaleCatalog.cpp
 AtomicScaleMap.cpp       MidiPitchMap.cpp
 MpeMidiOutput.cpp        MidiAudienceModel.cpp
-CrowdTimeField.cpp       OscFingerRouter.cpp
+AdaptiveCrowdGovernor.cpp CrowdTimeField.cpp
+OscFingerRouter.cpp
 Simulator.cpp
 OscBridge.cpp
 ```
@@ -433,6 +469,8 @@ OSC UDP callback                         Simulator / UI thread
              lifecycle FIFO (8192) + latest U/V FIFO (8192)
                            |
                     audio processBlock
+                           |
+          AdaptiveCrowdGovernor (Grid/Ensemble policy)
                            |
              CrowdTimeField (Flow / Grid / Ensemble)
                            |
@@ -459,11 +497,12 @@ host MIDI in -> preserved scratch -> unchanged thru when output enabled
 | Class | Responsibility |
 |---|---|
 | `AudienceProcessor` | APVTS, process lifecycle, pitch configuration, input MIDI thru, OSC touch state, safety resets, host/external MIDI routing, state migration. |
-| `CosmicStateMigration` | Schema-aware, bounded restoration through schema 6, including Flow timing for older sessions. |
+| `CosmicStateMigration` | Schema-aware, bounded restoration through schema 7, including Flow timing and Manual Governor compatibility for older sessions. |
 | `OscBridge` | Shared UDP receiver, wire validation, value decoding/clamping, traffic and zone telemetry. |
 | `MidiAudienceModel` | Atomic 256-source UI/control state and single-touch hand-off. |
 | `OscFingerRouter` | Separate fixed lifecycle and latest-motion queues; lifecycle-first draining, U/V coalescing, epochs, and reset-on-lifecycle-overflow recovery. |
 | `CrowdTimeField` | Allocation-free host/monotonic clock resolution, pending admission, fair Grid scheduling, port-seeded Ensemble lanes, gates, and telemetry. |
+| `AdaptiveCrowdGovernor` | Allocation-free density smoothing, hysteretic band selection, and soft Grid/Ensemble admission recommendations. |
 | `MidiPitchMap` | Seven fixed-capacity tonal tables and normalized-X lookup. |
 | `AtomicScaleCatalog` | Immutable 29-element x 5-mode generated degree catalog and fixed-map lookup. |
 | `AtomicScaleMap` | Fixed 128-degree/768-step Atomic pitch projection with exact-frequency metadata. |
@@ -516,7 +555,7 @@ message timer performs device I/O outside the host's processing callback.
 
 The flagship editor is resizable (`1120 x 640` default, `900 x 560` minimum). It has:
 
-- a permanent build-derived version label (for example `v2.3.1`) beside the MIDI-only
+- a permanent build-derived version label (for example `v2.4.0`) beside the MIDI-only
   product identity;
 - header metrics for active sources, active touches, emitted note count, and occupied
   MPE member channels;
@@ -525,7 +564,8 @@ The flagship editor is resizable (`1120 x 640` default, `900 x 560` minimum). It
 - simulator controls;
 - a 16-column x 16-row **SOURCE MATRIX** covering all 256 IDs;
 - a **TIME FIELD** card for mode, clock, BPM/division, attacks per step, active limit,
-  gate, spread, and Pending/Active/Merged status;
+  gate, spread, one Manual/Adaptive switch, effective Adaptive values, and
+  Pending/Active/Merged status;
 - Tonal/Atomic selector; shared root, octave, and range; Tonal scale or Atomic
   element/density controls;
 - mode-specific Normal MIDI or MPE controls;
@@ -536,7 +576,7 @@ wrapped source IDs; source 0 is the final cell in the Channel 16 column. Active-
 position follows the source's latest X/Y snapshot.
 
 The editor exposes no internal diagnostics panel. Internal MIDI rings still support
-tests and processor diagnostic text methods, but they are not part of the 2.3.1 visible
+tests and processor diagnostic text methods, but they are not part of the 2.4.0 visible
 UI contract.
 
 ## 10. Parameters and state
@@ -560,6 +600,7 @@ UI contract.
 | `maxActiveVoices` | Maximum Active Voices | 1..16 | 16; effective maximum 15 in MPE |
 | `gatePercent` | Gate Length | 5..100% | 70% |
 | `temporalSpread` | Temporal Spread | 1 / 2 / 4 / 8 / 16 | 4 |
+| `crowdGovernorEnabled` | Adaptive Crowd Governor | Manual / Adaptive | Adaptive |
 | `pitchSystem` | Pitch System | Tonal / Atomic | Atomic |
 | `scaleRoot` | Root | C..B | C |
 | `scaleRootOctave` | Root Octave | 0..6 | 2 |
@@ -574,7 +615,7 @@ The APVTS ValueTree also stores:
 
 - `udpPort` (default 6060);
 - `midiOutputOption` (default Host MIDI Output); and
-- `cosmicMicrowaveSchema` (current schema 6).
+- `cosmicMicrowaveSchema` (current schema 7).
 
 `setStateInformation` replaces the APVTS parameter tree, while UDP-port and destination
 side effects are deferred to the message timer. Migration preserves released state
@@ -591,8 +632,11 @@ contracts:
   `spectralElement` and `atomicScaleMode` choices;
 - supplies Flow plus safe timing defaults to any state that lacks schema-4 Time Field
   parameters;
-- accepts schema-5 input, discards its retired experimental fields, and stamps newly
-  saved state as schema 6; and
+- accepts schema-5 input and discards its retired experimental fields;
+- assigns Manual Governor mode to every schema-6-or-earlier session without changing
+  its saved attack, active-limit, spread, gate, clock, or timing mode values;
+- defaults new and partial schema-7 state to Adaptive, and stamps newly saved state as
+  schema 7; and
 - clamps malformed or non-finite choice state to safe bounds.
 
 ## 11. Build and tests
@@ -632,9 +676,10 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 | `AudienceAtomicScaleMapTests` | Allocation-free fixed map, exact-frequency projection, range bounds, and hostile numeric input. |
 | `AudienceAtomicScaleCatalogTests` | 29 x 5 generated catalog integrity, mode caps, metadata, and map parity. |
 | `AudienceAtomicMidiIntegrationTests` | Atomic map exact-frequency output through the Normal/MPE renderer. |
+| `AudienceAdaptiveCrowdGovernorTests` | Exact five-band policy, fast-rise/slow-fall smoothing, hysteresis, MPE cap, hostile input, reset, and allocation-free updates. |
 | `AudienceCrowdTimeFieldTests` | Flow/Grid/Ensemble timing, host/internal/fallback clocks, fairness, lane seeding, taps, gates, saturation, hostile input, and reset/rehydration. |
 | `AudienceCrowdMidiIntegrationTests` | Host-PPQ grid offsets and unchanged source-to-channel ownership through the full timed MIDI path. |
-| `AudiencePluginStateMigrationTests` | Released channel/scale representations, schema-2 Tonal preservation, schema-4 Flow compatibility, schema-5 input compatibility, schema-6 stamping, numeric clamping, and idempotence. |
+| `AudiencePluginStateMigrationTests` | Released channel/scale representations, schema-2 Tonal preservation, schema-4 Flow compatibility, schema-5 cleanup, schema-6 Manual Governor compatibility, schema-7 stamping, numeric clamping, and idempotence. |
 
 ## 12. Repository map
 
@@ -642,8 +687,9 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 |---|---|
 | `CMakeLists.txt` | Authoritative product source boundaries, dependencies, signing, installation, tests. |
 | `Source/PluginProcessor.*` | Flagship processor and state/routing orchestration. |
-| `Source/PluginStateMigration.*` | Flagship schema-6 state migration. |
+| `Source/PluginStateMigration.*` | Flagship schema-7 state migration. |
 | `Source/PluginEditor.*` | Flagship MIDI-only editor. |
+| `Source/AdaptiveCrowdGovernor.*` | Realtime-safe crowd-density policy for Grid/Ensemble admission. |
 | `Source/CrowdTimeField.*` | Realtime Flow/Grid/Ensemble scheduler and shared clock-domain logic. |
 | `Source/MidiAudienceModel.*` | Source/touch state and UI snapshots. |
 | `Source/MidiPitchMap.*` | Flagship seven-scale pitch table. |
@@ -662,7 +708,7 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 | `docs/manual/` | Current user manual. |
 
 Old research data, media, design files, or implementation units may still exist in an
-upgraded checkout. Their presence does not make them a 2.3.1 product feature. Check the
+upgraded checkout. Their presence does not make them a 2.4.0 product feature. Check the
 target's `target_sources` list before documenting or modifying runtime behaviour.
 
 ## 13. Operational limits and upgrade notes
@@ -680,21 +726,22 @@ target's `target_sources` list before documenting or modifying runtime behaviour
   lifecycle burst can still overflow its fixed priority FIFO and trigger a safety reset.
 - Merged telemetry is cumulative and diagnostic; it is not a MIDI control output.
 
-### Upgrade to 2.3.1
+### Upgrade to 2.4.0
 
 1. Back up the old VST3 outside the scanned plugin folder.
-2. Install Cosmic Microwave 2.3.1 and rescan the host.
+2. Install Cosmic Microwave 2.4.0 and rescan the host.
 3. Open a copied Ableton set first.
 4. Confirm each instance's UDP port, Time Field, clock, MIDI protocol,
    source-routing mode, destination, Pitch System, and Tonal or Atomic map.
 5. Add downstream instruments because the flagship no longer creates sound.
 6. Test Panic and every receiving channel before connecting the audience server.
 
-New sessions default to Ensemble / Host / 1/16 with four attacks per step, active 16
-(15 in MPE), 70% gate, four spread slots, and Atomic / Helium / Extended. Existing
-schema-3-or-earlier sessions migrate to Flow. Schema-5 input remains compatible;
-schema 6 discards its retired experimental fields during upgrade. The historical
-schema-2 Tonal and 1.x Atomic recovery rules remain active; verify the receiver's MPE
-bend range before a performance.
+New sessions default to Ensemble / Host / 1/16 with Adaptive Governor, 70% gate, and
+Atomic / Helium / Extended. The preserved Manual policy is attack 4, active 16 (15 in
+MPE), and spread 4. Schema-6-or-earlier sessions migrate with the Governor in Manual;
+schema-3-or-earlier sessions additionally migrate to Flow. Schema-5 input remains
+compatible and its retired experimental fields are discarded. New state is stamped
+as schema 7. The historical schema-2 Tonal and 1.x Atomic recovery rules remain active;
+verify the receiver's MPE bend range before a performance.
 
 For user workflows, continue with [the manual](docs/manual/README.md).
