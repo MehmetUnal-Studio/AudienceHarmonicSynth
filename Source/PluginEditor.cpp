@@ -409,9 +409,9 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     lookAndFeel = std::make_unique<cm::LookAndFeel>();
     setLookAndFeel (lookAndFeel.get());
 
-    setSize (1120, 640);
+    setSize (1280, 760);
     setResizable (true, true);
-    setResizeLimits (900, 560, 2200, 1300);
+    setResizeLimits (1000, 650, 2200, 1300);
     setOpaque (true);
     const auto versionText = "v" + juce::String (JucePlugin_VersionString);
     setTitle ("Cosmic Microwave " + versionText + " OSC to MIDI router");
@@ -425,6 +425,22 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     versionLabel.setDescription ("Cosmic Microwave version "
                                  + juce::String (JucePlugin_VersionString));
     addAndMakeVisible (versionLabel);
+
+    for (auto* tab : { &performTabButton, &showConsoleTabButton })
+    {
+        styleButton (*tab);
+        tab->setClickingTogglesState (false);
+        tab->setWantsKeyboardFocus (true);
+        addAndMakeVisible (*tab);
+    }
+    performTabButton.setTitle ("Perform page");
+    performTabButton.setDescription ("Open the OSC, source matrix, Time Field, pitch and MIDI performance controls.");
+    performTabButton.setTooltip (performTabButton.getDescription());
+    showConsoleTabButton.setTitle ("Show Console page");
+    showConsoleTabButton.setDescription ("Open venue preflight, safety telemetry, Global Conductor and Crowd Expression controls.");
+    showConsoleTabButton.setTooltip (showConsoleTabButton.getDescription());
+    performTabButton.onClick = [this] { showPage (false); };
+    showConsoleTabButton.onClick = [this] { showPage (true); };
 
     sourceMap = std::make_unique<SourceActivityMap> (proc.audienceModel);
     addAndMakeVisible (*sourceMap);
@@ -824,10 +840,197 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     panicButton.onClick = [this] { proc.panic(); updateLiveText(); };
     addAndMakeVisible (panicButton);
 
+    // Show Console ----------------------------------------------------------
+    // The console owns only controls and telemetry. Capture/replay remains an
+    // external process so the plug-in's audio callback never performs file or
+    // socket I/O beyond its existing bounded hand-off.
+    auto styleToggle = [this] (juce::ToggleButton& button, const juce::String& title,
+                               const juce::String& description)
+    {
+        button.setColour (juce::ToggleButton::textColourId, cm::text);
+        button.setColour (juce::ToggleButton::tickColourId, cm::cyan);
+        button.setColour (juce::ToggleButton::tickDisabledColourId, cm::line);
+        button.setTitle (title);
+        button.setDescription (description);
+        button.setTooltip (description);
+        addAndMakeVisible (button);
+    };
+
+    auto styleReadout = [this] (juce::Label& label, const juce::String& title,
+                                juce::Justification justification = juce::Justification::centredLeft)
+    {
+        styleLabel (label, {}, justification);
+        label.setColour (juce::Label::backgroundColourId, cm::background.withAlpha (0.46f));
+        label.setColour (juce::Label::outlineColourId, cm::lineSoft);
+        label.setColour (juce::Label::textColourId, cm::text);
+        label.setFont (juce::Font (juce::FontOptions (10.2f).withStyle ("bold")));
+        label.setTitle (title);
+        label.setInterceptsMouseClicks (false, false);
+        label.setWantsKeyboardFocus (false);
+        addAndMakeVisible (label);
+    };
+
+    auto styleConsoleSlider = [this] (juce::Slider& slider, const juce::String& title,
+                                      const juce::String& description,
+                                      double minimum, double maximum)
+    {
+        slider.setSliderStyle (juce::Slider::LinearHorizontal);
+        slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 42, 24);
+        slider.setRange (minimum, maximum, 1.0);
+        slider.setNumDecimalPlacesToDisplay (0);
+        slider.setColour (juce::Slider::trackColourId, cm::violet);
+        slider.setColour (juce::Slider::backgroundColourId, cm::line);
+        slider.setColour (juce::Slider::thumbColourId, cm::text);
+        slider.setColour (juce::Slider::textBoxTextColourId, cm::text);
+        slider.setColour (juce::Slider::textBoxBackgroundColourId, cm::cardRaised);
+        slider.setColour (juce::Slider::textBoxOutlineColourId, cm::line);
+        slider.setTitle (title);
+        slider.setDescription (description);
+        slider.setTooltip (description);
+        addAndMakeVisible (slider);
+    };
+
+    addChoiceItems (outputPathCombo, { "Host Only", "External Only", "Mirror" });
+    juce::StringArray expectedZones { "Any" };
+    for (char zone = 'A'; zone <= 'Z'; ++zone)
+        expectedZones.add (juce::String::charToString ((juce::juce_wchar) zone));
+    addChoiceItems (expectedZoneCombo, expectedZones);
+    for (auto* combo : { &outputPathCombo, &expectedZoneCombo })
+    {
+        styleCombo (*combo);
+        addAndMakeVisible (*combo);
+    }
+    styleLabel (outputPathLabel, "OUTPUT PATH");
+    styleLabel (expectedZoneLabel, "EXPECTED ZONE");
+    addAndMakeVisible (outputPathLabel);
+    addAndMakeVisible (expectedZoneLabel);
+    outputPathCombo.setTitle ("MIDI output path");
+    outputPathCombo.setDescription ("Choose one explicit destination policy: host bus, external endpoint, or both.");
+    expectedZoneCombo.setTitle ("Expected OSC zone");
+    expectedZoneCombo.setDescription ("Reject valid OSC messages from every zone except the selected A-Z zone. Any disables zone filtering.");
+    styleToggle (exclusivePortButton, "Exclusive UDP ownership",
+                 "Require this plug-in instance to be the sole in-process owner of its UDP port.");
+    styleReadout (routeConsoleStatusLabel, "Routing safety status");
+
+    styleToggle (safetyGovernorButton, "Safety Governor enabled",
+                 "Continuously reduce attack admission, motion rate and voice ceilings as realtime pressure rises.");
+    styleReadout (safetyStateLabel, "Safety Governor state");
+    styleReadout (safetyReasonLabel, "Safety Governor reasons");
+    styleReadout (safetyIngressLabel, "OSC ingress rate");
+    styleReadout (safetyDeadlineLabel, "Audio callback deadline use");
+    styleReadout (safetyFifoLabel, "External MIDI FIFO pressure");
+    styleReadout (safetyQueueLabel, "OSC queue pressure");
+
+    styleReadout (preflightSummaryLabel, "Venue preflight summary");
+    static constexpr const char* preflightTitles[] {
+        "OSC receiver preflight", "Zone contract preflight", "UDP ownership preflight",
+        "MIDI route preflight", "Safety Governor preflight", "Time Field preflight",
+        "Global Conductor preflight"
+    };
+    for (size_t index = 0; index < preflightRows.size(); ++index)
+        styleReadout (preflightRows[index], preflightTitles[index]);
+
+    addChoiceItems (conductorRoleCombo, { "Off", "Leader", "Follower" });
+    addChoiceItems (conductorGroupCombo, { "Group 1", "Group 2", "Group 3", "Group 4" });
+    for (auto* combo : { &conductorRoleCombo, &conductorGroupCombo })
+    {
+        styleCombo (*combo);
+        addAndMakeVisible (*combo);
+    }
+    styleLabel (conductorRoleLabel, "ROLE");
+    styleLabel (conductorGroupLabel, "GROUP");
+    styleLabel (conductorAttackBudgetLabel, "GLOBAL ATTACK BUDGET");
+    styleLabel (conductorVoiceBudgetLabel, "GLOBAL VOICE BUDGET");
+    for (auto* label : { &conductorRoleLabel, &conductorGroupLabel,
+                         &conductorAttackBudgetLabel, &conductorVoiceBudgetLabel })
+        addAndMakeVisible (*label);
+    conductorRoleCombo.setTitle ("Global Conductor role");
+    conductorRoleCombo.setDescription ("Off uses local policy. Leader publishes budgets. Follower consumes the elected leader allocation.");
+    conductorGroupCombo.setTitle ("Global Conductor group");
+    conductorGroupCombo.setDescription ("Coordinate only Cosmic Microwave instances assigned to the same process-local group.");
+    styleConsoleSlider (conductorAttackBudgetSlider, "Global attack budget",
+                        "Total attacks shared fairly across live zones.", 1.0, 64.0);
+    styleConsoleSlider (conductorVoiceBudgetSlider, "Global voice budget",
+                        "Total active voices shared fairly across live zones.", 1.0, 128.0);
+    styleReadout (conductorStatusLabel, "Global Conductor status");
+    styleReadout (conductorQuotaLabel, "Global Conductor allocation");
+
+    juce::StringArray macroChannels;
+    for (int channel = 1; channel <= 16; ++channel)
+        macroChannels.add ("Channel " + juce::String (channel));
+    macroChannels.add ("Broadcast 1-16");
+    addChoiceItems (macroChannelCombo, macroChannels);
+    addChoiceItems (macroRateCombo, { "5 Hz", "10 Hz", "20 Hz", "30 Hz" });
+    for (auto* combo : { &macroChannelCombo, &macroRateCombo })
+    {
+        styleCombo (*combo);
+        addAndMakeVisible (*combo);
+    }
+    styleToggle (crowdMacrosButton, "Crowd Expression macros",
+                 "Emit bounded density, centroid and motion Control Change messages after note lifecycle traffic.");
+    styleLabel (macroChannelLabel, "MIDI CHANNEL");
+    styleLabel (macroRateLabel, "CONTROL RATE");
+    styleLabel (macroDensityCcLabel, "DENSITY CC");
+    styleLabel (macroCentroidXCcLabel, "CENTROID X CC");
+    styleLabel (macroCentroidYCcLabel, "CENTROID Y CC");
+    styleLabel (macroMotionCcLabel, "MOTION CC");
+    for (auto* label : { &macroChannelLabel, &macroRateLabel, &macroDensityCcLabel,
+                         &macroCentroidXCcLabel, &macroCentroidYCcLabel, &macroMotionCcLabel })
+        addAndMakeVisible (*label);
+    styleConsoleSlider (macroDensityCcSlider, "Crowd density CC",
+                        "MIDI CC number carrying normalized active-crowd density.", 0.0, 127.0);
+    styleConsoleSlider (macroCentroidXCcSlider, "Crowd centroid X CC",
+                        "MIDI CC number carrying the crowd horizontal centroid.", 0.0, 127.0);
+    styleConsoleSlider (macroCentroidYCcSlider, "Crowd centroid Y CC",
+                        "MIDI CC number carrying the crowd vertical centroid.", 0.0, 127.0);
+    styleConsoleSlider (macroMotionCcSlider, "Crowd motion CC",
+                        "MIDI CC number carrying smoothed aggregate crowd motion.", 0.0, 127.0);
+    styleReadout (macroStatusLabel, "Crowd Expression status");
+
+    styleReadout (chaosTitleLabel, "Capture and Replay Chaos Lab");
+    chaosTitleLabel.setText ("EXTERNAL TOOL  /  AUDIO THREAD ISOLATED", juce::dontSendNotification);
+    chaosTitleLabel.setColour (juce::Label::textColourId, cm::cyan);
+    styleLabel (chaosBodyLabel,
+                "Capture, replay and deterministic crowd storms run outside the plug-in. "
+                "No recording, file access or replay socket is executed on the audio thread.");
+    chaosBodyLabel.setTitle ("Chaos Lab architecture");
+    chaosBodyLabel.setDescription (chaosBodyLabel.getText());
+    chaosBodyLabel.setJustificationType (juce::Justification::topLeft);
+    addAndMakeVisible (chaosBodyLabel);
+    styleReadout (chaosCommandLabel, "Chaos Lab command");
+    chaosCommandLabel.setText ("node tools/cosmic-chaos-lab.mjs --help", juce::dontSendNotification);
+    chaosCommandLabel.setColour (juce::Label::textColourId, cm::violet);
+    chaosCommandLabel.setDescription ("Run this command from the Cosmic Microwave repository in Terminal.");
+    chaosCommandLabel.setTooltip (chaosCommandLabel.getDescription());
+
+    outputPathAttachment = std::make_unique<ComboAttachment> (proc.apvts, "midiOutputPath", outputPathCombo);
+    expectedZoneAttachment = std::make_unique<ComboAttachment> (proc.apvts, "expectedZone", expectedZoneCombo);
+    exclusivePortAttachment = std::make_unique<ButtonAttachment> (proc.apvts, "exclusiveUdpPort", exclusivePortButton);
+    safetyGovernorAttachment = std::make_unique<ButtonAttachment> (proc.apvts, "safetyGovernorEnabled", safetyGovernorButton);
+    conductorRoleAttachment = std::make_unique<ComboAttachment> (proc.apvts, "conductorRole", conductorRoleCombo);
+    conductorGroupAttachment = std::make_unique<ComboAttachment> (proc.apvts, "conductorGroup", conductorGroupCombo);
+    conductorAttackBudgetAttachment = std::make_unique<SliderAttachment> (proc.apvts, "conductorAttackBudget", conductorAttackBudgetSlider);
+    conductorVoiceBudgetAttachment = std::make_unique<SliderAttachment> (proc.apvts, "conductorVoiceBudget", conductorVoiceBudgetSlider);
+    crowdMacrosAttachment = std::make_unique<ButtonAttachment> (proc.apvts, "crowdMacrosEnabled", crowdMacrosButton);
+    macroChannelAttachment = std::make_unique<ComboAttachment> (proc.apvts, "crowdMacroChannel", macroChannelCombo);
+    macroRateAttachment = std::make_unique<ComboAttachment> (proc.apvts, "crowdMacroRate", macroRateCombo);
+    macroDensityCcAttachment = std::make_unique<SliderAttachment> (proc.apvts, "crowdMacroDensityCc", macroDensityCcSlider);
+    macroCentroidXCcAttachment = std::make_unique<SliderAttachment> (proc.apvts, "crowdMacroCentroidXCc", macroCentroidXCcSlider);
+    macroCentroidYCcAttachment = std::make_unique<SliderAttachment> (proc.apvts, "crowdMacroCentroidYCc", macroCentroidYCcSlider);
+    macroMotionCcAttachment = std::make_unique<SliderAttachment> (proc.apvts, "crowdMacroMotionCc", macroMotionCcSlider);
+
+    for (auto* combo : { &outputPathCombo, &expectedZoneCombo, &conductorRoleCombo,
+                         &conductorGroupCombo, &macroChannelCombo, &macroRateCombo })
+        combo->onChange = [this] { updateConsoleTelemetry(); };
+    for (auto* toggle : { &exclusivePortButton, &safetyGovernorButton, &crowdMacrosButton })
+        toggle->onClick = [this] { updateConsoleTelemetry(); };
+
     restoreUdpPortEditor();
     refreshMidiOutputCombo();
     updateModeVisibility();
     updateLiveText();
+    updateConsoleTelemetry();
+    showPage (false);
     startTimerHz (8);
 }
 
@@ -837,14 +1040,97 @@ AudienceEditor::~AudienceEditor()
     setLookAndFeel (nullptr);
 }
 
+void AudienceEditor::setPerformControlsVisible (bool shouldBeVisible)
+{
+    if (sourceMap != nullptr)
+        sourceMap->setVisible (shouldBeVisible);
+
+    auto set = [shouldBeVisible] (std::initializer_list<juce::Component*> components)
+    {
+        for (auto* component : components)
+            component->setVisible (shouldBeVisible);
+    };
+
+    set ({ &portLabel, &portEditor, &portApplyButton, &oscStatusLabel, &oscPathLabel,
+           &routingSummaryLabel, &routingDetailLabel, &zoneStatusLabel,
+           &simAddButton, &simCrowdButton, &simRemoveButton, &simClearButton, &simMoveButton,
+           &rootLabel, &rootOctaveLabel, &scaleLabel, &octavesLabel,
+           &atomicElementLabel, &atomicModeLabel, &pitchSystemCombo, &rootCombo,
+           &rootOctaveCombo, &scaleCombo, &atomicElementCombo, &atomicModeCombo, &octavesSlider,
+           &timeStatusLabel, &timeTelemetryLabel, &governorModeButton,
+           &timeModeLabel, &clockSourceLabel, &internalBpmLabel, &gridDivisionLabel,
+           &maxAttacksLabel, &maxActiveVoicesLabel, &gatePercentLabel, &temporalSpreadLabel,
+           &governorAttacksValue, &governorActiveVoicesValue, &governorSpreadValue,
+           &timeModeCombo, &clockSourceCombo, &gridDivisionCombo, &temporalSpreadCombo,
+           &internalBpmSlider, &maxAttacksSlider, &maxActiveVoicesSlider, &gatePercentSlider,
+           &midiTypeLabel, &normalRoutingLabel, &normalChannelLabel, &mpeZoneLabel,
+           &mpeBendRangeLabel, &mpePitchModeLabel, &midiTypeCombo, &normalRoutingCombo,
+           &normalChannelCombo, &mpeZoneCombo, &mpeBendRangeCombo, &mpePitchModeCombo,
+           &mpeSetupButton, &destinationLabel, &destinationCombo, &rescanButton,
+           &destinationStatusLabel, &destinationDetailLabel, &panicButton });
+}
+
+void AudienceEditor::setConsoleControlsVisible (bool shouldBeVisible)
+{
+    auto set = [shouldBeVisible] (std::initializer_list<juce::Component*> components)
+    {
+        for (auto* component : components)
+            component->setVisible (shouldBeVisible);
+    };
+
+    set ({ &outputPathLabel, &expectedZoneLabel, &outputPathCombo, &expectedZoneCombo,
+           &exclusivePortButton, &routeConsoleStatusLabel,
+           &safetyGovernorButton, &safetyStateLabel, &safetyReasonLabel,
+           &safetyIngressLabel, &safetyDeadlineLabel, &safetyFifoLabel, &safetyQueueLabel,
+           &preflightSummaryLabel,
+           &conductorRoleLabel, &conductorGroupLabel, &conductorAttackBudgetLabel,
+           &conductorVoiceBudgetLabel, &conductorRoleCombo, &conductorGroupCombo,
+           &conductorAttackBudgetSlider, &conductorVoiceBudgetSlider,
+           &conductorStatusLabel, &conductorQuotaLabel,
+           &crowdMacrosButton, &macroChannelLabel, &macroRateLabel,
+           &macroDensityCcLabel, &macroCentroidXCcLabel, &macroCentroidYCcLabel,
+           &macroMotionCcLabel, &macroChannelCombo, &macroRateCombo,
+           &macroDensityCcSlider, &macroCentroidXCcSlider, &macroCentroidYCcSlider,
+           &macroMotionCcSlider, &macroStatusLabel,
+           &chaosTitleLabel, &chaosBodyLabel, &chaosCommandLabel });
+
+    for (auto& row : preflightRows)
+        row.setVisible (shouldBeVisible);
+}
+
+void AudienceEditor::showPage (bool shouldShowConsole)
+{
+    if (showConsolePage == shouldShowConsole
+        && performTabButton.getToggleState() == ! shouldShowConsole)
+        return;
+
+    showConsolePage = shouldShowConsole;
+    performTabButton.setToggleState (! showConsolePage, juce::dontSendNotification);
+    showConsoleTabButton.setToggleState (showConsolePage, juce::dontSendNotification);
+    performTabButton.setColour (juce::TextButton::textColourOffId,
+                                showConsolePage ? cm::textMuted : cm::cyan);
+    showConsoleTabButton.setColour (juce::TextButton::textColourOffId,
+                                    showConsolePage ? cm::cyan : cm::textMuted);
+
+    setConsoleControlsVisible (showConsolePage);
+    setPerformControlsVisible (! showConsolePage);
+    if (! showConsolePage)
+        updateModeVisibility();
+    else
+        updateConsoleTelemetry();
+
+    resized();
+    repaint();
+}
+
 void AudienceEditor::paint (juce::Graphics& g)
 {
-    juce::ColourGradient bodyGradient (cm::background.brighter (0.018f), 0.0f, 64.0f,
+    juce::ColourGradient bodyGradient (cm::background.brighter (0.018f), 0.0f, 92.0f,
                                        cm::background, 0.0f, (float) getHeight(), false);
     g.setGradientFill (bodyGradient);
     g.fillRect (getLocalBounds());
 
-    auto headerBounds = getLocalBounds().removeFromTop (64);
+    auto headerBounds = getLocalBounds().removeFromTop (92);
     juce::ColourGradient headerGradient (cm::header.brighter (0.035f),
                                          (float) headerBounds.getX(), 0.0f,
                                          cm::header, (float) headerBounds.getRight(), 0.0f, false);
@@ -874,6 +1160,9 @@ void AudienceEditor::paint (juce::Graphics& g)
     g.drawText ("OSC / MIDI ROUTING", 67, 35, 218, 14,
                 juce::Justification::centredLeft, false);
 
+    g.setColour (cm::lineSoft.withAlpha (0.92f));
+    g.fillRect (juce::Rectangle<int> (14, 61, getWidth() - 28, 1));
+
     auto badge = juce::Rectangle<float> (303.0f, 20.0f, 67.0f, 20.0f);
     g.setColour (cm::green.withAlpha (0.07f));
     g.fillRoundedRectangle (badge, 10.0f);
@@ -902,15 +1191,28 @@ void AudienceEditor::paint (juce::Graphics& g)
         g.fillRoundedRectangle (metricBounds.withHeight (1.4f).reduced (8.0f, 0.0f), 0.7f);
     }
 
-    cm::drawCard (g, oscCardBounds, "OSC INPUT", "ZONE / FINGER0");
-    cm::drawCard (g, routingCardBounds, "SOURCE ROUTING", "ID-LOCKED");
-    cm::drawCard (g, simulatorCardBounds, "SIMULATOR", "LOCAL TEST");
-    cm::drawCard (g, pitchCardBounds, "PITCH MAPPING");
-    cm::drawCard (g, timeCardBounds, "TIME FIELD");
-    cm::drawCard (g, midiCardBounds, "MIDI ROUTING", "NORMAL / MPE");
-    cm::drawCard (g, destinationCardBounds, "MIDI OUTPUT");
+    if (showConsolePage)
+    {
+        cm::drawCard (g, safetyCardBounds, "SAFETY GOVERNOR", "PRESSURE-AWARE");
+        cm::drawCard (g, preflightCardBounds, "VENUE PREFLIGHT", "LIVE CHECKLIST");
+        cm::drawCard (g, conductorCardBounds, "GLOBAL CONDUCTOR", "PROCESS-LOCAL");
+        cm::drawCard (g, routeConsoleCardBounds, "ROUTING SAFETY", "EXPLICIT PATH");
+        cm::drawCard (g, macrosCardBounds, "CROWD EXPRESSION", "MIDI CC MACROS");
+        cm::drawCard (g, chaosCardBounds, "CAPTURE / REPLAY CHAOS LAB", "EXTERNAL CLI");
+    }
+    else
+    {
+        cm::drawCard (g, oscCardBounds, "OSC INPUT", "ZONE / FINGER0");
+        cm::drawCard (g, routingCardBounds, "SOURCE ROUTING", "ID-LOCKED");
+        cm::drawCard (g, simulatorCardBounds, "SIMULATOR", "LOCAL TEST");
+        cm::drawCard (g, pitchCardBounds, "PITCH MAPPING");
+        cm::drawCard (g, timeCardBounds, "TIME FIELD");
+        cm::drawCard (g, midiCardBounds, "MIDI ROUTING", "NORMAL / MPE");
+        cm::drawCard (g, destinationCardBounds, "MIDI OUTPUT");
+    }
 
-    if (! timeStatusLabel.getBounds().isEmpty() && ! timeTelemetryLabel.getBounds().isEmpty())
+    if (! showConsolePage && ! timeStatusLabel.getBounds().isEmpty()
+        && ! timeTelemetryLabel.getBounds().isEmpty())
     {
         const auto liveBounds = timeStatusLabel.getBounds()
                                     .getUnion (timeTelemetryLabel.getBounds())
@@ -925,10 +1227,11 @@ void AudienceEditor::paint (juce::Graphics& g)
 void AudienceEditor::resized()
 {
     auto area = getLocalBounds();
-    auto headerArea = area.removeFromTop (64);
+    auto headerArea = area.removeFromTop (92);
     versionLabel.setBounds (303, 42, 67, 12);
 
-    auto metrics = headerArea.reduced (14, 12).removeFromRight (juce::jmin (500, getWidth() - 395));
+    auto metricBand = headerArea.removeFromTop (62);
+    auto metrics = metricBand.reduced (14, 12).removeFromRight (juce::jmin (500, getWidth() - 395));
     constexpr int metricGap = 7;
     const int metricWidth = (metrics.getWidth() - metricGap * 3) / 4;
     const std::array<juce::Label*, 4> metricValues {{ &activeSourcesValue, &activeFingersValue,
@@ -943,7 +1246,150 @@ void AudienceEditor::resized()
         metrics.removeFromLeft (metricGap);
     }
 
+    auto tabs = headerArea.reduced (14, 2);
+    performTabButton.setBounds (tabs.removeFromLeft (122));
+    tabs.removeFromLeft (7);
+    showConsoleTabButton.setBounds (tabs.removeFromLeft (154));
+
     area.reduce (14, 12);
+
+    if (showConsolePage)
+    {
+        constexpr int gap = 10;
+        auto top = area.removeFromTop ((area.getHeight() - gap) / 2);
+        area.removeFromTop (gap);
+        auto bottom = area;
+
+        auto makeColumns = [] (juce::Rectangle<int> row,
+                               juce::Rectangle<int>& first,
+                               juce::Rectangle<int>& second,
+                               juce::Rectangle<int>& third)
+        {
+            constexpr int columnGap = 10;
+            const int usable = row.getWidth() - columnGap * 2;
+            const int firstWidth = (int) std::round ((double) usable * 0.32);
+            const int secondWidth = (int) std::round ((double) usable * 0.35);
+            first = row.removeFromLeft (firstWidth);
+            row.removeFromLeft (columnGap);
+            second = row.removeFromLeft (secondWidth);
+            row.removeFromLeft (columnGap);
+            third = row;
+        };
+        makeColumns (top, safetyCardBounds, preflightCardBounds, conductorCardBounds);
+        makeColumns (bottom, routeConsoleCardBounds, macrosCardBounds, chaosCardBounds);
+
+        auto twoFields = [] (juce::Rectangle<int> row,
+                             juce::Label& leftLabel, juce::Component& leftControl,
+                             juce::Label& rightLabel, juce::Component& rightControl)
+        {
+            constexpr int fieldGap = 7;
+            auto labels = row.removeFromTop (12);
+            const int leftWidth = (labels.getWidth() - fieldGap) / 2;
+            leftLabel.setBounds (labels.removeFromLeft (leftWidth));
+            labels.removeFromLeft (fieldGap);
+            rightLabel.setBounds (labels);
+            leftControl.setBounds (row.removeFromLeft (leftWidth));
+            row.removeFromLeft (fieldGap);
+            rightControl.setBounds (row);
+        };
+
+        // Pressure-aware Safety Governor
+        {
+            auto inner = safetyCardBounds.reduced (13);
+            inner.removeFromTop (31);
+            safetyGovernorButton.setBounds (inner.removeFromTop (26));
+            inner.removeFromTop (3);
+            safetyStateLabel.setBounds (inner.removeFromTop (26));
+            inner.removeFromTop (3);
+            safetyReasonLabel.setBounds (inner.removeFromTop (26));
+            inner.removeFromTop (3);
+            auto telemetry = inner.removeFromTop (26);
+            safetyIngressLabel.setBounds (telemetry.removeFromLeft ((telemetry.getWidth() - 5) / 2));
+            telemetry.removeFromLeft (5);
+            safetyDeadlineLabel.setBounds (telemetry);
+            inner.removeFromTop (3);
+            telemetry = inner.removeFromTop (26);
+            safetyFifoLabel.setBounds (telemetry.removeFromLeft ((telemetry.getWidth() - 5) / 2));
+            telemetry.removeFromLeft (5);
+            safetyQueueLabel.setBounds (telemetry);
+        }
+
+        // Venue Preflight
+        {
+            auto inner = preflightCardBounds.reduced (13);
+            inner.removeFromTop (31);
+            preflightSummaryLabel.setBounds (inner.removeFromTop (27));
+            inner.removeFromTop (3);
+            const int rowGap = 2;
+            const int rowHeight = juce::jlimit (20, 25,
+                (inner.getHeight() - rowGap * ((int) preflightRows.size() - 1))
+                    / (int) preflightRows.size());
+            for (auto& row : preflightRows)
+            {
+                row.setBounds (inner.removeFromTop (rowHeight));
+                inner.removeFromTop (rowGap);
+            }
+        }
+
+        // Global Conductor
+        {
+            auto inner = conductorCardBounds.reduced (13);
+            inner.removeFromTop (31);
+            twoFields (inner.removeFromTop (40), conductorRoleLabel, conductorRoleCombo,
+                       conductorGroupLabel, conductorGroupCombo);
+            inner.removeFromTop (4);
+            twoFields (inner.removeFromTop (40), conductorAttackBudgetLabel,
+                       conductorAttackBudgetSlider, conductorVoiceBudgetLabel,
+                       conductorVoiceBudgetSlider);
+            inner.removeFromTop (5);
+            conductorStatusLabel.setBounds (inner.removeFromTop (27));
+            inner.removeFromTop (3);
+            conductorQuotaLabel.setBounds (inner.removeFromTop (27));
+        }
+
+        // Explicit MIDI / zone / UDP route contract
+        {
+            auto inner = routeConsoleCardBounds.reduced (13);
+            inner.removeFromTop (31);
+            twoFields (inner.removeFromTop (42), outputPathLabel, outputPathCombo,
+                       expectedZoneLabel, expectedZoneCombo);
+            inner.removeFromTop (5);
+            exclusivePortButton.setBounds (inner.removeFromTop (27));
+            inner.removeFromTop (5);
+            routeConsoleStatusLabel.setBounds (inner.removeFromTop (juce::jmin (54, inner.getHeight())));
+        }
+
+        // Crowd Expression macros
+        {
+            auto inner = macrosCardBounds.reduced (13);
+            inner.removeFromTop (31);
+            crowdMacrosButton.setBounds (inner.removeFromTop (25));
+            inner.removeFromTop (2);
+            twoFields (inner.removeFromTop (39), macroChannelLabel, macroChannelCombo,
+                       macroRateLabel, macroRateCombo);
+            inner.removeFromTop (2);
+            twoFields (inner.removeFromTop (37), macroDensityCcLabel, macroDensityCcSlider,
+                       macroCentroidXCcLabel, macroCentroidXCcSlider);
+            inner.removeFromTop (2);
+            twoFields (inner.removeFromTop (37), macroCentroidYCcLabel, macroCentroidYCcSlider,
+                       macroMotionCcLabel, macroMotionCcSlider);
+            inner.removeFromTop (3);
+            macroStatusLabel.setBounds (inner.removeFromTop (juce::jmin (27, inner.getHeight())));
+        }
+
+        // External Chaos Lab
+        {
+            auto inner = chaosCardBounds.reduced (13);
+            inner.removeFromTop (31);
+            chaosTitleLabel.setBounds (inner.removeFromTop (28));
+            inner.removeFromTop (6);
+            chaosBodyLabel.setBounds (inner.removeFromTop (juce::jmin (90, inner.getHeight() - 38)));
+            inner.removeFromTop (6);
+            chaosCommandLabel.setBounds (inner.removeFromTop (30));
+        }
+        return;
+    }
+
     const int topHeight = juce::jlimit (120, 142, (int) std::round ((double) area.getHeight() * 0.25));
     auto top = area.removeFromTop (topHeight);
     area.removeFromTop (8);
@@ -1312,6 +1758,12 @@ void AudienceEditor::refreshMidiOutputCombo()
 
 void AudienceEditor::updateModeVisibility()
 {
+    if (showConsolePage)
+    {
+        setPerformControlsVisible (false);
+        return;
+    }
+
     const int midiType = cm::choiceValue (proc.apvts, "midiOutputType");
     const bool atomicPitch = cm::choiceValue (proc.apvts, "pitchSystem") == 1;
     const int selectedTimeMode = timeModeCombo.getSelectedItemIndex();
@@ -1730,6 +2182,275 @@ void AudienceEditor::updateLiveText()
     destinationDetailLabel.setText (proc.getMidiOutputDescription(), juce::dontSendNotification);
 }
 
+void AudienceEditor::updateConsoleTelemetry()
+{
+    enum class CheckState { pass, warning, fail, bypassed };
+    auto setStatus = [] (juce::Label& label, CheckState state,
+                         const juce::String& detail)
+    {
+        const juce::String prefix = state == CheckState::pass ? "PASS"
+                                  : state == CheckState::warning ? "WARN"
+                                  : state == CheckState::fail ? "FAIL" : "BYPASS";
+        const auto colour = state == CheckState::pass ? cm::green
+                          : state == CheckState::warning ? cm::amber
+                          : state == CheckState::fail ? cm::red : cm::textMuted;
+        const auto text = prefix + "  /  " + detail;
+        label.setText (text, juce::dontSendNotification);
+        label.setColour (juce::Label::textColourId, colour);
+        label.setDescription (text);
+        label.setTooltip (text);
+    };
+
+    const bool safetyEnabled = cm::choiceValue (proc.apvts, "safetyGovernorEnabled") != 0;
+    const int safetyState = juce::jlimit (0, 3, proc.getSafetyGovernorState());
+    static constexpr const char* safetyNames[] { "NORMAL", "HIGH", "CRITICAL", "EMERGENCY" };
+    const auto safetyName = juce::String (safetyNames[safetyState]);
+    setStatus (safetyStateLabel,
+               ! safetyEnabled ? CheckState::bypassed
+               : safetyState == 0 ? CheckState::pass
+               : safetyState < 3 ? CheckState::warning : CheckState::fail,
+               safetyEnabled ? safetyName : "DISABLED / manual pressure policy");
+
+    const auto reasonBits = proc.getSafetyGovernorReasonBits();
+    juce::StringArray reasons;
+    auto addReason = [&] (uint32_t bit, const juce::String& text)
+    {
+        if ((reasonBits & bit) != 0u)
+            reasons.add (text);
+    };
+    addReason (PressureAwareSafetyGovernor::ReasonIngressRate, "INGRESS");
+    addReason (PressureAwareSafetyGovernor::ReasonLifecycleQueue, "LIFECYCLE QUEUE");
+    addReason (PressureAwareSafetyGovernor::ReasonMotionDrop, "MOTION DROP");
+    addReason (PressureAwareSafetyGovernor::ReasonTimeFieldPending, "TIME FIELD");
+    addReason (PressureAwareSafetyGovernor::ReasonExternalFifo, "EXTERNAL FIFO");
+    addReason (PressureAwareSafetyGovernor::ReasonExternalFifoAge, "FIFO AGE");
+    addReason (PressureAwareSafetyGovernor::ReasonProcessDeadline, "DEADLINE");
+    addReason (PressureAwareSafetyGovernor::ReasonInvalidInput, "INVALID INPUT");
+    addReason (PressureAwareSafetyGovernor::ReasonInvalidClock, "CLOCK");
+    addReason (PressureAwareSafetyGovernor::ReasonRecoveryHeld, "RECOVERY HOLD");
+    safetyReasonLabel.setText (reasons.isEmpty() ? "NO ACTIVE PRESSURE FLAGS"
+                                                 : reasons.joinIntoString (" + "),
+                               juce::dontSendNotification);
+    safetyReasonLabel.setColour (juce::Label::textColourId,
+                                 reasons.isEmpty() ? cm::textMuted
+                                                   : safetyState >= 3 ? cm::red : cm::amber);
+    safetyReasonLabel.setDescription ("Current pressure causes: "
+                                      + (reasons.isEmpty() ? juce::String ("none")
+                                                           : reasons.joinIntoString (", ")) + ".");
+    safetyReasonLabel.setTooltip (safetyReasonLabel.getDescription());
+
+    auto finiteOrZero = [] (double value) noexcept
+    {
+        return std::isfinite (value) && value >= 0.0 ? value : 0.0;
+    };
+    const double ingress = finiteOrZero (proc.getIngressEventsPerSecond());
+    const double deadline = finiteOrZero (proc.getProcessDeadlineRatio());
+    const double fifoPressure = finiteOrZero (proc.getExternalFifoPressure());
+    const double fifoAge = finiteOrZero (proc.getExternalFifoOldestAgeSeconds());
+    safetyIngressLabel.setText (juce::String (ingress, ingress < 100.0 ? 1 : 0) + " evt/s",
+                                juce::dontSendNotification);
+    safetyDeadlineLabel.setText ("DSP " + juce::String (deadline * 100.0, 1) + "% deadline",
+                                 juce::dontSendNotification);
+    safetyFifoLabel.setText ("FIFO " + juce::String (fifoPressure * 100.0, 1)
+                             + "% / " + juce::String (fifoAge * 1000.0, 1) + " ms",
+                             juce::dontSendNotification);
+    const int lifecycleDepth = proc.fingerRouter.getLifecycleQueueDepth();
+    const int motionDepth = proc.fingerRouter.getMotionQueueDepth();
+    safetyQueueLabel.setText ("Q " + juce::String (lifecycleDepth) + "L / "
+                              + juce::String (motionDepth) + "M",
+                              juce::dontSendNotification);
+    safetyQueueLabel.setDescription (
+        "Current lifecycle queue " + juce::String (lifecycleDepth)
+        + ", motion queue " + juce::String (motionDepth)
+        + "; high-water marks " + juce::String ((int) proc.fingerRouter.getLifecycleHighWater())
+        + " and " + juce::String ((int) proc.fingerRouter.getMotionHighWater())
+        + "; dropped " + juce::String ((int) proc.fingerRouter.getDroppedEventCount())
+        + ", coalesced " + juce::String ((int) proc.fingerRouter.getCoalescedMotionEventCount()) + ".");
+    safetyQueueLabel.setTooltip (safetyQueueLabel.getDescription());
+
+    const int outputPath = juce::jlimit (0, 2, proc.getMidiOutputPath());
+    static constexpr const char* outputPathNames[] { "HOST ONLY", "EXTERNAL ONLY", "MIRROR" };
+    const int endpointIndex = proc.getResolvedMidiOutputOptionIndex();
+    const bool externalEndpointAvailable = endpointIndex > 0 && ! destinationRouteUnresolved;
+    const int expectedZone = proc.getExpectedZone();
+    const auto expectedZoneText = expectedZone < 0
+                                ? juce::String ("ANY")
+                                : juce::String::charToString ((juce::juce_wchar) ('A' + expectedZone));
+    const bool exclusiveRequested = cm::choiceValue (proc.apvts, "exclusiveUdpPort") != 0;
+    const bool exclusiveActive = exclusiveRequested && proc.osc.isExclusive();
+    const bool routeCoherent = outputPath != 1 || externalEndpointAvailable;
+    const auto routeState = ! routeCoherent ? CheckState::fail
+                          : ! exclusiveActive ? CheckState::warning : CheckState::pass;
+    setStatus (routeConsoleStatusLabel, routeState,
+               juce::String (outputPathNames[outputPath]) + " / ZONE " + expectedZoneText
+               + " / UDP " + juce::String (proc.getUdpPort())
+               + (outputPath == 0 ? " / HOST BUS"
+                  : externalEndpointAvailable ? " / ENDPOINT READY" : " / NO EXTERNAL ENDPOINT"));
+
+    int warnings = 0;
+    int failures = 0;
+    auto preflight = [&] (int index, CheckState state, const juce::String& detail)
+    {
+        setStatus (preflightRows[(size_t) index], state, detail);
+        if (state == CheckState::warning || state == CheckState::bypassed)
+            ++warnings;
+        else if (state == CheckState::fail)
+            ++failures;
+    };
+
+    const bool oscListening = proc.osc.isRunning() && proc.osc.isReceiving();
+    const auto validMessages = proc.osc.getValidMessageCount();
+    const auto ageMs = proc.osc.getLastValidMessageAgeMs();
+    const bool oscRecent = oscListening && validMessages > 0u && ageMs <= 1500u;
+    preflight (0, ! oscListening ? CheckState::fail
+                  : oscRecent ? CheckState::pass : CheckState::warning,
+               ! oscListening ? "OSC RECEIVER DOWN"
+               : oscRecent ? "OSC LIVE / " + juce::String ((int) ageMs) + " ms"
+                           : validMessages == 0u ? "LISTENING / WAITING FOR OSC"
+                                                : "OSC STALE / " + juce::String ((double) ageMs / 1000.0, 1) + " s");
+
+    const auto zoneMismatchCount = proc.osc.getZoneMismatchCount();
+    preflight (1, zoneMismatchCount > 0u ? CheckState::fail
+                  : expectedZone < 0 ? CheckState::warning : CheckState::pass,
+               zoneMismatchCount > 0u ? juce::String ((int) zoneMismatchCount) + " ZONE MISMATCH"
+               : expectedZone < 0 ? "EXPECTED ZONE IS ANY"
+                                  : "ZONE " + expectedZoneText + " LOCKED");
+
+    preflight (2, exclusiveActive ? CheckState::pass : CheckState::fail,
+               exclusiveActive ? "UDP PORT OWNED EXCLUSIVELY"
+                               : exclusiveRequested ? "EXCLUSIVE BIND NOT ACTIVE"
+                                                    : "EXCLUSIVE OWNERSHIP DISABLED");
+
+    preflight (3, ! routeCoherent ? CheckState::fail
+                  : outputPath == 2 && ! externalEndpointAvailable ? CheckState::warning
+                                                                  : CheckState::pass,
+               ! routeCoherent ? "EXTERNAL ONLY / ENDPOINT MISSING"
+               : outputPath == 0 ? "HOST ONLY / ISOLATED"
+               : outputPath == 1 ? "EXTERNAL ONLY / ENDPOINT READY"
+               : externalEndpointAvailable ? "MIRROR / BOTH PATHS READY"
+                                           : "MIRROR / HOST FALLBACK ONLY");
+
+    preflight (4, ! safetyEnabled ? CheckState::fail
+                  : safetyState == 3 ? CheckState::fail
+                  : safetyState == 0 ? CheckState::pass : CheckState::warning,
+               ! safetyEnabled ? "SAFETY GOVERNOR DISABLED"
+                              : "SAFETY " + safetyName);
+
+    const int timeMode = cm::choiceValue (proc.apvts, "timeMode");
+    const bool hostClock = cm::choiceValue (proc.apvts, "clockSource") == 0;
+    const bool clockLocked = proc.getTimeFieldClockLocked();
+    preflight (5, timeMode == 0 ? CheckState::warning
+                  : hostClock && ! clockLocked ? CheckState::warning : CheckState::pass,
+               timeMode == 0 ? "FLOW / TIME GRID BYPASSED"
+               : hostClock && clockLocked ? "HOST CLOCK LOCKED"
+               : hostClock ? "HOST FREE-CLOCK FALLBACK"
+                           : "INTERNAL CLOCK / " + juce::String (proc.getTimeFieldBpm(), 1) + " BPM");
+
+    const int conductorRole = cm::choiceValue (proc.apvts, "conductorRole");
+    const int conductorRegistration = proc.getConductorRegistrationStatus();
+    const int conductorSource = proc.getConductorSnapshotSource();
+    const bool conductorRegistered = conductorRegistration == 0;
+    const bool conductorGlobal = conductorSource == 2;
+    preflight (6, conductorRole == 0 ? CheckState::bypassed
+                  : ! conductorRegistered ? CheckState::fail
+                  : conductorGlobal ? CheckState::pass : CheckState::warning,
+               conductorRole == 0 ? "GLOBAL CONDUCTOR OFF"
+               : ! conductorRegistered ? "CONDUCTOR REGISTRATION FAILED"
+               : conductorGlobal ? "GLOBAL ALLOCATION LIVE"
+                                 : "LOCAL FALLBACK / WAITING FOR LEADER");
+
+    const auto summaryState = failures > 0 ? CheckState::fail
+                            : warnings > 0 ? CheckState::warning : CheckState::pass;
+    setStatus (preflightSummaryLabel, summaryState,
+               failures > 0 ? juce::String (failures) + " BLOCKER"
+                                + (failures == 1 ? juce::String() : "S")
+                                + " / " + juce::String (warnings) + " ADVISORY"
+              : warnings > 0 ? "READY WITH " + juce::String (warnings) + " ADVISORY"
+                             : "VENUE READY / ALL CHECKS PASS");
+
+    static constexpr const char* registrationNames[] {
+        "REGISTERED", "INVALID PORT", "DUPLICATE PORT", "CAPACITY FULL"
+    };
+    const int safeRegistration = juce::jlimit (0, 3, conductorRegistration);
+    static constexpr const char* sourceNames[] { "LOCAL FALLBACK", "BYPASSED", "GLOBAL" };
+    const int safeSource = juce::jlimit (0, 2, conductorSource);
+    const auto conductorState = conductorRole == 0 ? CheckState::bypassed
+                              : ! conductorRegistered ? CheckState::fail
+                              : conductorGlobal ? CheckState::pass : CheckState::warning;
+    setStatus (conductorStatusLabel, conductorState,
+               juce::String (registrationNames[safeRegistration]) + " / "
+               + sourceNames[safeSource]);
+    conductorQuotaLabel.setText (
+        "A " + juce::String (proc.getConductorAttackQuota())
+        + "  /  V " + juce::String (proc.getConductorVoiceQuota())
+        + "  /  " + juce::String (proc.getConductorActiveZoneCount())
+        + " ZONES  /  LEADER UDP " + juce::String (proc.getConductorLeaderPort()),
+        juce::dontSendNotification);
+    conductorQuotaLabel.setColour (juce::Label::textColourId,
+                                   conductorGlobal ? cm::cyan : cm::textMuted);
+    conductorQuotaLabel.setDescription ("Current fair allocation: "
+        + juce::String (proc.getConductorAttackQuota()) + " attacks, "
+        + juce::String (proc.getConductorVoiceQuota()) + " voices across "
+        + juce::String (proc.getConductorActiveZoneCount()) + " active zones; leader UDP port "
+        + juce::String (proc.getConductorLeaderPort()) + ".");
+    conductorQuotaLabel.setTooltip (conductorQuotaLabel.getDescription());
+
+    const bool macrosRequested = cm::choiceValue (proc.apvts, "crowdMacrosEnabled") != 0;
+    const bool macrosEffective = proc.getCrowdMacroEffectiveEnabled();
+    const bool macrosSafetySuspended = macrosRequested && ! macrosEffective
+                                    && safetyEnabled && safetyState >= 2;
+    const bool midiFormatOff = cm::choiceValue (proc.apvts, "midiOutputType") == 0;
+    const int macroChannelChoice = juce::jlimit (
+        0, 16, cm::choiceValue (proc.apvts, "crowdMacroChannel"));
+    const auto compactMacroChannel = macroChannelChoice == 16
+                                   ? juce::String ("ALL")
+                                   : "CH" + juce::String (macroChannelChoice + 1);
+    const auto liveValues = "D " + juce::String (proc.getCrowdMacroDensityCcValue())
+                          + "  X " + juce::String (proc.getCrowdMacroCentroidXCcValue())
+                          + "  Y " + juce::String (proc.getCrowdMacroCentroidYCcValue())
+                          + "  M " + juce::String (proc.getCrowdMacroMotionCcValue());
+
+    juce::String macroStateText;
+    juce::Colour macroStateColour;
+    if (! macrosRequested)
+    {
+        macroStateText = "BYPASS  /  MACROS OFF";
+        macroStateColour = cm::textMuted;
+    }
+    else if (macrosEffective)
+    {
+        macroStateText = "LIVE  /  " + compactMacroChannel + "  /  " + liveValues;
+        macroStateColour = cm::green;
+    }
+    else if (macrosSafetySuspended)
+    {
+        macroStateText = "SUSPENDED  /  SAFETY " + safetyName + "  /  " + liveValues;
+        macroStateColour = cm::amber;
+    }
+    else if (midiFormatOff)
+    {
+        macroStateText = "SUSPENDED  /  MIDI FORMAT OFF  /  " + liveValues;
+        macroStateColour = cm::amber;
+    }
+    else
+    {
+        macroStateText = "ARMED  /  WAITING FOR PROCESS  /  " + liveValues;
+        macroStateColour = cm::amber;
+    }
+
+    macroStatusLabel.setText (macroStateText, juce::dontSendNotification);
+    macroStatusLabel.setColour (juce::Label::textColourId, macroStateColour);
+    const auto macroDescription = macroStateText + ". "
+        + juce::String (proc.getCrowdMacroActiveSources()) + " active sources; normalized density "
+        + juce::String (proc.getCrowdMacroDensity(), 3) + ", centroid "
+        + juce::String (proc.getCrowdMacroCentroidX(), 3) + " by "
+        + juce::String (proc.getCrowdMacroCentroidY(), 3) + ", motion "
+        + juce::String (proc.getCrowdMacroMotion(), 3)
+        + ". CC messages are emitted only when a value changes.";
+    macroStatusLabel.setDescription (macroDescription);
+    macroStatusLabel.setTooltip (macroDescription);
+}
+
 void AudienceEditor::timerCallback()
 {
     // State recall may replace the port while the editor remains open. Do not
@@ -1743,5 +2464,7 @@ void AudienceEditor::timerCallback()
 
     updateModeVisibility();
     updateLiveText();
-    sourceMap->repaint();
+    updateConsoleTelemetry();
+    if (sourceMap != nullptr && ! showConsolePage)
+        sourceMap->repaint();
 }

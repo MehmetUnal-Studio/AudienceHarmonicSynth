@@ -413,11 +413,61 @@ int main()
     }
 
     {
+        auto state = makeState(7);
+        addParam(state, "maxAttacksPerStep", 9.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "midiOutputPath"), 2.0f)
+                   && sameValue(valueOf(state, "expectedZone"), 0.0f)
+                   && sameValue(valueOf(state, "exclusiveUdpPort"), 0.0f)
+                   && sameValue(valueOf(state, "safetyGovernorEnabled"), 0.0f)
+                   && sameValue(valueOf(state, "crowdMacrosEnabled"), 0.0f)
+                   && sameValue(valueOf(state, "maxAttacksPerStep"), 9.0f),
+               "schema-7 sessions preserve Mirror routing and opt-in venue safety");
+
+        const int children = state.getNumChildren();
+        CosmicStateMigration::migrate(state);
+        expect(state.getNumChildren() == children
+                   && countParams(state, "midiOutputPath") == 1
+                   && countParams(state, "expectedZone") == 1
+                   && countParams(state, "crowdMacroMotionCc") == 1,
+               "schema-8 venue migration is idempotent");
+    }
+
+    {
+        auto state = makeState(8);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "midiOutputPath"), 0.0f)
+                   && sameValue(valueOf(state, "exclusiveUdpPort"), 1.0f)
+                   && sameValue(valueOf(state, "safetyGovernorEnabled"), 1.0f)
+                   && sameValue(valueOf(state, "conductorRole"), 0.0f)
+                   && sameValue(valueOf(state, "conductorAttackBudget"), 16.0f)
+                   && sameValue(valueOf(state, "conductorVoiceBudget"), 64.0f)
+                   && sameValue(valueOf(state, "crowdMacroDensityCc"), 20.0f)
+                   && sameValue(valueOf(state, "crowdMacroRate"), 1.0f),
+               "partial schema-8 state receives safe new-instance venue defaults");
+    }
+
+    {
+        auto state = makeState(8);
+        addParam(state, "midiOutputPath", std::numeric_limits<float>::infinity());
+        addParam(state, "expectedZone", 999.0f);
+        addParam(state, "conductorVoiceBudget", -50.0f);
+        addParam(state, "crowdMacroMotionCc", 999.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "midiOutputPath"), 0.0f)
+                   && sameValue(valueOf(state, "expectedZone"), 26.0f)
+                   && sameValue(valueOf(state, "conductorVoiceBudget"), 1.0f)
+                   && sameValue(valueOf(state, "crowdMacroMotionCc"), 127.0f),
+               "hostile schema-8 venue values clamp before APVTS publication");
+    }
+
+    {
         auto state = makeState(CosmicStateMigration::currentSchema + 1);
         addParam(state, "timeMode", 2.0f);
         addParam(state, "timeGateEnabled", 0.4f);
         addParam(state, "timeGateRateHz", 99.0f);
         addParam(state, "crowdGovernorEnabled", 17.0f);
+        addParam(state, "midiOutputPath", 99.0f);
         const int childrenBefore = state.getNumChildren();
         CosmicStateMigration::migrate(state);
         expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
@@ -427,6 +477,7 @@ int main()
                    && sameValue(valueOf(state, "timeGateEnabled"), 0.4f)
                    && sameValue(valueOf(state, "timeGateRateHz"), 99.0f)
                    && sameValue(valueOf(state, "crowdGovernorEnabled"), 17.0f)
+                   && sameValue(valueOf(state, "midiOutputPath"), 99.0f)
                    && ! CosmicStateMigration::containsParameter(state, "timeGateWaveform"),
                "future schemas are not destructively downgraded");
     }

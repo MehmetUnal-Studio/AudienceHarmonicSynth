@@ -10,14 +10,15 @@ class identity for old-session recall and must not be installed side by side.
 
 ## Cosmic Microwave itself makes no sound
 
-That is expected in version 2.4.0. Cosmic Microwave is an OSC-to-MIDI router with a
+That is expected in version 2.5.0. Cosmic Microwave is an OSC-to-MIDI router with a
 silent stereo instrument shell. It must feed a sound-producing instrument or hardware
 receiver.
 
 For a first test:
 
 1. Select **Normal MIDI / Per source 1-16**.
-2. Select `Virtual: Cosmic Microwave <port> Out` or configure the host MIDI route.
+2. Select one explicit path: Host Only, or External Only plus
+   `Virtual: Cosmic Microwave <port> Out`.
 3. Make a receiver listen to all channels from that route.
 4. Enable the receiver track's required monitoring/arming.
 5. Click **+ Source** in Cosmic Microwave.
@@ -50,7 +51,7 @@ Check **TIME FIELD -> MODE**:
 - **Ensemble** assigns the source to a spread lane, applies a fixed gate, and queues a
   still-held source touch for another pulse.
 
-New 2.4.0 sessions intentionally default to Ensemble with Adaptive policy. Use Flow
+New 2.5.0 sessions intentionally default to Ensemble with Adaptive policy. Use Flow
 when diagnosing raw sender timing. Projects saved before state schema 4 migrate to
 Flow, so opening an old set does not silently quantize it.
 
@@ -74,7 +75,7 @@ limit, and spread are required; the plugin preserves those Manual values while
 Adaptive is active.
 
 Projects saved by schema 6 or earlier intentionally open in Manual so an update cannot
-change an established performance. Only a new 2.4.0 instance defaults to Adaptive.
+change an established performance. Only a new 2.5.0 instance defaults to Adaptive.
 
 ## The Time Field says WAIT instead of LOCK
 
@@ -98,11 +99,11 @@ Read the **MIDI OUTPUT** status lines:
   instance's current UDP port, for example `Cosmic Microwave 6060 Out`.
 - A hardware/system name - click **Rescan** and reselect it if the device changed.
 
-If a virtual or hardware port fails to open, Cosmic Microwave falls back to the host
-route and shows the failure. Resolve the OS/device issue or use the host bus.
-
-Selecting an external route does not disable the host bus. Duplicate notes usually
-mean the receiver is listening to both copies. Disable one input path.
+Check **MIDI Output Path** in Show Console. **Host Only** ignores the external endpoint;
+**External Only** fails closed with an empty host bus when the endpoint is missing;
+**Mirror** sends to both. A missing endpoint in External Only is a Venue Preflight
+failure. Duplicate notes usually mean Mirror is selected and a receiver consumes both
+copies; choose one path or disconnect one input.
 
 ### Ableton receiving track
 
@@ -135,7 +136,9 @@ Switch to Normal MIDI when receiving tracks depend on stable source-channel grou
 
 1. Confirm the sender uses the instance's current UDP port.
 2. Confirm the OSC card says **Listening**, not an error.
-3. Send a canonical message:
+3. Confirm Expected Zone is Any or matches the address letter, and that the zone-
+   mismatch counter is zero.
+4. Send a canonical message:
 
    ```text
    /cs/A/1/finger0/u   0.5
@@ -143,39 +146,44 @@ Switch to Normal MIDI when receiving tracks depend on stable source-channel grou
    /cs/A/1/finger0/on  1
    ```
 
-4. The source range is `0..255`; only exact lower-case `finger0` is admitted.
-5. The literal `finger` token must be lower-case. Unknown parameters are ignored.
-6. OSC values must be finite `int32` or `float32` values.
-7. Allow inbound UDP for Ableton or the Standalone app in the system firewall.
+5. The source range is `0..255`; only exact lower-case `finger0` is admitted.
+6. The literal `finger` token must be lower-case. Unknown parameters are ignored.
+7. OSC values must be finite `int32` or `float32` values.
+8. Allow inbound UDP for Ableton or the Standalone app in the system firewall.
 
 Use **+ Source** as a control test. If the simulator produces MIDI, the failure is
 before the plugin's source model: sender address, network, firewall, or port.
 
 ## The OSC card reports more than one zone
 
-The plugin observes zone letters but does not use the port number to infer or filter a
-zone. Multiple observed letters mean multiple zone streams reached the same UDP input.
+The plugin never infers a zone from the port. With Expected Zone at **Any**, multiple
+observed letters mean multiple streams reached the same UDP input. Set the assigned
+zone explicitly; wrong-zone packets are then rejected and counted as mismatches.
 
 Correct the upstream server so one already-separated zone feeds one port and one
 Cosmic Microwave instance. Zone A on `6060` and Zone B on `6061` are conventions in
 the server/deployment, not automatic plugin assignments.
 
-Inside one instance, source ID owns state independently of the zone letter. If two
-zones send the same source ID to one port, their controls can share that source's
-touch state. Fix the split rather than relying on the observed-zone display alone.
+If an old schema-7 session still uses Any, source ID owns state independently of the
+zone letter and equal IDs from two zones can share touch state. Fix the split and lock
+Expected Zone; do not rely on display telemetry alone.
 
 ## The OSC port is unavailable
 
 - Another application may already own the UDP port. Assign a different port upstream
   and in Cosmic Microwave.
-- Instances in the same process can share an internal receiver, but the intended
-  production design is still one unique port per zone instance.
+- New sessions use exclusive ownership. **OWNERSHIP CONFLICT** means another in-process
+  instance already owns that port. Close/change the conflicting instance; the receiver
+  retries at a bounded interval.
+- Schema-7-and-earlier sessions preserve shared-port behaviour for compatibility, but
+  production design remains one unique port per zone instance.
 - A shared receiver supports a bounded number of clients. A **PORT FULL** status means
   this instance did not receive a client slot; use another port.
 - Invalid port text does not replace the active listener. Enter `1..65535` and click
   **Apply**.
 
-Applying a different port performs a safety release, restarts OSC listening, clears
+Applying a different port or Expected Zone performs a safety release, restarts/updates
+OSC listening, clears
 the observed-zone history, and updates a selected virtual endpoint's port-based name.
 
 ## A note is stuck
@@ -195,8 +203,9 @@ Cosmic Microwave keys live note ownership by source and its `finger0` touch, so 
 round-robin is not used. In Normal MIDI, same-channel/same-note owners are reference
 counted so one wrapped source cannot prematurely release another held owner.
 
-Changing MIDI protocol, Normal routing mode/channel, MPE zone/range, destination, or
-UDP port triggers safety reset handling. Changing the active Time Field domain also
+Changing MIDI protocol, Normal routing mode/channel, MPE zone/range, destination,
+MIDI Output Path, Expected Zone, UDP ownership, or UDP port triggers safety reset
+handling. Changing the active Time Field domain also
 releases and rehydrates canonical held touches under the new schedule. If a receiver
 ignores All Notes Off, use its own panic control as well.
 
@@ -274,6 +283,14 @@ canonical held state so a dropped release cannot leave notes held indefinitely.
 Lifecycle messages are more important than redundant movement messages. Design the
 upstream sender so On/Off are delivered promptly and keep Panic available.
 
+Open **SHOW CONSOLE** and inspect the Safety Governor before changing musical policy.
+HIGH, CRITICAL, or EMERGENCY identifies the active pressure reason: ingress, lifecycle
+queue, motion drops, Time Field pending, external FIFO depth/age, DSP deadline, invalid
+input/clock, or a recovery hold. Escalation is immediate, but recovery is intentionally
+staged; a clean signal must remain below the hysteresis boundary. EMERGENCY closes new
+attacks while Off/watchdog/Panic continue. If the external FIFO is the cause, use Host
+Only for isolation or repair the endpoint rather than disabling safety.
+
 The **MERGED** figure is cumulative load telemetry. It means scheduled work was
 coalesced or expired after missing available capacity. It does not send a Crowd Energy
 CC, change velocity, or alter another MIDI controller. A pending Ensemble short tap is
@@ -296,7 +313,30 @@ to that route in an external receiver. The Standalone app does not make sound it
 ### Does the plugin infer a zone from 6060 or 6061?
 
 No. It reads the zone segment from valid `/cs/...` messages. Port-to-zone assignment is
-owned by the upstream server and show configuration.
+owned by the upstream server and show configuration. Expected Zone is an explicit
+validation filter; it still does not infer the letter from the port.
+
+### Global Conductor says Local Fallback
+
+Confirm every participating instance is in the same group, has a unique valid UDP
+port, and is set to Leader or Follower. At least one live Leader is required; the lowest
+leader port wins deterministically. A missing allocation or heartbeat older than 1.5
+seconds safely returns each instance to its local Time Field quotas. Groups coordinate
+only instances in the same plugin process, not another computer or host process.
+
+### Crowd Expression CCs stopped
+
+Check that macros are enabled, the receiver listens to the selected channel (or all
+channels for Broadcast), and the four CC numbers are mapped as intended. CRITICAL and
+EMERGENCY Safety states suspend macro emission. Telemetry continues, and a full CC
+snapshot is sent when emission safely resumes. Change-only output also means a static
+crowd does not resend identical values every tick.
+
+### Is Capture/Replay running inside the plugin?
+
+No. `tools/cosmic-chaos-lab.mjs` is an external Node.js CLI. Run it from Terminal as a
+proxy, recorder, replayer, or load generator. The plugin never opens capture files or
+replay sockets on its audio thread. See [Capture/Replay Chaos Lab](../chaos-lab.md).
 
 ### Why does source 0 use Channel 16?
 
@@ -311,24 +351,28 @@ note-off messages.
 
 ### Why did a new session open on Helium / Extended?
 
-Cosmic Microwave 2.4.0 intentionally defaults new sessions to **Atomic / Helium /
+Cosmic Microwave 2.5.0 intentionally defaults new sessions to **Atomic / Helium /
 Extended**. Choose **Tonal** for the seven conventional 12-TET maps. The historical
 schema-2 migration still selects Tonal, while released 1.x element/spectral choices
 migrate to Atomic and recover their corresponding element. Separately, schema-3 and
 older state receives Flow for the Time Field. Schema-5 input remains compatible and
 its retired experimental fields are discarded. Schema-6-or-earlier state receives
 Manual Governor mode without altering its saved Time Field controls; new state uses
-schema 7.
+schema 8. Schema-7-and-earlier state also preserves Mirror output, shared UDP ownership,
+Expected Zone Any, Safety Governor Off, and Crowd Expression Off. New sessions instead
+start Host Only with exclusive ownership and Safety enabled; Global Conductor and
+Crowd Expression remain opt-in.
 
 ### What happened to the previous sound-generation controls?
 
-They were removed from the 2.0 flagship and remain absent in 2.4.0. Old repositories may
+They were removed from the 2.0 flagship and remain absent in 2.5.0. Old repositories may
 retain archival media or implementation files, but the current flagship target neither
 compiles nor loads them.
 
 ### What should I include in a bug report?
 
-Include the Cosmic Microwave version, host/OS version, UDP port, exact OSC address and
-argument, selected MIDI mode/routing/destination, destination status text, observed
-zone display, a screenshot of the activity map, receiver channel/MPE configuration,
-and a short MIDI-monitor capture if possible.
+Include the Cosmic Microwave version, host/OS version, UDP port, Expected Zone and
+mismatch count, ownership status, exact OSC address/argument, MIDI Output Path and
+endpoint, Safety state/reasons/telemetry, Time Field/Conductor quota, observed zones,
+receiver channel/MPE configuration, and a short MIDI-monitor or Chaos Lab capture when
+possible.

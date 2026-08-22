@@ -1,4 +1,4 @@
-# Cosmic Microwave 2.4.0 WIKI
+# Cosmic Microwave 2.5.0 WIKI
 
 > **A single-touch, zone-oriented OSC-to-MIDI router for audience interaction.**
 
@@ -6,11 +6,11 @@
 |---|---|
 | Product | Cosmic Microwave (formerly SpektraSynth) |
 | CMake project/target | `AudienceHarmonicSynth` |
-| Version | 2.4.0 |
+| Version | 2.5.0 |
 | Formats | VST3 + Standalone |
 | Framework | JUCE 8.0.4, C++17, CMake 3.22+ |
 | Runtime role | MIDI-only OSC router with a silent mono/stereo instrument output shell |
-| Document date | 2026-08-22 |
+| Document date | 2026-08-23 |
 | Source of truth | Current `CMakeLists.txt` and the source files compiled by `AudienceHarmonicSynth` |
 
 ## Contents
@@ -60,7 +60,9 @@ receiving Cosmic Microwave's MIDI.
 - Pitch System selects either seven 12-TET Tonal maps or a fixed, precomputed Atomic
   catalog of 29 elements and five density modes.
 - The port and the OSC zone are separate data. The plugin never infers one from the
-  other.
+  other; Expected Zone is an explicit validation filter.
+- New sessions own their UDP port exclusively and use one explicit Host Only,
+  External Only, or Mirror output path.
 - Every mode coalesces redundant ingress movement to the latest U/V value while a
   separate priority FIFO preserves On/Off lifecycle order. Flow consumes those markers
   as soon as the audio budget permits; Grid and Ensemble sample the canonical snapshot
@@ -69,6 +71,12 @@ receiving Cosmic Microwave's MIDI.
   uses the UDP port only as a lane-phase seed, never as a zone filter.
 - Adaptive crowd policy changes future Grid/Ensemble admission only. It cannot cut an
   existing voice or interfere with ordered Off, watchdog release, or Panic.
+- Pressure-aware Safety policy responds to ingress, queue, FIFO, and deadline pressure;
+  it can close new admission but never blocks release safety.
+- Global Conductor groups coordinate bounded Time Field quotas process-locally; stale
+  data always falls back to local policy.
+- Crowd Expression macros are aggregate, opt-in, change-only CC output. They do not
+  replace the per-source U/V mapping.
 
 ## 2. Products and host identity
 
@@ -143,13 +151,15 @@ Zone B server stream -> UDP 6061 -> Cosmic Microwave instance 2
 ```
 
 This association lives upstream. `OscBridge` records a 26-bit observed-zone mask from
-validated addresses. It does not reject a valid B message merely because the listener
-uses port 6060.
+validated addresses but never derives a zone from `6060`. The schema-8 Expected Zone
+choice is an independent admission contract: Any accepts every zone for diagnostics;
+`A..Z` rejects and counts an otherwise-valid mismatch before source state and accepted-
+traffic telemetry.
 
-`MidiAudienceModel` intentionally ignores the zone when it forms source identity. One
-plugin instance is expected to represent one already-separated zone. If two zones with
-the same source ID reach one port, they share that source's state; mixed-zone telemetry
-therefore signals an upstream wiring error.
+`MidiAudienceModel` intentionally ignores the zone when it forms source identity after
+admission. One plugin instance represents one already-separated zone. Expected Zone
+therefore prevents equal source IDs from another zone merging into this model; it does
+not replace the upstream split.
 
 ### 3.4 Source/touch state
 
@@ -167,12 +177,14 @@ voice_id = source_id * 10 + finger
 
 The range is `0..2559`. Zone is deliberately absent from that key.
 
-### 3.5 Shared UDP listener
+### 3.5 UDP ownership policy
 
-Instances in one process can attach to a shared receiver for the same port. A shared
-port supports at most 16 `OscBridge` clients. The production architecture still uses a
-different port per zone instance; sharing exists for safe in-process fan-out and tests,
-not for zone separation.
+New schema-8 sessions request **exclusive** process-local ownership. A second instance
+on the same port fails visibly with `OWNERSHIP CONFLICT` and periodically retries;
+closing the current owner can recover without recreating the device. Legacy schema-7-
+and-earlier state migrates to shared ownership to preserve released behaviour. A shared
+receiver has a bounded 16-client capacity, but production still requires a unique port
+per zone. Port, zone-filter, or ownership changes form a safety-reset boundary.
 
 ## 4. Tonal and Atomic pitch mapping
 
@@ -254,7 +266,7 @@ from `process()`.
 | Grid | Queue attacks to the base division, select pending identities fairly, and obey attacks-per-step and active limits. Held notes release on ordered Off; an admitted short tap receives a minimum gate. |
 | Ensemble | Restrict each source to one deterministic spread lane, apply a fixed gate, and requeue a still-held voice after release. |
 
-New 2.4.0 instances default to **Ensemble**, **Host**, **1/16**, 70% gate, and the
+New 2.5.0 instances default to **Ensemble**, **Host**, **1/16**, 70% gate, and the
 **Adaptive Crowd Governor**. The saved Manual policy remains four attacks per step,
 16 active voices, and four spread slots. `AudienceProcessor` caps every effective
 Time Field active count at 15 in MPE mode because Lower and Upper zones each have 15
@@ -343,6 +355,40 @@ and Panic always retain authority. Gate remains the saved Manual setting. Adapti
 also leaves all three Manual policy values untouched, so returning to Manual restores
 their saved or automated values exactly.
 
+### 5.6 Pressure-aware Safety Governor
+
+`PressureAwareSafetyGovernor` is distinct from `AdaptiveCrowdGovernor`. It consumes a
+fixed scalar snapshot of validated ingress events/second, lifecycle-queue pressure,
+motion-drop delta, Time Field pending pressure, external FIFO pressure/oldest age, and
+audio process deadline ratio. Any invalid clock or numeric signal fails closed.
+
+| State | Motion divisor | Attack ceiling | Active ceiling | Minimum spread | Admission | Macros |
+|---|---:|---:|---:|---:|---|---|
+| NORMAL | 1 | 16 | 16 | 1 | open | on |
+| HIGH | 2 | 8 | 12 | 2 | open | on |
+| CRITICAL | 4 | 2 | 8 | 4 | open | off |
+| EMERGENCY | 8 | 1 | 4 | 8 | closed | off |
+
+Escalation is immediate. Recovery uses 15% hysteresis, 2/3/5-second holds, and at most
+one-state demotion per completed hold. Latest-value motion coalescing preserves current
+positions while thinning redundant updates. Flow retains direct semantics in NORMAL
+but obeys safety ceilings under pressure. Releases, watchdog actions, and Panic are
+never closed by attack admission.
+
+### 5.7 Global Conductor
+
+`GlobalConductorHub` is a fixed 16-slot, process-local coordinator with four isolated
+groups. Off/Leader/Follower roles publish scalar density and budget data only. Within a
+group the lowest UDP-port leader wins deterministically; every 100 ms it allocates the
+leader's global attack (`1..64`) and voice (`1..128`) budgets fairly across fresh zone
+members, using density weighting and deterministic rotation for scarce units.
+
+Audio readers use one coherent atomic policy snapshot. In-flight, stale, failed, or
+missing publications never block: after the 1500 ms freshness window, or immediately
+after registration loss, a member returns to its local Time Field quotas. The hub
+coordinates instances in the same loaded plugin module/process only; it is not a UDP
+or cross-machine conductor.
+
 ## 6. Normal MIDI and MPE
 
 ### 6.1 Output modes
@@ -398,8 +444,9 @@ the last assigned channel. A just-freed channel is considered after the other fr
 channels. If the pool is full, the oldest active voice is released before its channel
 is reassigned.
 
-Changing output mode, Normal routing/channel, MPE zone/range/setup state, or destination
-causes a safety reset and re-arms active OSC touches under the new configuration.
+Changing output mode/path, Normal routing/channel, MPE zone/range/setup state,
+destination, Expected Zone, ownership policy, or UDP port causes a safety reset and
+re-arms active OSC touches only under the new configuration.
 
 ### 6.4 MPE setup and message order
 
@@ -432,10 +479,28 @@ The destination list is:
 2. `Virtual: Cosmic Microwave <UDP port> Out`.
 3. Available system/hardware MIDI outputs.
 
-The host bus always receives the generated stream. Choosing item 2 or 3 additionally
-queues the same short MIDI messages to the external endpoint. A message-thread timer
-drains that queue at 60 Hz; the audio thread never calls the operating-system MIDI
-device directly.
+`midiOutputPath` is the authority above that list: Host Only publishes only to the host
+bus, External Only queues only to item 2/3 and clears the host `MidiBuffer` fail-closed,
+and Mirror deliberately publishes to both. A bounded high-resolution sender drains
+external short messages; the audio thread never calls the operating-system MIDI device
+directly. New sessions default to Host Only; schema-7-and-earlier state migrates to
+Mirror for compatibility.
+
+### 6.6 Crowd Expression macros
+
+`CrowdExpressionMacros` scans exactly 256 identity-bearing source snapshots at the
+selected 5/10/20/30 Hz control rate and computes:
+
+- density (`active / 256`), default CC20;
+- valid-position centroid X and Y, default CC21/CC22; and
+- smoothed aggregate position motion, default CC23.
+
+Output targets Channel 1..16 or Broadcast. Empty centroids are 0.5/MIDI 64. Non-finite
+positions are excluded from centroid and motion while their source can remain in the
+active count. A first/re-enabled tick emits all four values; later ticks emit changed
+values only. The CCs are appended after note lifecycle traffic. CRITICAL/EMERGENCY
+Safety profiles suspend emission but telemetry continues, so recovery can rehydrate a
+complete snapshot.
 
 ## 7. Runtime architecture
 
@@ -448,7 +513,9 @@ PluginProcessor.cpp      PluginEditor.cpp
 PluginStateMigration.cpp AtomicScaleCatalog.cpp
 AtomicScaleMap.cpp       MidiPitchMap.cpp
 MpeMidiOutput.cpp        MidiAudienceModel.cpp
-AdaptiveCrowdGovernor.cpp CrowdTimeField.cpp
+AdaptiveCrowdGovernor.cpp PressureAwareSafetyGovernor.cpp
+CrowdTimeField.cpp        CrowdExpressionMacros.cpp
+GlobalConductorHub.cpp
 OscFingerRouter.cpp
 Simulator.cpp
 OscBridge.cpp
@@ -462,13 +529,15 @@ unless they appear in this CMake target list.
 ```text
 OSC UDP callback                         Simulator / UI thread
        |                                         |
-       +----------> MidiAudienceModel <----------+
+       +-> expected-zone filter -> MidiAudienceModel <---+
                            |
                            | source snapshots + touch events
                            v
              lifecycle FIFO (8192) + latest U/V FIFO (8192)
                            |
                     audio processBlock
+                           |
+          PressureAwareSafetyGovernor (pressure ceilings)
                            |
           AdaptiveCrowdGovernor (Grid/Ensemble policy)
                            |
@@ -481,7 +550,10 @@ OSC UDP callback                         Simulator / UI thread
              fixed FingerMidiState[2560]
                            |
                     MpeMidiOutput render
+                           |
+           optional CrowdExpressionMacros CC snapshot
                      /                 \
+       Host Only/Mirror       External Only/Mirror
              host MidiBuffer      external FIFO (16384)
                                       |
                            2 ms high-resolution sender
@@ -489,7 +561,11 @@ OSC UDP callback                         Simulator / UI thread
                           virtual/hardware MidiOutput
 
 audio buffer -> cleared silent instrument shell
-host MIDI in -> preserved scratch -> unchanged thru when output enabled
+host MIDI in -> preserved scratch -> unchanged thru when output enabled, then routed
+                by the same Host Only / External Only / Mirror policy
+
+GlobalConductorHub (16 slots / four process-local groups / 10 Hz quotas)
+external tools/cosmic-chaos-lab.mjs (proxy/capture/replay/generate; never audio thread)
 ```
 
 ### 7.3 Main classes
@@ -497,26 +573,30 @@ host MIDI in -> preserved scratch -> unchanged thru when output enabled
 | Class | Responsibility |
 |---|---|
 | `AudienceProcessor` | APVTS, process lifecycle, pitch configuration, input MIDI thru, OSC touch state, safety resets, host/external MIDI routing, state migration. |
-| `CosmicStateMigration` | Schema-aware, bounded restoration through schema 7, including Flow timing and Manual Governor compatibility for older sessions. |
-| `OscBridge` | Shared UDP receiver, wire validation, value decoding/clamping, traffic and zone telemetry. |
+| `CosmicStateMigration` | Schema-aware, bounded restoration through schema 8, including routing/safety compatibility for older sessions. |
+| `OscBridge` | Shared/exclusive UDP receiver, wire validation, Expected Zone admission, value decoding/clamping, ownership/traffic/zone telemetry. |
 | `MidiAudienceModel` | Atomic 256-source UI/control state and single-touch hand-off. |
 | `OscFingerRouter` | Separate fixed lifecycle and latest-motion queues; lifecycle-first draining, U/V coalescing, epochs, and reset-on-lifecycle-overflow recovery. |
 | `CrowdTimeField` | Allocation-free host/monotonic clock resolution, pending admission, fair Grid scheduling, port-seeded Ensemble lanes, gates, and telemetry. |
 | `AdaptiveCrowdGovernor` | Allocation-free density smoothing, hysteretic band selection, and soft Grid/Ensemble admission recommendations. |
+| `PressureAwareSafetyGovernor` | Allocation-free four-state ingress/queue/FIFO/deadline pressure policy with staged recovery. |
+| `GlobalConductorHub` | Fixed-slot process-local leader election, group isolation, density publication, and coherent quota allocation. |
+| `CrowdExpressionMacros` | Fixed 256-source aggregate density/centroid/motion analysis and change-only control-rate scheduling. |
 | `MidiPitchMap` | Seven fixed-capacity tonal tables and normalized-X lookup. |
 | `AtomicScaleCatalog` | Immutable 29-element x 5-mode generated degree catalog and fixed-map lookup. |
 | `AtomicScaleMap` | Fixed 128-degree/768-step Atomic pitch projection with exact-frequency metadata. |
 | `MpeMidiOutput` | Normal/MPE note ownership, controllers, RPN/MCM setup, channel allocation, reference counts, safety reset. |
 | `Simulator` | Message-thread synthetic sources and random movement. |
-| `AudienceEditor` | MIDI-only routing/monitoring UI. |
+| `AudienceEditor` | Two-page Perform/Show Console MIDI-only UI, telemetry, Venue Preflight, and parameter attachments. |
 
 ## 8. Threading and realtime boundaries
 
 | Context | Work | Boundary mechanism |
 |---|---|---|
-| OSC realtime callback | Validate/decode OSC, update source atomics, enqueue touch events. | Shared-port callback/client lock plus producer spin lock; never the audio thread. |
-| Audio processing thread | Copy input MIDI, capture host position, select/re-root a fixed pitch table, drain bounded lifecycle events, run the Time Field, generate sample-offset host MIDI, and enqueue short external messages. | Pre-reserved MIDI buffers, fixed arrays, bounded FIFOs/schedulers; no parsing, catalog generation, or device I/O. |
-| Message/UI thread | Editor refresh, simulator, destination changes, state application, external MIDI sending. | Atomics, pending-state lock, processor suspension for destructive route changes. |
+| OSC realtime callback | Validate/decode OSC, apply Expected Zone, update source atomics, enqueue touch events. | Shared/exclusive-port callback boundary plus producer lock; never the audio thread. |
+| Audio processing thread | Copy input MIDI, sample pressure/conductor policy, drain bounded lifecycle, run Time Field, render notes/macros, publish host output, and enqueue external output only when selected. | Pre-reserved MIDI buffers, fixed arrays, bounded FIFOs/schedulers, coherent atomics; no parsing, catalog generation, file I/O, or device I/O. |
+| Message/UI thread | Editor refresh, simulator/watchdog, route/port/state changes, preflight telemetry, conductor publication, external MIDI sending. | Atomics, pending-state lock, processor suspension for destructive route changes. |
+| External Node.js process | Chaos proxy/capture/replay/generator. | Separate process and sockets; no plugin/audio-thread file access. |
 
 Key capacities:
 
@@ -533,6 +613,9 @@ Key capacities:
 | External short-message FIFO | 16384 |
 | Pre-reserved MIDI buffer storage | 262144 bytes each |
 | Shared clients per UDP port | 16 |
+| Global Conductor instances | 16 total, four isolated groups |
+| Global Conductor update/freshness | 100 ms / 1500 ms |
+| Crowd macro analysis | 256 fixed slots at 5/10/20/30 Hz |
 | Atomic degrees per element/mode | 128 maximum |
 | Atomic projected pitch steps | 768 maximum |
 
@@ -553,9 +636,10 @@ message timer performs device I/O outside the host's processing callback.
 
 ## 9. Editor
 
-The flagship editor is resizable (`1120 x 640` default, `900 x 560` minimum). It has:
+The flagship editor is resizable (`1280 x 760` default, `1000 x 650` minimum) with
+**PERFORM** and **SHOW CONSOLE** pages. It has:
 
-- a permanent build-derived version label (for example `v2.4.0`) beside the MIDI-only
+- a permanent build-derived version label (for example `v2.5.0`) beside the MIDI-only
   product identity;
 - header metrics for active sources, active touches, emitted note count, and occupied
   MPE member channels;
@@ -569,15 +653,20 @@ The flagship editor is resizable (`1120 x 640` default, `900 x 560` minimum). It
 - Tonal/Atomic selector; shared root, octave, and range; Tonal scale or Atomic
   element/density controls;
 - mode-specific Normal MIDI or MPE controls;
-- destination status, Rescan, and Panic.
+- destination status, Rescan, and Panic;
+- Host Only / External Only / Mirror, Expected Zone, and exclusive ownership controls;
+- Safety state/reason plus ingress, deadline, FIFO, and queue telemetry;
+- a seven-row Venue Preflight with explicit PASS/WARN/FAIL/BYPASS states;
+- Global Conductor role, group, budgets, leader, source, and quota readouts;
+- Crowd Expression enable/channel/rate/CC mapping and suspension status; and
+- an explicit hand-off to the external Capture/Replay Chaos Lab CLI.
 
 The activity map's columns are MIDI Channels 1..16. Its rows contain each channel's
 wrapped source IDs; source 0 is the final cell in the Channel 16 column. Active-cell
 position follows the source's latest X/Y snapshot.
 
-The editor exposes no internal diagnostics panel. Internal MIDI rings still support
-tests and processor diagnostic text methods, but they are not part of the 2.4.0 visible
-UI contract.
+Show Console is operational telemetry, not an unbounded log. It reads bounded atomic
+snapshots and does not perform capture, replay, file I/O, or OS MIDI I/O itself.
 
 ## 10. Parameters and state
 
@@ -586,6 +675,10 @@ UI contract.
 | ID | Name | Values | Default |
 |---|---|---|---|
 | `midiOutputType` | MIDI Format | Off / Normal MIDI / MPE MIDI | Normal MIDI |
+| `midiOutputPath` | MIDI Output Path | Host Only / External Only / Mirror | Host Only |
+| `expectedZone` | Expected OSC Zone | Any / A..Z | Any |
+| `exclusiveUdpPort` | Exclusive UDP Port | Off / On | On |
+| `safetyGovernorEnabled` | Safety Governor | Off / On | On |
 | `normalMidiRoutingMode` | Normal MIDI Routing | Single Channel / Per Source 1-16 | Per Source 1-16 |
 | `normalMidiChannel` | Normal MIDI Channel | 1..16 | 1 |
 | `mpeZone` | MPE Zone | Lower / Upper | Lower |
@@ -601,6 +694,17 @@ UI contract.
 | `gatePercent` | Gate Length | 5..100% | 70% |
 | `temporalSpread` | Temporal Spread | 1 / 2 / 4 / 8 / 16 | 4 |
 | `crowdGovernorEnabled` | Adaptive Crowd Governor | Manual / Adaptive | Adaptive |
+| `conductorRole` | Global Conductor Role | Off / Leader / Follower | Off |
+| `conductorGroup` | Global Conductor Group | 1..4 | 1 |
+| `conductorAttackBudget` | Conductor Attack Budget | 1..64 | 16 |
+| `conductorVoiceBudget` | Conductor Voice Budget | 1..128 | 64 |
+| `crowdMacrosEnabled` | Crowd Macros | Off / On | Off |
+| `crowdMacroChannel` | Crowd Macro Channel | Ch 1..16 / Broadcast | Ch 1 |
+| `crowdMacroDensityCc` | Crowd Density CC | 0..127 | 20 |
+| `crowdMacroCentroidXCc` | Crowd Centroid X CC | 0..127 | 21 |
+| `crowdMacroCentroidYCc` | Crowd Centroid Y CC | 0..127 | 22 |
+| `crowdMacroMotionCc` | Crowd Motion CC | 0..127 | 23 |
+| `crowdMacroRate` | Crowd Macro Rate | 5 / 10 / 20 / 30 Hz | 10 Hz |
 | `pitchSystem` | Pitch System | Tonal / Atomic | Atomic |
 | `scaleRoot` | Root | C..B | C |
 | `scaleRootOctave` | Root Octave | 0..6 | 2 |
@@ -615,7 +719,7 @@ The APVTS ValueTree also stores:
 
 - `udpPort` (default 6060);
 - `midiOutputOption` (default Host MIDI Output); and
-- `cosmicMicrowaveSchema` (current schema 7).
+- `cosmicMicrowaveSchema` (current schema 8).
 
 `setStateInformation` replaces the APVTS parameter tree, while UDP-port and destination
 side effects are deferred to the message timer. Migration preserves released state
@@ -635,8 +739,12 @@ contracts:
 - accepts schema-5 input and discards its retired experimental fields;
 - assigns Manual Governor mode to every schema-6-or-earlier session without changing
   its saved attack, active-limit, spread, gate, clock, or timing mode values;
-- defaults new and partial schema-7 state to Adaptive, and stamps newly saved state as
-  schema 7; and
+- gives schema-7-and-earlier state Mirror output, Expected Zone Any, shared UDP
+  ownership, Safety Governor Off, Conductor Off, and Crowd Macros Off, preserving the
+  released routing/admission contract;
+- defaults new and partial schema-8 state to Host Only, exclusive ownership, Safety
+  Governor On, Conductor Off, and Crowd Macros Off, and stamps newly saved state as
+  schema 8; and
 - clamps malformed or non-finite choice state to safe bounds.
 
 ## 11. Build and tests
@@ -679,7 +787,11 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 | `AudienceAdaptiveCrowdGovernorTests` | Exact five-band policy, fast-rise/slow-fall smoothing, hysteresis, MPE cap, hostile input, reset, and allocation-free updates. |
 | `AudienceCrowdTimeFieldTests` | Flow/Grid/Ensemble timing, host/internal/fallback clocks, fairness, lane seeding, taps, gates, saturation, hostile input, and reset/rehydration. |
 | `AudienceCrowdMidiIntegrationTests` | Host-PPQ grid offsets and unchanged source-to-channel ownership through the full timed MIDI path. |
-| `AudiencePluginStateMigrationTests` | Released channel/scale representations, schema-2 Tonal preservation, schema-4 Flow compatibility, schema-5 cleanup, schema-6 Manual Governor compatibility, schema-7 stamping, numeric clamping, and idempotence. |
+| `AudiencePressureAwareSafetyGovernorTests` | Four exact safety profiles, all pressure reasons, hostile input, hysteresis/holds, reset, and allocation-free update. |
+| `AudienceGlobalConductorHubTests` | Registration/lifetime, group isolation, leader election, fair quotas, stale fallback, and coherent lock-free reads. |
+| `AudienceCrowdExpressionMacrosTests` | Density/centroid/motion, control-rate/change-only emission, invalid positions/clocks, reset, and allocation-free scanning. |
+| `AudienceChaosLabTests` | External CLI mapping/chaos/capture-replay helpers and bounded deterministic policies under Node's test runner. |
+| `AudiencePluginStateMigrationTests` | Released channel/scale representations, schema-2 Tonal, schema-4 Flow, schema-5 cleanup, schema-6 Manual, schema-7 routing compatibility, schema-8 stamping, numeric clamping, and idempotence. |
 
 ## 12. Repository map
 
@@ -687,9 +799,12 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 |---|---|
 | `CMakeLists.txt` | Authoritative product source boundaries, dependencies, signing, installation, tests. |
 | `Source/PluginProcessor.*` | Flagship processor and state/routing orchestration. |
-| `Source/PluginStateMigration.*` | Flagship schema-7 state migration. |
+| `Source/PluginStateMigration.*` | Flagship schema-8 state migration. |
 | `Source/PluginEditor.*` | Flagship MIDI-only editor. |
 | `Source/AdaptiveCrowdGovernor.*` | Realtime-safe crowd-density policy for Grid/Ensemble admission. |
+| `Source/PressureAwareSafetyGovernor.*` | Realtime-safe system-pressure protection and telemetry policy. |
+| `Source/GlobalConductorHub.*` | Process-local group coordination and fair per-zone quotas. |
+| `Source/CrowdExpressionMacros.*` | Fixed-cost aggregate density/centroid/motion analysis. |
 | `Source/CrowdTimeField.*` | Realtime Flow/Grid/Ensemble scheduler and shared clock-domain logic. |
 | `Source/MidiAudienceModel.*` | Source/touch state and UI snapshots. |
 | `Source/MidiPitchMap.*` | Flagship seven-scale pitch table. |
@@ -705,10 +820,12 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 | `Source/MidiProcessor.*`, `MidiEngine.*`, `MidiScaleModule.*` | Auxiliary MIDI products, not the flagship pipeline. |
 | `Source/AudienceMidiDeviceApp.cpp` | Standalone auxiliary bridge. |
 | `Tests/` | Unit/regression harnesses selected by CMake. |
+| `tools/cosmic-chaos-lab.mjs` | External Node.js proxy/capture/replay/generator; not a plugin runtime source. |
+| `docs/chaos-lab.md` | Chaos Lab operator contract and examples. |
 | `docs/manual/` | Current user manual. |
 
 Old research data, media, design files, or implementation units may still exist in an
-upgraded checkout. Their presence does not make them a 2.4.0 product feature. Check the
+upgraded checkout. Their presence does not make them a 2.5.0 product feature. Check the
 target's `target_sources` list before documenting or modifying runtime behaviour.
 
 ## 13. Operational limits and upgrade notes
@@ -726,22 +843,26 @@ target's `target_sources` list before documenting or modifying runtime behaviour
   lifecycle burst can still overflow its fixed priority FIFO and trigger a safety reset.
 - Merged telemetry is cumulative and diagnostic; it is not a MIDI control output.
 
-### Upgrade to 2.4.0
+### Upgrade to 2.5.0
 
 1. Back up the old VST3 outside the scanned plugin folder.
-2. Install Cosmic Microwave 2.4.0 and rescan the host.
+2. Install Cosmic Microwave 2.5.0 and rescan the host.
 3. Open a copied Ableton set first.
-4. Confirm each instance's UDP port, Time Field, clock, MIDI protocol,
-   source-routing mode, destination, Pitch System, and Tonal or Atomic map.
+4. Confirm each instance's UDP port, Expected Zone, ownership, MIDI Output Path,
+   endpoint, Time Field/clock, MIDI protocol, source routing, Pitch System, and map.
 5. Add downstream instruments because the flagship no longer creates sound.
-6. Test Panic and every receiving channel before connecting the audience server.
+6. Open Show Console, resolve Venue Preflight failures, verify Safety NORMAL and any
+   Global Conductor quotas or Crowd Expression mappings, then test Panic and every
+   receiving channel before connecting the audience server.
 
 New sessions default to Ensemble / Host / 1/16 with Adaptive Governor, 70% gate, and
 Atomic / Helium / Extended. The preserved Manual policy is attack 4, active 16 (15 in
 MPE), and spread 4. Schema-6-or-earlier sessions migrate with the Governor in Manual;
 schema-3-or-earlier sessions additionally migrate to Flow. Schema-5 input remains
-compatible and its retired experimental fields are discarded. New state is stamped
-as schema 7. The historical schema-2 Tonal and 1.x Atomic recovery rules remain active;
+compatible and its retired experimental fields are discarded. Schema-7-and-earlier
+state preserves Mirror/shared-port/Safety-Off behaviour. New sessions instead use Host
+Only, exclusive ownership, Safety On, and schema 8; Conductor and macros are opt-in.
+The historical schema-2 Tonal and 1.x Atomic recovery rules remain active;
 verify the receiver's MPE bend range before a performance.
 
 For user workflows, continue with [the manual](docs/manual/README.md).

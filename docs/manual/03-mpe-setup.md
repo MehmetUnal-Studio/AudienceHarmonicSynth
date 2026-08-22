@@ -19,7 +19,7 @@ In the **MIDI ROUTING** card, **OUTPUT** has three choices:
 - **MPE MIDI** - one member channel per active source touch, up to 15 simultaneous member
   channels.
 
-Cosmic Microwave 2.4.0 is always silent and MIDI-oriented.
+Cosmic Microwave 2.5.0 is always silent and MIDI-oriented.
 
 Incoming host MIDI is passed through unchanged whenever output is enabled. It is not
 quantized, remapped, or converted into MPE. Avoid routing a keyboard into the plugin if
@@ -34,9 +34,15 @@ The **MIDI OUTPUT** destination menu contains:
   from the instance's UDP port, such as `Cosmic Microwave 6060 Out`.
 - Available system or hardware MIDI devices.
 
-**Rescan** refreshes the list. Selecting a virtual or hardware route does not disable
-the host bus; the same stream remains available to the DAW. If a receiver listens to
-both paths, it will receive duplicate MIDI.
+**Rescan** refreshes the list. In **SHOW CONSOLE**, choose the explicit path:
+
+- **Host Only** sends to the DAW bus only;
+- **External Only** sends to the selected virtual/hardware endpoint only; or
+- **Mirror** intentionally sends the same stream to both.
+
+New sessions default to Host Only. Schema-7-and-earlier sessions migrate to Mirror to
+preserve their former behaviour. If a receiver listens to both sides of a Mirror route,
+it will receive duplicate MIDI.
 
 The port-derived endpoint is stable across plugin creation order and session reopen.
 Applying a new UDP port renames/reopens a selected virtual endpoint to match the new
@@ -180,7 +186,7 @@ correct Atomic MPE stream appear quantized.
 ### Normal MIDI, one source-channel group per track
 
 1. Set Cosmic Microwave to **Normal MIDI / Per source 1-16**.
-2. Select `Virtual: Cosmic Microwave <port> Out`.
+2. Select **External Only**, then `Virtual: Cosmic Microwave <port> Out`.
 3. Create receiving tracks with **MIDI From** set to that endpoint.
 4. Select Channel 1 on the first track, Channel 2 on the second, and so on.
 
@@ -190,7 +196,8 @@ have independent channel sets.
 
 ### MPE, one complete stream
 
-1. Set Cosmic Microwave to **MPE MIDI**, select Lower or Upper, and leave Setup on.
+1. Set Cosmic Microwave to **MPE MIDI**, select Lower or Upper, leave Setup on, and
+   choose one output path.
 2. Route the complete multi-channel stream to one MPE-capable receiver.
 3. Match the receiver's zone and bend range.
 
@@ -203,8 +210,9 @@ endpoint with a standalone MPE receiver or a host with explicit MPE routing.
 
 Use **PANIC** after a lost OSC `off`, receiver disconnect, or unexpected routing loop.
 It clears live/simulator source state and sends note-off/all-off safety messages to the
-host and selected external destination.
+routes that were active or are being left, preventing a path change from stranding notes.
 
-Changing the UDP port also performs a safety release before restarting the listener.
+Changing the UDP port, Expected Zone, exclusive ownership, or MIDI Output Path also
+performs a safety release before applying the new routing contract.
 After changing a port, confirm both the new OSC input and the newly named virtual MIDI
 endpoint at the receiver.

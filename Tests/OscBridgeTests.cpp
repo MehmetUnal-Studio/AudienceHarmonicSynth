@@ -851,6 +851,59 @@ int main()
         stableBridge.stop();
     }
 
+    // Venue instances can require exclusive ownership of their zone port. A
+    // conflicting client must fail visibly rather than silently sharing the
+    // datagrams, and expected-zone filtering happens before state/telemetry.
+    {
+        CountingSink exclusiveSink, conflictSink;
+        OscBridge exclusiveBridge(exclusiveSink, OscBridge::FingerPolicy::finger0Only);
+        OscBridge conflictBridge(conflictSink, OscBridge::FingerPolicy::finger0Only);
+        int venuePort = 62320;
+        bool venueStarted = false;
+        for (; venuePort < 62420; ++venuePort)
+            if ((venueStarted = exclusiveBridge.start(
+                    venuePort, OscBridge::PortPolicy::exclusive)))
+                break;
+
+        exclusiveBridge.setExpectedZone(0); // A
+        const bool conflictReported = conflictBridge.start(venuePort)
+                                   && conflictBridge.isRunning()
+                                   && ! conflictBridge.isReceiving()
+                                   && conflictBridge.oscStatus().contains("OWNERSHIP CONFLICT");
+
+        juce::OSCSender venueSender;
+        const bool venueConnected = venueSender.connect("127.0.0.1", venuePort);
+        if (venueConnected)
+        {
+            venueSender.send("/cs/B/7/finger0/on", 1);
+            venueSender.send("/cs/A/7/finger0/on", 1);
+        }
+        const bool expectedAccepted = waitForValidMessageCount(exclusiveBridge, 1);
+        expect(venueStarted && venueConnected && conflictReported
+                   && expectedAccepted
+                   && exclusiveBridge.isExclusive()
+                   && exclusiveBridge.getExpectedZone() == 0
+                   && exclusiveBridge.getZoneMismatchCount() == 1
+                   && exclusiveBridge.getValidMessageCount() == 1
+                   && exclusiveSink.onCount.load() == 1
+                   && exclusiveSink.lastRow.load() == 0,
+               "exclusive port ownership and expected-zone filtering fail closed", failed);
+
+        exclusiveBridge.stop();
+        const bool sharedRecovered = conflictBridge.start(venuePort)
+                                  && conflictBridge.isReceiving();
+        OscBridge lateExclusive(exclusiveSink, OscBridge::FingerPolicy::finger0Only);
+        const bool lateExclusiveRejected = lateExclusive.start(
+                venuePort, OscBridge::PortPolicy::exclusive)
+            && ! lateExclusive.isReceiving()
+            && lateExclusive.oscStatus().contains("OWNERSHIP CONFLICT");
+        expect(sharedRecovered && lateExclusiveRejected,
+               "released exclusive ports recover and reject late exclusive claims while shared", failed);
+
+        lateExclusive.stop();
+        conflictBridge.stop();
+    }
+
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";
     return failed == 0 ? 0 : 1;
 }

@@ -23,7 +23,7 @@ Audience controls map directly to MIDI:
 Normal MIDI can route every source deterministically across Channels 1-16. MPE instead
 allocates one member channel per active source touch for isolated expression.
 
-Cosmic Microwave 2.4.0 does not produce sound. It keeps a silent stereo instrument shell
+Cosmic Microwave 2.5.0 does not produce sound. It keeps a silent stereo instrument shell
 so Ableton can place it like the previous product and reopen existing sessions. The
 actual sound comes from instruments receiving its MIDI.
 
@@ -47,7 +47,9 @@ One CMake project builds four MIDI-oriented targets:
   app must remain running while it receives OSC and emits MIDI.
 - **To receive the audience:** UDP reachability from the upstream server to the
   Cosmic Microwave machine and a unique configured port per already-separated zone.
-- **To test without a network:** use the built-in simulator.
+- **To test without a network:** use the built-in simulator. For captured UDP replay,
+  load generation, and deterministic packet faults, use the separate Chaos Lab
+  (Node.js 20+ recommended).
 - **To build:** CMake 3.22+, a C++17 toolchain, and internet access for the first
   configure. JUCE 8.0.4 is fetched automatically.
 
@@ -90,8 +92,8 @@ Useful CMake options:
   targets to the user VST3 folder. Set it to `OFF` for CI or a build-only workflow.
 - **`AUDIENCE_SYNTH_BUILD_TESTS`** - defaults to `ON` and builds the MIDI mapping,
   scale, MPE, OSC bridge, finger-router, audience-model, Tonal/Atomic pitch-map,
-  Atomic integration, Adaptive Crowd Governor, Time Field, timed MIDI integration, catalog, and
-  state-migration tests.
+  Atomic integration, both Governors, Time Field, Global Conductor, Crowd Expression,
+  Chaos Lab, timed MIDI integration, catalog, and state-migration tests.
 
 The internal CMake target is still named `AudienceHarmonicSynth` for compatibility;
 the user-facing product and bundle name are Cosmic Microwave.
@@ -105,14 +107,15 @@ This test uses the simulator, so it does not require the audience server.
 2. **Choose timing and protocol.** Select **Flow** in **TIME FIELD** for this immediate
    connectivity test. In **MIDI ROUTING**, select **Normal MIDI** and
    **Per source 1-16**. Return to Ensemble after the route is confirmed.
-3. **Choose the destination.** Select
-   **Virtual: Cosmic Microwave 6060 Out**. The status line should confirm that the
-   virtual port opened. You can use **Host MIDI Output** instead when the host exposes
-   the plugin output directly in its routing menus.
+3. **Choose one output path.** Leave **Host Only** for Ableton's plugin MIDI bus, or
+   select **External Only** and then **Virtual: Cosmic Microwave 6060 Out**. Use
+   **Mirror** only when both routes are intentionally consumed; otherwise it can create
+   duplicate notes. The external-route status should confirm that the port opened.
 4. **Prepare a receiver.** In Ableton, create a MIDI track with a sound-producing
-   instrument, set **MIDI From** to `Cosmic Microwave 6060 Out`, initially listen to
-   all channels, and enable the track's required monitoring/arming. For the Standalone
-   app, choose the same virtual port in an external receiver.
+   instrument. For Host Only, route from the Cosmic Microwave device/track; for
+   External Only, set **MIDI From** to `Cosmic Microwave 6060 Out`. Initially listen to
+   all channels and enable the required monitoring/arming. The Standalone app uses an
+   external or hardware endpoint because it has no DAW host bus.
 5. **Generate a source.** Click **+ Source** in the simulator. The header's source,
    touch and note counters should change; one cell lights in the activity map and
    the receiving instrument plays. Enable **Random movement** to exercise pitch and
@@ -123,14 +126,16 @@ octaves. Select **Tonal** in **PITCH MAPPING** if the first test should use a fa
 12-TET scale such as Major. Normal MIDI rounds Atomic targets to the nearest semitone;
 MPE sends the exact target as a base note plus per-note pitch bend.
 
-New 2.4.0 sessions also begin with **Ensemble / Host / 1/16**, a 70% gate, and the
+New 2.5.0 sessions also begin with **Ensemble / Host / 1/16**, a 70% gate, and the
 **Adaptive Crowd Governor** enabled. Adaptive measures recent audience density and
 softly changes attacks per step, active voices, and spread; in MPE its active limit is
 always capped at the 15 member channels. Select **Manual** when you want the saved
 fixed values (initially attack 4, active 16, spread 4). Switching modes never overwrites
 those Manual values. Projects saved with state schema 6 or earlier open in Manual;
 projects saved before schema 4 additionally migrate to **Flow**, preserving their
-earlier direct timing. New state is schema 7.
+earlier direct timing. New state is schema 8. Schema-7-and-earlier projects retain
+their historical Mirror/shared-port routing and start with the Safety Governor off;
+review these choices in Show Console before the next performance.
 
 If the counters move but the receiver does not, the OSC-to-MIDI path is working and
 the remaining issue is destination or receiver routing. See
@@ -140,11 +145,16 @@ the remaining issue is destination or receiver routing. See
 
 For each instance:
 
-1. Enter its assigned UDP port and click **Apply**.
-2. Send `/cs/<zone>/<source>/finger0/u`, `/v`, and `/on` messages.
-3. Confirm **Receiving** and the expected observed zone letter.
-4. Confirm the source appears in the activity map's expected MIDI-channel column.
-5. Route the port-named endpoint to the receiving tracks.
+1. Enter its assigned UDP port, choose the corresponding **Expected Zone**, keep
+   **Exclusive UDP Port** on, and click **Apply**.
+2. Choose exactly one normal output path: **Host Only** or **External Only**.
+3. Send `/cs/<zone>/<source>/finger0/u`, `/v`, and `/on` messages.
+4. Confirm **Receiving**, the expected observed zone letter, and zero zone mismatches.
+5. Confirm the source appears in the activity map's expected MIDI-channel column.
+6. Open **SHOW CONSOLE** and resolve every failed Venue Preflight row. Warnings may be
+   intentional, such as Global Conductor being Off for a single-zone rehearsal.
+7. If several instances need a shared capacity budget, assign the same Conductor group,
+   set one instance to Leader, and confirm every member reports a live global quota.
 
 For multiple instances on one playing Ableton transport, leave **CLOCK** at **Host**
 so they share the host PPQ grid. If the host clock is unavailable or stopped, Cosmic
@@ -152,13 +162,15 @@ Microwave continues on its common monotonic fallback at the Internal BPM; select
 **Internal** makes that process-wide clock explicit.
 
 The plugin does not infer Zone A from `6060` or Zone B from `6061`. Those are upstream
-deployment conventions. If the UI reports more than one observed zone, correct the
-server-side split.
+deployment conventions. **Expected Zone** is an explicit filter, not port inference;
+wrong-zone messages are counted and rejected before source state or MIDI generation.
 
 ## Next chapters
 
 - [02 - UI Guide](02-ui-guide.md) explains every visible control.
 - [03 - MPE Setup](03-mpe-setup.md) covers per-source-touch expression and receiver setup.
 - [04 - OSC & the Audience](04-osc-audience.md) defines the complete wire protocol.
+- [Capture/Replay Chaos Lab](../chaos-lab.md) covers external capture, replay,
+  deterministic failure injection, and load generation.
 - [05 - Pitch Systems & External Tuning](05-tuning-files.md) explains the seven tonal
   mappings, 29 Atomic elements, density modes, and external receiver tuning.

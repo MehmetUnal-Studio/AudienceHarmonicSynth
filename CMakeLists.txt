@@ -7,7 +7,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQU
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment target" FORCE)
 endif()
 
-project(AudienceHarmonicSynth VERSION 2.4.0 LANGUAGES C CXX)
+project(AudienceHarmonicSynth VERSION 2.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -70,9 +70,12 @@ target_sources(AudienceHarmonicSynth PRIVATE
     Source/MpeMidiOutput.cpp
     Source/PluginEditor.cpp
     Source/AdaptiveCrowdGovernor.cpp
+    Source/PressureAwareSafetyGovernor.cpp
+    Source/GlobalConductorHub.cpp
     Source/AtomicScaleMap.cpp
     Source/AtomicScaleCatalog.cpp
     Source/CrowdTimeField.cpp
+    Source/CrowdExpressionMacros.cpp
     Source/MidiAudienceModel.cpp
     Source/MidiPitchMap.cpp
     Source/OscBridge.cpp
@@ -482,6 +485,32 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     add_test(NAME AudienceAdaptiveCrowdGovernorTests
              COMMAND AudienceAdaptiveCrowdGovernorTests)
 
+    add_executable(AudiencePressureAwareSafetyGovernorTests
+        Tests/PressureAwareSafetyGovernorTests.cpp
+        Source/PressureAwareSafetyGovernor.cpp
+    )
+
+    target_link_libraries(AudiencePressureAwareSafetyGovernorTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudiencePressureAwareSafetyGovernorTests
+             COMMAND AudiencePressureAwareSafetyGovernorTests)
+
+    add_executable(AudienceGlobalConductorHubTests
+        Tests/GlobalConductorHubTests.cpp
+        Source/GlobalConductorHub.cpp
+    )
+
+    target_link_libraries(AudienceGlobalConductorHubTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceGlobalConductorHubTests
+             COMMAND AudienceGlobalConductorHubTests)
+
     add_executable(AudienceCrowdTimeFieldTests
         Tests/CrowdTimeFieldTests.cpp
         Source/CrowdTimeField.cpp
@@ -493,6 +522,19 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     )
 
     add_test(NAME AudienceCrowdTimeFieldTests COMMAND AudienceCrowdTimeFieldTests)
+
+    add_executable(AudienceCrowdExpressionMacrosTests
+        Tests/CrowdExpressionMacrosTests.cpp
+        Source/CrowdExpressionMacros.cpp
+    )
+
+    target_link_libraries(AudienceCrowdExpressionMacrosTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceCrowdExpressionMacrosTests
+             COMMAND AudienceCrowdExpressionMacrosTests)
 
     add_executable(AudienceCrowdMidiIntegrationTests
         Tests/CrowdMidiIntegrationTests.cpp
@@ -534,6 +576,17 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     )
 
     add_test(NAME AudiencePluginStateMigrationTests COMMAND AudiencePluginStateMigrationTests)
+
+    find_program(COSMIC_NODE_EXECUTABLE NAMES node nodejs)
+    if(COSMIC_NODE_EXECUTABLE)
+        add_test(NAME AudienceChaosLabTests
+                 COMMAND "${COSMIC_NODE_EXECUTABLE}" --test
+                         "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ChaosLabTests.mjs")
+        set_tests_properties(AudienceChaosLabTests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    else()
+        message(WARNING "Node.js was not found; AudienceChaosLabTests will be skipped")
+    endif()
 endif()
 
 if(APPLE AND NOT ANDROID)

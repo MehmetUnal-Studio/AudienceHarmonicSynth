@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <memory>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -28,6 +29,10 @@ private:
     void refreshMidiOutputCombo();
     void updateModeVisibility();
     void updateLiveText();
+    void updateConsoleTelemetry();
+    void showPage (bool showConsole);
+    void setPerformControlsVisible (bool shouldBeVisible);
+    void setConsoleControlsVisible (bool shouldBeVisible);
 
     static void addChoiceItems (juce::ComboBox&, const juce::StringArray&);
     static void styleLabel (juce::Label&, const juce::String&,
@@ -39,6 +44,11 @@ private:
     std::unique_ptr<juce::LookAndFeel_V4> lookAndFeel;
     std::unique_ptr<SourceActivityMap> sourceMap;
     juce::TooltipWindow tooltipWindow { this, 650 };
+
+    // Accessible navigation. The Perform page remains the musical control
+    // surface; Show Console is a deliberately separate venue-safety view.
+    juce::TextButton performTabButton { "PERFORM" };
+    juce::TextButton showConsoleTabButton { "SHOW CONSOLE" };
 
     // Header telemetry
     juce::Label versionLabel;
@@ -102,6 +112,44 @@ private:
     juce::Label destinationDetailLabel;
     juce::TextButton panicButton { "PANIC" };
 
+    // Show Console: routing contract
+    juce::Label outputPathLabel, expectedZoneLabel;
+    juce::ComboBox outputPathCombo, expectedZoneCombo;
+    juce::ToggleButton exclusivePortButton { "Exclusive UDP ownership" };
+    juce::Label routeConsoleStatusLabel;
+
+    // Show Console: pressure-aware safety governor + telemetry
+    juce::ToggleButton safetyGovernorButton { "Safety Governor enabled" };
+    juce::Label safetyStateLabel, safetyReasonLabel;
+    juce::Label safetyIngressLabel, safetyDeadlineLabel;
+    juce::Label safetyFifoLabel, safetyQueueLabel;
+
+    // Show Console: venue preflight. Every row includes a text state so status
+    // is never communicated by colour alone.
+    juce::Label preflightSummaryLabel;
+    std::array<juce::Label, 7> preflightRows;
+
+    // Show Console: process-local Global Conductor
+    juce::Label conductorRoleLabel, conductorGroupLabel;
+    juce::Label conductorAttackBudgetLabel, conductorVoiceBudgetLabel;
+    juce::ComboBox conductorRoleCombo, conductorGroupCombo;
+    juce::Slider conductorAttackBudgetSlider, conductorVoiceBudgetSlider;
+    juce::Label conductorStatusLabel, conductorQuotaLabel;
+
+    // Show Console: crowd-expression CC macros
+    juce::ToggleButton crowdMacrosButton { "Crowd Expression macros" };
+    juce::Label macroChannelLabel, macroRateLabel;
+    juce::Label macroDensityCcLabel, macroCentroidXCcLabel;
+    juce::Label macroCentroidYCcLabel, macroMotionCcLabel;
+    juce::ComboBox macroChannelCombo, macroRateCombo;
+    juce::Slider macroDensityCcSlider, macroCentroidXCcSlider;
+    juce::Slider macroCentroidYCcSlider, macroMotionCcSlider;
+    juce::Label macroStatusLabel;
+
+    // Show Console: Capture/Replay Chaos Lab is intentionally an external tool
+    // so file and UDP I/O can never enter the plug-in audio callback.
+    juce::Label chaosTitleLabel, chaosBodyLabel, chaosCommandLabel;
+
     juce::Rectangle<int> oscCardBounds;
     juce::Rectangle<int> routingCardBounds;
     juce::Rectangle<int> simulatorCardBounds;
@@ -110,7 +158,14 @@ private:
     juce::Rectangle<int> pitchCardBounds;
     juce::Rectangle<int> midiCardBounds;
     juce::Rectangle<int> destinationCardBounds;
+    juce::Rectangle<int> safetyCardBounds;
+    juce::Rectangle<int> preflightCardBounds;
+    juce::Rectangle<int> conductorCardBounds;
+    juce::Rectangle<int> routeConsoleCardBounds;
+    juce::Rectangle<int> macrosCardBounds;
+    juce::Rectangle<int> chaosCardBounds;
 
+    bool showConsolePage = false;
     bool updatingPortEditor = false;
     bool portEditorDirty = false;
     bool refreshingDestination = false;
@@ -149,6 +204,21 @@ private:
     std::unique_ptr<ComboAttachment> mpeBendRangeAttachment;
     std::unique_ptr<ComboAttachment> mpePitchModeAttachment;
     std::unique_ptr<ButtonAttachment> mpeSetupAttachment;
+    std::unique_ptr<ComboAttachment> outputPathAttachment;
+    std::unique_ptr<ComboAttachment> expectedZoneAttachment;
+    std::unique_ptr<ButtonAttachment> exclusivePortAttachment;
+    std::unique_ptr<ButtonAttachment> safetyGovernorAttachment;
+    std::unique_ptr<ComboAttachment> conductorRoleAttachment;
+    std::unique_ptr<ComboAttachment> conductorGroupAttachment;
+    std::unique_ptr<SliderAttachment> conductorAttackBudgetAttachment;
+    std::unique_ptr<SliderAttachment> conductorVoiceBudgetAttachment;
+    std::unique_ptr<ButtonAttachment> crowdMacrosAttachment;
+    std::unique_ptr<ComboAttachment> macroChannelAttachment;
+    std::unique_ptr<ComboAttachment> macroRateAttachment;
+    std::unique_ptr<SliderAttachment> macroDensityCcAttachment;
+    std::unique_ptr<SliderAttachment> macroCentroidXCcAttachment;
+    std::unique_ptr<SliderAttachment> macroCentroidYCcAttachment;
+    std::unique_ptr<SliderAttachment> macroMotionCcAttachment;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceEditor)
 };

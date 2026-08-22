@@ -52,6 +52,15 @@ public:
         double gatePercent = 70.0;
         int spreadSlots = 4;
         std::uint32_t laneSeed = 0;
+        // Soft safety policy. Closed admission retains/cancels pending intent
+        // and always processes releases; reopening never causes a reset.
+        bool attackAdmissionOpen = true;
+        // Flow normally retains its direct, low-latency behaviour. These two
+        // independent soft ceilings are used only by the pressure governor so
+        // an overloaded venue cannot release an unbounded attack burst when
+        // admission reopens. They never form part of the clock domain.
+        int flowMaxAttacksPerBlock = kMaxVoices;
+        int flowMaxActive = kMaxVoices;
     };
 
     // All positions describe the start of the current audio block. ppqPosition
@@ -201,7 +210,7 @@ private:
     void applySoftPolicy (const Config&, const ResolvedClock&) noexcept;
     void updateClockHistory (const ResolvedClock&) noexcept;
 
-    void processFlow (const ResolvedClock&, const InputEvent*, int,
+    void processFlow (const Config&, const ResolvedClock&, const InputEvent*, int,
                       EventCollector&) noexcept;
     void processTimed (const Config&, const ResolvedClock&,
                        const InputEvent*, int, EventCollector&) noexcept;

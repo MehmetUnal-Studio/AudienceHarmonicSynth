@@ -49,6 +49,19 @@ void OscFingerRouter::incrementSaturating (std::atomic<uint32_t>& counter,
     }
 }
 
+void OscFingerRouter::updateHighWater (std::atomic<uint32_t>& highWater,
+                                        int depth) noexcept
+{
+    const auto bounded = (uint32_t) juce::jlimit(0, EVENT_QUEUE_SIZE, depth);
+    auto current = highWater.load(std::memory_order_relaxed);
+    while (bounded > current
+           && ! highWater.compare_exchange_weak(current, bounded,
+                                                std::memory_order_relaxed,
+                                                std::memory_order_relaxed))
+    {
+    }
+}
+
 void OscFingerRouter::pushMotion (Event::Type type, int sourceId, int finger,
                                   float value) noexcept
 {
@@ -72,6 +85,14 @@ void OscFingerRouter::pushMotion (Event::Type type, int sourceId, int finger,
         state.xDirtySinceLifecycle = true;
     else
         state.yDirtySinceLifecycle = true;
+
+    const auto sample = motionIngressCounter.fetch_add(1, std::memory_order_relaxed);
+    const int divisor = motionUpdateDivisor.load(std::memory_order_relaxed);
+    if (divisor > 1 && sample % (uint32_t) divisor != 0u)
+    {
+        incrementSaturating(coalescedMotionEvents);
+        return;
+    }
 
     const auto epoch = state.producerEpoch;
     const auto previousEpoch = queuedEpoch.exchange(epoch, std::memory_order_acq_rel);
@@ -160,6 +181,7 @@ bool OscFingerRouter::enqueueLifecycleGroup (const QueuedEvent* group, int count
         lifecycleEvents[(size_t) (start2 + i)] = group[(size_t) copied++];
 
     lifecycleFifo.finishedWrite(count);
+    updateHighWater(lifecycleHighWater, lifecycleFifo.getNumReady());
     return true;
 }
 
@@ -178,6 +200,7 @@ bool OscFingerRouter::enqueueMotionMarker (Event::Type type, int sourceId, int f
                                       0.0f },
                                     epoch };
     motionFifo.finishedWrite(1);
+    updateHighWater(motionHighWater, motionFifo.getNumReady());
     return true;
 }
 

@@ -45,22 +45,44 @@ struct OscBridge::SharedPort final
     // already present or a free slot accepted it), false if the cap was
     // reached and the client could not be added (B25). The connection /
     // slot-claim logic itself is unchanged; we only report the outcome.
-    bool addClient (OscBridge& bridge)
+    enum class AddClientResult
+    {
+        registered,
+        full,
+        exclusiveConflict
+    };
+
+    AddClientResult addClient (OscBridge& bridge,
+                               OscBridge::PortPolicy requestedPolicy)
     {
         const juce::ScopedLock lock(clientsLock);
 
         for (auto& client : clients)
             if (client.load(std::memory_order_acquire) == &bridge)
-                return true;
+                return AddClientResult::registered;
+
+        if (exclusiveClient != nullptr)
+            return AddClientResult::exclusiveConflict;
+
+        if (requestedPolicy == OscBridge::PortPolicy::exclusive)
+        {
+            for (auto& client : clients)
+                if (client.load(std::memory_order_acquire) != nullptr)
+                    return AddClientResult::exclusiveConflict;
+        }
 
         for (auto& client : clients)
         {
             OscBridge* empty = nullptr;
             if (client.compare_exchange_strong(empty, &bridge, std::memory_order_release, std::memory_order_relaxed))
-                return true;
+            {
+                if (requestedPolicy == OscBridge::PortPolicy::exclusive)
+                    exclusiveClient = &bridge;
+                return AddClientResult::registered;
+            }
         }
 
-        return false; // all slots full -> client silently dropped previously
+        return AddClientResult::full;
     }
 
     void removeClient (OscBridge& bridge)
@@ -75,6 +97,9 @@ struct OscBridge::SharedPort final
             OscBridge* expected = &bridge;
             client.compare_exchange_strong(expected, nullptr, std::memory_order_release, std::memory_order_relaxed);
         }
+
+        if (exclusiveClient == &bridge)
+            exclusiveClient = nullptr;
     }
 
 private:
@@ -123,6 +148,7 @@ private:
     int port = 0;
     juce::OSCReceiver receiver;
     juce::CriticalSection clientsLock;
+    OscBridge* exclusiveClient = nullptr; // guarded by clientsLock
     std::array<std::atomic<OscBridge*>, (std::size_t) OscBridge::MAX_SHARED_CLIENTS> clients {};
 };
 
@@ -148,14 +174,16 @@ OscBridge::OscBridge (SeatEventSink& t, FingerPolicy policy)
 
 OscBridge::~OscBridge() { stop(); }
 
-bool OscBridge::start (int port)
+bool OscBridge::start (int port, PortPolicy policy)
 {
     stop();
     validMessageCount.store(0, std::memory_order_relaxed);
     observedZoneMask.store(0, std::memory_order_relaxed);
     lastValidMessageMs.store(0, std::memory_order_relaxed);
     malformedDatagramCount.store(0, std::memory_order_relaxed);
+    zoneMismatchCount.store(0, std::memory_order_relaxed);
     hasReceivedValidMessage.store(false, std::memory_order_release);
+    portPolicy = policy;
 
     if (port < 1 || port > 65535)
     {
@@ -199,7 +227,8 @@ bool OscBridge::start (int port)
     // Connection logic is unchanged; we only observe whether this bridge got a
     // fan-out slot. When the shared port is already full the client is dropped
     // exactly as before, but we now surface it instead of failing silently (B25).
-    const bool registered = portHandle->addClient(*this);
+    const auto registration = portHandle->addClient(*this, policy);
+    const bool registered = registration == SharedPort::AddClientResult::registered;
     sharedPort = std::move(portHandle);
     currentPort = port;
     running     = true;
@@ -207,10 +236,13 @@ bool OscBridge::start (int port)
 
     if (registered)
         statusString = "Listening on UDP " + juce::String(port);
-    else
+    else if (registration == SharedPort::AddClientResult::full)
         statusString = "UDP " + juce::String(port) + " PORT FULL - max "
                      + juce::String(MAX_SHARED_CLIENTS)
                      + " clients reached, this instance is not receiving OSC";
+    else
+        statusString = "UDP " + juce::String(port)
+                     + " OWNERSHIP CONFLICT - exclusive venue port is already in use";
 
     return true;
 }
@@ -265,6 +297,13 @@ void OscBridge::oscMessageReceived (const juce::OSCMessage& msg)
 
     if (param == osc_wire::Param::None)
         return;
+
+    const int requiredZone = expectedZone.load(std::memory_order_acquire);
+    if (requiredZone >= 0 && row != requiredZone)
+    {
+        incrementSaturating(zoneMismatchCount);
+        return;
+    }
 
     if (param == osc_wire::Param::Off && msg.size() == 0)
     {

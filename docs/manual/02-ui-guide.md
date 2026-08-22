@@ -12,26 +12,26 @@ all visible controls are MIDI-only.
 
 ```
 +--------------------------------------------------------------------------+
-| COSMIC MICROWAVE   MIDI ONLY   v2.4.0   SOURCES | TOUCHES | NOTES | MPE VOICES |
+| COSMIC MICROWAVE   MIDI ONLY   v2.5.0   SOURCES | TOUCHES | MIDI NOTES | MPE VOICES |
 +----------------------+------------------------+--------------------------+
-| OSC INPUT            | SOURCE ROUTING         | SIMULATOR                |
+| [ PERFORM ] [ SHOW CONSOLE ]                                           |
 +----------------------+------------------------+--------------------------+
-| SOURCE MATRIX                  | TIME FIELD           | PITCH MAPPING    |
-| 256 IDs / 16 channel columns   | Flow/Grid/Ensemble   +------------------+
-|                                | Manual/Adaptive      | MIDI ROUTING     |
-|                                | live P/A/M           +------------------+
-|                                |                      | MIDI OUTPUT      |
+| PERFORM: OSC / Source Matrix / Time Field / Pitch / MIDI / Simulator    |
+| SHOW CONSOLE: Routing Safety / Safety Governor / Venue Preflight        |
+|               Global Conductor / Crowd Expression / external Chaos Lab |
 +-------------------------------------------------------+------------------+
 ```
 
-The editor opens at `1120 x 640`, is resizable, and keeps the activity map large while
-the routing controls stay together in the right column.
+The editor opens at `1280 x 760`, is resizable down to `1000 x 650`, and separates
+performance controls from venue engineering. **PERFORM** keeps the source map and
+musical controls visible. **SHOW CONSOLE** groups safety, readiness, multi-instance
+coordination, and aggregate-control features without crowding the performance view.
 
 ## Header
 
 The header identifies the device as **COSMIC MICROWAVE**, labels its role as
 **OSC / MIDI ROUTING**, shows a **MIDI ONLY** badge, and permanently displays the
-build-derived product version (for example **v2.4.0**). Four live metrics appear on
+build-derived product version (for example **v2.5.0**). Four live metrics appear on
 the right:
 
 - **SOURCES** - OSC or simulator source IDs with an active `finger0` touch.
@@ -53,8 +53,8 @@ The status line distinguishes these states:
 - **Receiving** - valid OSC traffic arrived recently.
 - **Listening ... last message ... ago** - the socket is still ready and shows the
   age of the most recent valid message.
-- A red error - the port could not be used or the shared receiver has no free client
-  slot.
+- **OWNERSHIP CONFLICT** or another red error - exclusive ownership could not be
+  established, the port could not be used, or the receiver has no free client slot.
 
 The address reminder beneath the status is:
 
@@ -64,7 +64,9 @@ The address reminder beneath the status is:
 
 Each instance listens to one UDP port. The upstream server should therefore send one
 already-separated zone to each instance. The zone is still read from each OSC address;
-it is not inferred from the port number.
+it is not inferred from the port number. New sessions request exclusive ownership. The
+receiver periodically retries a failed exclusive bind, so releasing the conflicting
+owner can restore listening without recreating the device.
 
 ## SOURCE ROUTING
 
@@ -82,8 +84,10 @@ belonging to a source's admitted finger0 touch uses that source's channel.
 
 The summary changes when **Single channel**, **MPE MIDI**, or **Off** is selected. Its
 bottom line reports the zone letters observed in valid OSC addresses and the current
-source/touch totals. If more than one zone appears, check the upstream port split;
-the plugin observes zone data but does not filter traffic by zone.
+source/touch totals. **Expected Zone** in Show Console can lock the instance to one
+letter. Wrong-zone packets are counted and rejected before source state, accepted-
+traffic telemetry, and MIDI generation. **Any** is intended for diagnostics; it does
+not infer a zone from the UDP port.
 
 ## SIMULATOR
 
@@ -127,7 +131,7 @@ system while keeping every source's single-touch lifecycle intact.
   Attacks receive a fixed gate; a source that remains held is queued for a later pulse.
   This is the default for new sessions.
 
-New 2.4.0 sessions use **Ensemble**, **Host**, **1/16**, a 70% gate, and **Adaptive**
+New 2.5.0 sessions use **Ensemble**, **Host**, **1/16**, a 70% gate, and **Adaptive**
 crowd policy. The preserved Manual values begin at four attacks per step, an active
 limit of 16, and a four-step spread. MPE can use only 15 member channels, so its
 effective active limit is always capped at 15. State saved with schema 6 or earlier
@@ -295,13 +299,114 @@ The **DESTINATION** menu contains:
 - Available system or hardware MIDI outputs.
 
 **Rescan** refreshes the destination list. The two lines below it report the selected
-route and whether it opened successfully. Selecting a virtual or hardware destination
-does not disable the host MIDI bus; the same stream remains available to the host.
+route and whether it opened successfully. Selecting an endpoint prepares the external
+route; **MIDI Output Path** in Show Console decides whether it is actually used.
 
 For Ableton channel separation, the virtual endpoint is recommended. Receiving tracks
 can select `Cosmic Microwave 6060 Out` and then choose Channel 1, Channel 2, and so on.
 The endpoint name follows the instance's UDP port, so the Zone A and Zone B instances
 remain easy to identify after reopening a session.
+
+## SHOW CONSOLE
+
+### Routing Safety
+
+- **OUTPUT PATH** - **Host Only** sends only to the plugin bus, **External Only** sends
+  only to the selected endpoint and clears host output, and **Mirror** deliberately
+  sends to both. Host Only is the new-session default.
+- **EXPECTED ZONE** - **Any** accepts every valid zone letter; `A..Z` rejects and
+  counts every otherwise-valid wrong-zone packet before it reaches source state.
+- **Exclusive UDP ownership** - requires this instance to be the only in-process owner
+  of its port. New sessions enable it. A conflict is a visible failure, not a shared
+  subscription.
+
+Changing output path, expected zone, exclusive ownership, port, MIDI protocol, or other
+identity-bearing routing safely releases current note state. Sessions written with
+schema 7 or earlier intentionally migrate to Mirror, Any, shared ownership, and Safety
+Governor Off so an update does not silently reroute a show.
+
+### Safety Governor and telemetry
+
+The Safety Governor protects the realtime path independently of the musical Adaptive
+Crowd Governor. It samples seven pressure signals: validated OSC events/second,
+lifecycle queue depth, motion-drop delta, Time Field pending depth, external FIFO depth,
+oldest external event age, and audio callback deadline ratio.
+
+| State | Motion updates | Attack ceiling | Active ceiling | Minimum spread | New attacks | Macros |
+|---|---:|---:|---:|---:|---|---|
+| NORMAL | every update | 16 | 16 | 1 | open | enabled |
+| HIGH | every 2nd | 8 | 12 | 2 | open | enabled |
+| CRITICAL | every 4th | 2 | 8 | 4 | open | suspended |
+| EMERGENCY | every 8th | 1 | 4 | 8 | closed | suspended |
+
+Escalation is immediate. Recovery is hysteretic, held for 2/3/5 seconds depending on
+the current state, and descends one state at a time. Invalid numeric or clock input
+fails closed to EMERGENCY. Motion thinning coalesces to the latest position; it never
+reorders lifecycle. Existing voices, Off, watchdog releases, and Panic remain available.
+Flow remains direct in NORMAL but obeys the Safety ceilings when pressure rises.
+
+The card shows the state, active reason flags, ingress rate, DSP deadline percentage,
+external FIFO pressure/age, current lifecycle/motion queue depths, high-water marks,
+dropped count, and coalesced-motion count.
+
+### Venue Preflight
+
+The live checklist evaluates seven independent items:
+
+1. OSC receiver and recent traffic.
+2. Expected-zone contract and mismatch count.
+3. Exclusive UDP ownership.
+4. Output-path/endpoint coherence.
+5. Safety Governor enabled and current state.
+6. Time Field mode and host-clock lock/fallback.
+7. Global Conductor registration and allocation freshness.
+
+**FAIL** is a blocker, **WARN** is an advisory requiring an operator decision, and
+**BYPASS** describes an intentionally disabled subsystem. The summary never replaces a
+real MIDI-monitor or Panic rehearsal; it makes the configuration contract inspectable.
+
+### Global Conductor
+
+Global Conductor coordinates at most 16 Cosmic Microwave instances loaded in the same
+plugin process. Choose one of four isolated groups and a role:
+
+- **Off** - use the local Time Field policy.
+- **Leader** - participate and offer the group's attack (`1..64`) and voice (`1..128`)
+  budgets. If several leaders exist, the lowest UDP port wins deterministically.
+- **Follower** - publish local density and consume the elected leader's allocation.
+
+At 10 Hz the leader divides budgets fairly across live group members, weighted by
+density with deterministic rotation when capacity is scarce. The status shows
+registration, Global/Local Fallback/Bypassed source, current attack/voice quota, active
+zone count, and leader port. A missing or stale publication expires after 1.5 seconds
+and falls back to the instance's local policy without blocking the audio thread.
+Global quotas apply to timed modes; Flow remains the direct diagnostic mode.
+
+### Crowd Expression macros
+
+When enabled, the analyzer scans the fixed 256-source model and emits change-only MIDI
+CC snapshots after note lifecycle traffic:
+
+| Macro | Default | Meaning |
+|---|---:|---|
+| Density | CC20 | Active sources normalized to the 256-source capacity. |
+| Centroid X | CC21 | Mean horizontal position of active sources with valid positions. |
+| Centroid Y | CC22 | Mean vertical position of active sources with valid positions. |
+| Motion | CC23 | Smoothed aggregate change in valid source positions. |
+
+Choose Channel 1-16 or Broadcast and 5, 10, 20, or 30 Hz. The first enabled tick sends
+all four values; later ticks send only changed values. An empty crowd reports density
+and motion 0 with both centroids centred at 64. Non-finite positions are excluded from
+centroid/motion while the participant can still count as active. CRITICAL and EMERGENCY
+suspend MIDI macro emission while telemetry continues, and recovery rehydrates a full
+snapshot.
+
+### Capture/Replay Chaos Lab
+
+This card is an operator hand-off to `tools/cosmic-chaos-lab.mjs`. Capture, replay,
+load generation, files, and proxy sockets run in a separate Node.js process; none of
+them runs inside Cosmic Microwave or on the audio thread. See
+[Capture/Replay Chaos Lab](../chaos-lab.md) for commands and failure policies.
 
 ### PANIC
 
@@ -313,14 +418,18 @@ a sender disconnect, a routing change, or any suspected missing `off` packet.
 ## Recommended one-zone workflow
 
 1. Place one Cosmic Microwave instance for each already-separated zone.
-2. Set the instance's UDP port, for example `6060` for Zone A and `6061` for Zone B.
+2. Set the instance's UDP port and matching Expected Zone, for example `6060` / A and
+   `6061` / B; keep exclusive ownership enabled.
 3. Choose **Normal MIDI -> Per source 1-16** for channel-separated routing, or choose
    **MPE MIDI** for per-note expression.
 4. Leave **Ensemble / Host / 1/16 / Adaptive** for the starting crowd-control preset,
    or use Flow while checking the raw end-to-end route.
-5. Select the port-named virtual destination for the clearest Ableton routing.
-6. Confirm the observed zone, Time Field status, source count, activity map, and
-   destination status; then test **PANIC** before the audience connects.
+5. Choose Host Only, or choose External Only plus the port-named virtual destination.
+   Use Mirror only for a deliberately duplicated route.
+6. Open Show Console, resolve preflight failures, confirm Safety is NORMAL, and verify
+   any Global Conductor group/quota and Crowd Expression mappings.
+7. Confirm source activity at the receiver and test **PANIC** before the audience
+   connects.
 
 See [04 - OSC & the Audience](04-osc-audience.md) for the wire format and
 [03 - MPE Setup](03-mpe-setup.md) for receiver configuration.

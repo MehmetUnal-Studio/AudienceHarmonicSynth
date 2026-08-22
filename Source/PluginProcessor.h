@@ -2,18 +2,22 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "AdaptiveCrowdGovernor.h"
 #include "AtomicScaleCatalog.h"
 #include "AtomicScaleMap.h"
+#include "CrowdExpressionMacros.h"
 #include "CrowdTimeField.h"
+#include "GlobalConductorHub.h"
 #include "MidiAudienceModel.h"
 #include "MidiPitchMap.h"
 #include "MpeMidiOutput.h"
 #include "OscBridge.h"
 #include "OscFingerRouter.h"
+#include "PressureAwareSafetyGovernor.h"
 #include "Simulator.h"
 
 // Cosmic Microwave is intentionally a silent instrument shell: keeping the
@@ -134,10 +138,103 @@ public:
     {
         return governorBand.load(std::memory_order_relaxed);
     }
+    int getSafetyGovernorState() const noexcept
+    {
+        return safetyGovernorState.load(std::memory_order_relaxed);
+    }
+    uint32_t getSafetyGovernorReasonBits() const noexcept
+    {
+        return safetyGovernorReasons.load(std::memory_order_relaxed);
+    }
+    double getIngressEventsPerSecond() const noexcept
+    {
+        return safetyIngressRate.load(std::memory_order_relaxed);
+    }
+    double getProcessDeadlineRatio() const noexcept
+    {
+        return lastProcessDeadlineRatio.load(std::memory_order_relaxed);
+    }
+    double getExternalFifoPressure() const noexcept
+    {
+        return safetyExternalFifoPressure.load(std::memory_order_relaxed);
+    }
+    double getExternalFifoOldestAgeSeconds() const noexcept
+    {
+        return externalFifoOldestAgeSeconds.load(std::memory_order_relaxed);
+    }
+    int getConductorSnapshotSource() const noexcept
+    {
+        return static_cast<int>(conductorAudioPolicy.load(
+            std::memory_order_acquire) & 0x3u);
+    }
+    int getConductorAttackQuota() const noexcept
+    {
+        return static_cast<int>((conductorAudioPolicy.load(
+            std::memory_order_acquire) >> 2u) & 0x1fu);
+    }
+    int getConductorVoiceQuota() const noexcept
+    {
+        return static_cast<int>((conductorAudioPolicy.load(
+            std::memory_order_acquire) >> 7u) & 0x1fu);
+    }
+    int getConductorActiveZoneCount() const noexcept
+    {
+        return conductorActiveZones.load(std::memory_order_relaxed);
+    }
+    int getConductorLeaderPort() const noexcept
+    {
+        return conductorLeaderPort.load(std::memory_order_relaxed);
+    }
+    int getConductorRegistrationStatus() const noexcept
+    {
+        return conductorRegistrationStatus.load(std::memory_order_relaxed);
+    }
+    bool getCrowdMacroEffectiveEnabled() const noexcept
+    {
+        return crowdMacroEffectiveEnabled.load(std::memory_order_relaxed);
+    }
+    int getCrowdMacroActiveSources() const noexcept
+    {
+        return crowdMacroActiveSources.load(std::memory_order_relaxed);
+    }
+    double getCrowdMacroDensity() const noexcept
+    {
+        return crowdMacroDensity.load(std::memory_order_relaxed);
+    }
+    double getCrowdMacroCentroidX() const noexcept
+    {
+        return crowdMacroCentroidX.load(std::memory_order_relaxed);
+    }
+    double getCrowdMacroCentroidY() const noexcept
+    {
+        return crowdMacroCentroidY.load(std::memory_order_relaxed);
+    }
+    double getCrowdMacroMotion() const noexcept
+    {
+        return crowdMacroMotion.load(std::memory_order_relaxed);
+    }
+    int getCrowdMacroDensityCcValue() const noexcept
+    {
+        return crowdMacroDensityCcValue.load(std::memory_order_relaxed);
+    }
+    int getCrowdMacroCentroidXCcValue() const noexcept
+    {
+        return crowdMacroCentroidXCcValue.load(std::memory_order_relaxed);
+    }
+    int getCrowdMacroCentroidYCcValue() const noexcept
+    {
+        return crowdMacroCentroidYCcValue.load(std::memory_order_relaxed);
+    }
+    int getCrowdMacroMotionCcValue() const noexcept
+    {
+        return crowdMacroMotionCcValue.load(std::memory_order_relaxed);
+    }
     int getMidiOutputOptionIndex() const noexcept { return midiOutputOptionIndex.load(std::memory_order_relaxed); }
     int getResolvedMidiOutputOptionIndex();
     uint32_t getMidiOutputRouteRevision() const noexcept { return midiOutputRouteRevision.load(std::memory_order_acquire); }
     void setMidiOutputOptionIndex (int index);
+    int getMidiOutputPath() const noexcept;
+    int getExpectedZone() const noexcept { return osc.getExpectedZone(); }
 
 private:
     void timerCallback() override;
@@ -164,7 +261,6 @@ private:
         const MpeMidiOutput::MpeConfig& midiConfig) const noexcept;
     CrowdTimeField::ClockFrame captureTimeFieldClock (int numSamples,
                                                        double monotonicSeconds) const noexcept;
-    void rehydrateDirectMidiFromCanonical() noexcept;
     void rehydrateTimeFieldFromCanonical() noexcept;
     void recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
     void queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages,
@@ -178,20 +274,40 @@ private:
     void restoreMidiOutputRoute (int routeKind,
                                  const juce::String& deviceIdentifier,
                                  int legacyOptionIndex);
+    void refreshGlobalConductor();
+    void unregisterGlobalConductor() noexcept;
+
+    struct CrowdMacroRoutingConfig
+    {
+        bool effectiveEnabled = false;
+        int channelChoice = 0; // 0..15 = one channel, 16 = broadcast.
+        std::array<int, 4> controllers { 20, 21, 22, 23 };
+        int rateChoice = 1;
+        double rateHz = 10.0;
+    };
+
+    CrowdMacroRoutingConfig buildCrowdMacroRoutingConfig (
+        bool outputEnabled, bool safetyEnabled) const noexcept;
+    void renderCrowdExpressionMacros (
+        juce::MidiBuffer& midiMessages, int numSamples,
+        double monotonicSeconds, const CrowdMacroRoutingConfig&,
+        bool resetBoundary) noexcept;
+    void resetCrowdExpressionMacros() noexcept;
 
     static constexpr size_t realtimeMidiBufferReserveBytes = 262144;
     static constexpr size_t realtimeMidiInputBudgetBytes = 131072;
     static constexpr int realtimeMidiInputEventLimit = 256;
     static constexpr int midiLifecycleEventBudget = 64;
-    // The audio path emits at most 64 OSC/retrigger lifecycles plus 256 MIDI-thru
-    // events per block. Leave several blocks of headroom for timestamped output
-    // while the dedicated sender catches up; overflow still has ordered panic
-    // recovery and held-finger rehydration.
+    // The audio path emits at most 64 OSC/retrigger lifecycles, 64 broadcast
+    // macro CCs and 256 MIDI-thru events per block. Leave several blocks of
+    // headroom for timestamped output while the dedicated sender catches up;
+    // overflow still has ordered panic recovery and held-finger rehydration.
     static constexpr int externalMidiQueueSize = 16384;
     juce::MidiBuffer midiInputScratch;
     juce::MidiBuffer midiRenderScratch;
     bool midiRenderScratchLoanedToHost = false;
     std::array<OscFingerRouter::Event, midiLifecycleEventBudget> fingerEventScratch {};
+    std::array<int, midiLifecycleEventBudget> flowMotionVoiceScratch {};
     std::array<MpeMidiOutput::NoteEvent, midiLifecycleEventBudget> midiNoteEventScratch {};
     std::array<CrowdTimeField::InputEvent, midiLifecycleEventBudget> timeFieldInputScratch {};
     std::array<CrowdTimeField::HeldVoice, CrowdTimeField::kMaxVoices> timeFieldHeldScratch {};
@@ -209,12 +325,23 @@ private:
     MidiPitchMap pitchMap;
     AtomicScaleMap atomicPitchMap;
     CrowdTimeField crowdTimeField;
+    CrowdExpressionMacros crowdExpressionMacros;
+    CrowdExpressionMacros::Input crowdMacroInputScratch;
+    CrowdExpressionMacros::Output crowdMacroOutput;
+    CrowdMacroRoutingConfig lastCrowdMacroConfig;
+    double crowdMacroLastAnalysisSeconds = 0.0;
+    bool crowdMacroAnalysisClockInitialised = false;
+    bool crowdMacroConfigInitialised = false;
     AdaptiveCrowdGovernor adaptiveCrowdGovernor;
+    PressureAwareSafetyGovernor pressureSafetyGovernor;
+    PressureAwareSafetyGovernor::Output safetyOutput {};
     double governorLastUpdateSeconds = 0.0;
     bool governorControlClockInitialised = false;
     int governorLastVoiceLimit = 16;
-    bool retriggerFingerMidi = false;
-    int fingerRetriggerCursor = 0;
+    double safetyLastUpdateSeconds = 0.0;
+    uint32_t safetyLastOscMessages = 0;
+    uint32_t safetyLastDroppedMotion = 0;
+    bool safetyClockInitialised = false;
     bool pitchMapChangedThisBlock = false;
     bool timeFieldRehydratePending = true;
 
@@ -267,6 +394,7 @@ private:
     MpeMidiOutput mpeOut;
     double currentSampleRate = 44100.0;
     int lastMidiOutputType = 1;
+    int lastMidiOutputPath = 0;
     int lastNormalMidiRoutingMode = 1;
     int lastNormalMidiChannel = 0;
     int lastMpeBendRange = 2;
@@ -280,6 +408,9 @@ private:
     int lastGridDivision = 2;
     float lastInternalBpm = 120.0f;
     float lastGatePercent = 70.0f;
+    bool lastExclusiveUdpPort = true;
+    int lastExpectedZoneChoice = -1;
+    std::uint32_t lastOscRetryMs = 0;
 
     std::atomic<double> timeFieldBpm { 120.0 };
     std::atomic<int> timeFieldPending { 0 };
@@ -292,6 +423,36 @@ private:
     std::atomic<int> governorEffectiveActive { 8 };
     std::atomic<int> governorEffectiveSpread { 1 };
     std::atomic<int> governorBand { 0 };
+    std::atomic<int> safetyGovernorState { 0 };
+    std::atomic<uint32_t> safetyGovernorReasons { 0 };
+    std::atomic<double> safetyIngressRate { 0.0 };
+    std::atomic<double> safetyExternalFifoPressure { 0.0 };
+    std::atomic<double> externalFifoOldestAgeSeconds { 0.0 };
+    std::atomic<double> lastProcessDeadlineRatio { 0.0 };
+    std::atomic<bool> crowdMacroEffectiveEnabled { false };
+    std::atomic<int> crowdMacroActiveSources { 0 };
+    std::atomic<double> crowdMacroDensity { 0.0 };
+    std::atomic<double> crowdMacroCentroidX { 0.5 };
+    std::atomic<double> crowdMacroCentroidY { 0.5 };
+    std::atomic<double> crowdMacroMotion { 0.0 };
+    std::atomic<int> crowdMacroDensityCcValue { 0 };
+    std::atomic<int> crowdMacroCentroidXCcValue { 64 };
+    std::atomic<int> crowdMacroCentroidYCcValue { 64 };
+    std::atomic<int> crowdMacroMotionCcValue { 0 };
+    GlobalConductorHub::Handle conductorHandle {};
+    int conductorRegisteredPort = 0;
+    int conductorRegisteredRoleChoice = -1;
+    int conductorRegisteredGroup = -1;
+    int conductorRegisteredZoneChoice = -1;
+    std::atomic<int> conductorRegistrationStatus {
+        (int) GlobalConductorHub::RegistrationStatus::InvalidPort };
+    // Source + both realtime quotas are published as one release/acquire word.
+    // The audio callback can therefore never combine a new Global source with
+    // stale quotas from an earlier control-timer publication.
+    std::atomic<std::uint32_t> conductorAudioPolicy {
+        (0u) | (4u << 2u) | (8u << 7u) };
+    std::atomic<int> conductorActiveZones { 0 };
+    std::atomic<int> conductorLeaderPort { 0 };
 
     int lastScaleRootPitchClass = -1;
     int lastScaleRootOctave = -1;
@@ -319,6 +480,10 @@ private:
         std::atomic<float>* spectralElement = nullptr;
         std::atomic<float>* atomicScaleMode = nullptr;
         std::atomic<float>* midiOutputType = nullptr;
+        std::atomic<float>* midiOutputPath = nullptr;
+        std::atomic<float>* expectedZone = nullptr;
+        std::atomic<float>* exclusiveUdpPort = nullptr;
+        std::atomic<float>* safetyGovernorEnabled = nullptr;
         std::atomic<float>* normalMidiRoutingMode = nullptr;
         std::atomic<float>* normalMidiChannel = nullptr;
         std::atomic<float>* mpeZone = nullptr;
@@ -334,6 +499,17 @@ private:
         std::atomic<float>* gatePercent = nullptr;
         std::atomic<float>* temporalSpread = nullptr;
         std::atomic<float>* crowdGovernorEnabled = nullptr;
+        std::atomic<float>* conductorRole = nullptr;
+        std::atomic<float>* conductorGroup = nullptr;
+        std::atomic<float>* conductorAttackBudget = nullptr;
+        std::atomic<float>* conductorVoiceBudget = nullptr;
+        std::atomic<float>* crowdMacrosEnabled = nullptr;
+        std::atomic<float>* crowdMacroChannel = nullptr;
+        std::atomic<float>* crowdMacroDensityCc = nullptr;
+        std::atomic<float>* crowdMacroCentroidXCc = nullptr;
+        std::atomic<float>* crowdMacroCentroidYCc = nullptr;
+        std::atomic<float>* crowdMacroMotionCc = nullptr;
+        std::atomic<float>* crowdMacroRate = nullptr;
     } rawParams;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceProcessor)

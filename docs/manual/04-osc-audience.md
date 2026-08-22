@@ -27,15 +27,17 @@ UDP 6060  <-  /cs/A/...
 UDP 6061  <-  /cs/B/...
 ```
 
-`6060 -> A` and `6061 -> B` are deployment conventions, not rules inside the plugin.
-Cosmic Microwave reads and displays the zone letters it receives; it never infers a
-zone from the port. It also does not filter a packet because its zone letter differs
-from the expected deployment convention.
+`6060 -> A` and `6061 -> B` are deployment conventions, not rules inferred inside the
+plugin. Cosmic Microwave reads each address's zone. In **SHOW CONSOLE**, **Expected
+Zone** can be set to the assigned `A..Z`; otherwise-valid traffic from every other zone
+is then counted and rejected before source state, accepted-message telemetry, and MIDI.
+**Any** disables the filter for diagnostics.
 
-This means the upstream split must be correct. If A and B traffic are both sent to one
-port, the instance reports both observed zones and processes both streams. Source
-identity inside an instance is based on source ID, so the same source ID arriving from
-two zones would share state. Use one already-separated zone, one port, and one instance.
+The upstream split must still be correct. Use one already-separated zone, one port, and
+one instance, then lock Expected Zone as a second safety boundary. **Exclusive UDP
+Port** is on for new sessions, preventing two in-process instances from silently owning
+the same socket. A conflicting instance reports an ownership failure and periodically
+retries. Port or zone-policy changes release held state before the new contract applies.
 
 ## Source and touch identity
 
@@ -118,8 +120,9 @@ CC11 = round(clamp(v, 0, 1) * 127)
 velocity = round(clamp(v, 0, 1) * 127), limited to 1..127
 ```
 
-There is no macro or sound-engine bias in these mappings. X/U directly controls the
-pitch-map position and CC74; Y/V directly controls velocity, CC11, and MPE pressure.
+There is no sound-engine bias in these mappings. X/U directly controls the pitch-map
+position and CC74; Y/V directly controls velocity, CC11, and MPE pressure. Optional
+Crowd Expression CCs are a separate aggregate output and never rewrite these values.
 
 ### Message examples
 
@@ -158,13 +161,13 @@ inside each zone instance.
 | **Grid** | Queue each new attack to the selected musical division. Admit at most the configured attacks per step and active voices, using a fair rotating search through pending identities. Held notes follow their ordered Off; admitted short taps receive a minimum gate. |
 | **Ensemble** | Assign each source to one of the spread lanes, start it only when that lane reaches a grid boundary, apply a fixed gate, and requeue it while the touch remains held. |
 
-New 2.4.0 sessions default to **Ensemble / Host / 1/16**, **70% gate**, and the
+New 2.5.0 sessions default to **Ensemble / Host / 1/16**, **70% gate**, and the
 **Adaptive Crowd Governor**. Its starting low-density policy is four attacks per step,
 eight active voices, and one spread step. MPE's effective active limit is always capped
 at 15 because its Lower or Upper zone has 15 member channels. Session state from
 schema 6 or earlier opens in Manual Governor mode without changing its saved policy.
 State from schema 3 or earlier additionally migrates to **Flow**, preserving the direct
-timing of existing Ableton sets. New state is schema 7.
+timing of existing Ableton sets. New state is schema 8.
 
 ### Adaptive crowd policy
 
@@ -196,6 +199,37 @@ spread change preserves pending opportunities. Ordered Off, the three-second
 live-touch watchdog, and Panic are never governed. Gate length remains Manual. The
 fixed Manual attack, active-limit, and spread values are stored untouched while
 Adaptive is selected and return exactly when Manual is selected again.
+
+### Safety Governor under crowd pressure
+
+The musical Adaptive policy responds to audience density. The separate v2.5 Safety
+Governor responds to system pressure: validated ingress events/second, lifecycle queue,
+motion drops, Time Field pending depth, external FIFO depth and age, and callback
+deadline use. NORMAL/HIGH/CRITICAL/EMERGENCY profiles progressively thin redundant
+motion, cap new attacks and active voices, require wider spread, suspend aggregate
+macros, and finally close new-attack admission. Escalation is immediate; recovery has
+hysteresis and staged holds. Flow stays direct in NORMAL and uses the explicit safety
+ceilings only in HIGH/CRITICAL/EMERGENCY. Ordered releases, the live watchdog, and Panic remain
+available in every state. Show Console reports both the state and the signal(s) that
+caused it.
+
+### Global Conductor across zone instances
+
+Time Field normally governs each zone independently. Global Conductor can coordinate
+up to 16 instances in the same plugin process. Instances in one of four isolated groups
+publish density; the elected Leader allocates its global attack and voice budgets at
+10 Hz using fair density weighting and deterministic rotation. Timed modes apply the
+resulting per-zone quota. A stale/missing leader expires after 1.5 seconds and each
+instance immediately falls back to its local policy. Global Conductor never sends OSC
+between machines and does not coordinate separate host processes.
+
+### Crowd Expression
+
+When enabled, one fixed-cost 256-source analysis produces density, centroid X, centroid
+Y, and smoothed motion as configurable MIDI CCs (defaults CC20-23). Output can use one
+channel or Broadcast at 5/10/20/30 Hz. The first active tick sends a full snapshot;
+later ticks are change-only. Empty centroids are 64. CRITICAL/EMERGENCY Safety states
+suspend CC emission without stopping telemetry or per-source Off handling.
 
 ### Clock behaviour
 
@@ -263,17 +297,20 @@ sessions restore as Tonal, so an older set does not silently change its pitch ma
 ## UDP configuration and status
 
 1. Enter the assigned port in **OSC INPUT**.
-2. Click **Apply** or press Return.
-3. Confirm **Listening ... waiting for data**.
-4. Send a valid OSC message and confirm **Receiving** plus the observed zone letter.
+2. In Show Console, select its **Expected Zone** and enable exclusive ownership.
+3. Click **Apply** or press Return.
+4. Confirm **Listening ... waiting for data** and exclusive ownership.
+5. Send a valid OSC message; confirm **Receiving**, the expected observed zone, and
+   zero mismatches.
 
 The default port is `6060`. Valid ports are `1..65535`. Invalid text leaves the active
 listener unchanged. Applying a different port releases held notes before the listener
 restarts.
 
-The status card counts only valid messages. It retains the observed zone set while the
-listener remains on that port. Multiple letters indicate mixed upstream traffic, not
-an automatic multi-zone mode.
+The status card counts admitted valid messages. Wrong-zone valid packets have a separate
+mismatch counter. It retains the admitted observed-zone set while the listener remains
+on that port. Multiple letters are possible only with Expected Zone set to Any and
+indicate mixed upstream traffic, not an automatic multi-zone mode.
 
 The virtual output name is derived from the active UDP port:
 
@@ -290,21 +327,21 @@ name.
 Use this layout for each zone:
 
 1. Place one Cosmic Microwave instance on its own Ableton track.
-2. Set the instance's UDP port to the already-separated stream for that zone.
+2. Set the instance's UDP port and matching Expected Zone; keep exclusive ownership on.
 3. Select **Normal MIDI** and **Per source 1-16**.
 4. For the starting crowd preset, leave **TIME FIELD** at
    **Ensemble / Host / 1/16 / Adaptive**. Use Flow when inspecting the sender's raw
    timing, or Manual when fixed limits are required.
-5. Under **DESTINATION**, select **Virtual: Cosmic Microwave <port> Out**.
+5. Select **External Only**, then choose **Virtual: Cosmic Microwave <port> Out**.
 6. On receiving Ableton MIDI tracks, choose that virtual endpoint under **MIDI From**
    and select Channel 1, Channel 2, and so on.
 7. Set the receiving tracks' monitoring/arming as your Live set requires and place the
    destination instruments there.
 
 The port-named virtual endpoint is recommended because it makes zone ownership and
-channel selection explicit. The plugin's host MIDI output remains available at the
-same time, but the virtual endpoint is usually clearer when one instance must feed up
-to 16 channel-specific Ableton tracks.
+channel selection explicit. **Host Only** is the alternative when the DAW can route
+the device bus directly. **Mirror** makes both paths active and must be chosen
+deliberately to avoid duplicate notes.
 
 Zone A and Zone B each get an independent set of Channels 1-16 because they use
 different Cosmic Microwave instances and virtual endpoints.
@@ -327,6 +364,16 @@ Use it to confirm pitch mapping, source-to-channel assignment, destination selec
 and receiving-track monitoring before the network sender connects. Simulator activity
 does not invent a UDP zone; the observed-zone status reflects valid OSC traffic only.
 
+## Capture/replay and failure rehearsal
+
+`tools/cosmic-chaos-lab.mjs` is a separate Node.js process that can proxy and capture
+raw UDP to NDJSON, replay the original timing at `0.25x..16x`, generate production-form
+OSC, and inject seeded loss, duplication, reordering, jitter, or burst loss. It is not
+part of the plugin runtime: no file access, replay clock, or capture socket runs on the
+audio thread. Put the proxy between the audience server and each zone port during a
+rehearsal, never directly into an unreviewed live-show path. See
+[Capture/Replay Chaos Lab](../chaos-lab.md).
+
 ## Network and lifecycle checklist
 
 - The sender must be able to reach the Cosmic Microwave machine's LAN address and the
@@ -339,6 +386,8 @@ does not invent a UDP zone; the observed-zone status reflects valid OSC traffic 
   the latest U/V per touch while a separate priority queue protects On/Off, so redundant
   motion cannot starve a release; sender-side restraint still reduces network load.
 - Confirm one zone, one port, and one instance together before the audience connects.
+- Lock Expected Zone, confirm exclusive ownership, and resolve all failed Venue
+  Preflight rows before admitting the audience.
 - If a release (`/on 0`) packet is lost or the sender disappears, first allow the
   three-second watchdog to close that touch. Use **PANIC** when an immediate global reset
   is required; it clears live source state and sends bounded all-off safety messages to

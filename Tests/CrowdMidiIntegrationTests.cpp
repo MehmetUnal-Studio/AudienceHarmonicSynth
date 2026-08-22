@@ -546,6 +546,92 @@ int main()
                "Flow bypasses Governor admission limits and preserves immediate lifecycle");
     }
 
+    // Pressure Safety is different from the musical Adaptive Governor: once
+    // pressure is elevated, production Flow uses the scheduler's explicit
+    // admission/active ceilings. Releases remain mandatory and retain the
+    // participant channel that owned the corresponding NoteOn.
+    {
+        CrowdTimeField safeFlowField;
+        auto safeFlowTiming = timing;
+        safeFlowTiming.mode = CrowdTimeField::Mode::Flow;
+        safeFlowTiming.flowMaxAttacksPerBlock = 2;
+        safeFlowTiming.flowMaxActive = 4;
+
+        std::array<CrowdTimeField::InputEvent, 8> safeOns {};
+        for (int source = 1; source <= (int) safeOns.size(); ++source)
+        {
+            auto& event = safeOns[(size_t) (source - 1)];
+            event.type = CrowdTimeField::InputEvent::Type::On;
+            event.sourceId = source;
+            event.voiceId = CrowdTimeField::voiceIdFor(source, 0);
+        }
+
+        CrowdTimeField::OutputBlock safeFlowOutput;
+        safeFlowField.process(safeFlowTiming, frameAt(0.0), safeOns.data(),
+                              (int) safeOns.size(), safeFlowOutput);
+        constexpr double flowBeatPerBlock = 512.0 * 120.0
+                                           / (60.0 * 48000.0);
+
+        MpeMidiOutput safeFlowMidi;
+        std::array<MpeMidiOutput::NoteEvent,
+                   CrowdTimeField::kMaxOutputEvents> safeMidiEvents {};
+        int safeMidiCount = makeMidiEvents(safeFlowOutput, safeMidiEvents);
+        juce::MidiBuffer firstAdmissionMidi;
+        safeFlowMidi.render(midiConfig, safeMidiEvents.data(), safeMidiCount,
+                            firstAdmissionMidi, 512);
+        const bool firstAdmission = ! safeFlowOutput.resetRequested
+                                 && safeFlowOutput.activeCount == 2
+                                 && safeFlowOutput.pendingCount == 6
+                                 && countOutputType(
+                                      safeFlowOutput,
+                                      CrowdTimeField::OutputEvent::Type::Attack) == 2
+                                 && hasPhysicalNote(firstAdmissionMidi, true, 1)
+                                 && hasPhysicalNote(firstAdmissionMidi, true, 2);
+
+        safeFlowField.process(safeFlowTiming, frameAt(flowBeatPerBlock), nullptr, 0,
+                              safeFlowOutput);
+        safeMidiCount = makeMidiEvents(safeFlowOutput, safeMidiEvents);
+        juce::MidiBuffer secondAdmissionMidi;
+        safeFlowMidi.render(midiConfig, safeMidiEvents.data(), safeMidiCount,
+                            secondAdmissionMidi, 512);
+        expect(firstAdmission
+                   && safeFlowOutput.activeCount == 4
+                   && safeFlowOutput.pendingCount == 4
+                   && countOutputType(
+                        safeFlowOutput,
+                        CrowdTimeField::OutputEvent::Type::Attack) == 2
+                   && hasPhysicalNote(secondAdmissionMidi, true, 3)
+                   && hasPhysicalNote(secondAdmissionMidi, true, 4),
+               "Pressure Safety Flow ceilings govern real MIDI admission and backlog");
+
+        safeFlowTiming.attackAdmissionOpen = false;
+        std::array<CrowdTimeField::InputEvent, 2> emergencyInput {};
+        emergencyInput[0].type = CrowdTimeField::InputEvent::Type::Off;
+        emergencyInput[0].sourceId = 2;
+        emergencyInput[0].voiceId = CrowdTimeField::voiceIdFor(2, 0);
+        emergencyInput[1].type = CrowdTimeField::InputEvent::Type::On;
+        emergencyInput[1].sourceId = 9;
+        emergencyInput[1].voiceId = CrowdTimeField::voiceIdFor(9, 0);
+        safeFlowField.process(safeFlowTiming, frameAt(2.0 * flowBeatPerBlock),
+                              emergencyInput.data(), (int) emergencyInput.size(),
+                              safeFlowOutput);
+        safeMidiCount = makeMidiEvents(safeFlowOutput, safeMidiEvents);
+        juce::MidiBuffer emergencyMidi;
+        safeFlowMidi.render(midiConfig, safeMidiEvents.data(), safeMidiCount,
+                            emergencyMidi, 512);
+        expect(! safeFlowOutput.resetRequested
+                   && safeFlowOutput.activeCount == 3
+                   && safeFlowOutput.pendingCount == 5
+                   && countOutputType(
+                        safeFlowOutput,
+                        CrowdTimeField::OutputEvent::Type::Attack) == 0
+                   && countOutputType(
+                        safeFlowOutput,
+                        CrowdTimeField::OutputEvent::Type::Release) == 1
+                   && hasPhysicalNote(emergencyMidi, false, 2),
+               "Emergency Flow blocks attacks but never blocks the owned NoteOff");
+    }
+
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";
     return failed == 0 ? 0 : 1;
 }

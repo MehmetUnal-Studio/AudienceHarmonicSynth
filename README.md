@@ -2,7 +2,7 @@
 
 Formerly named **SpektraSynth**.
 
-Version 2.4.0
+Version 2.5.0
 
 Cosmic Microwave is a JUCE VST3 and standalone OSC-to-MIDI router for
 audience interaction. It receives already-separated zone streams over UDP, keeps each
@@ -10,7 +10,7 @@ source's single-touch lifecycle intact, maps normalized movement through either 
 element-derived Atomic Scale pitch maps, and sends Normal MIDI or MPE to Ableton, a
 virtual MIDI endpoint, or a system MIDI device.
 
-Cosmic Microwave 2.4.0 is behaviourally MIDI-only: it does not generate sound. The VST3
+Cosmic Microwave 2.5.0 is behaviourally MIDI-only: it does not generate sound. The VST3
 keeps a silent stereo instrument shell, its existing class identity, and its instrument
 placement so Ableton sets made with the earlier product can still resolve the device.
 
@@ -24,8 +24,11 @@ for separating zones before they reach the plugin; for example:
 | A | `6060` | `Cosmic Microwave 6060 Out` |
 | B | `6061` | `Cosmic Microwave 6061 Out` |
 
-The port does not define the zone. The plugin reads the zone from every valid OSC
-address and reports mixed-zone traffic, but it does not filter or infer zones.
+The port does not define the zone. Set **Expected Zone** to `A..Z` to make a production
+instance reject otherwise-valid messages from every other zone, or leave it at **Any**
+for diagnostics. **Exclusive UDP Port** is enabled in new sessions, so a second plugin
+instance cannot silently subscribe to the same port. A zone-policy change is a routing
+boundary and safely releases held notes before the new filter becomes active.
 
 Production messages are:
 
@@ -53,9 +56,9 @@ live service sends `u`, `v`, and `on` only.
 - If an active live touch receives no valid U, V, or On heartbeat for three seconds,
   Cosmic Microwave publishes a synthetic ordered Off. Simulator voices are excluded.
 
-### Direct MIDI controls
+### Direct MIDI controls and crowd macros
 
-There is no sound-engine or macro layer modifying the OSC values:
+The per-source mappings remain direct; Crowd Expression macros do not rewrite them:
 
 ```text
 U/X -> selected Tonal or Atomic pitch + CC74
@@ -67,9 +70,16 @@ Horizontal position is divided into equal regions across the selected root, pitc
 and octave range. New sessions default to the Atomic system with Helium, Extended
 density, root C2, and a four-octave range.
 
+When explicitly enabled, **Crowd Expression** additionally emits four aggregate CCs:
+crowd density, X centroid, Y centroid, and motion. Defaults are CC20-23 on Channel 1 at
+10 Hz; Channels 1-16 or Broadcast and rates 5/10/20/30 Hz are selectable. Empty-crowd
+centroids are centred at MIDI value 64. Only changed values are emitted after the first
+full snapshot, and the Safety Governor can suspend macro emission under pressure
+without altering source note ownership.
+
 ## Crowd Time Field
 
-Cosmic Microwave 2.4.0 can turn an asynchronous crowd into a shared rhythmic field
+Cosmic Microwave 2.5.0 can turn an asynchronous crowd into a shared rhythmic field
 without changing source identity or note ownership:
 
 | Mode | Behaviour |
@@ -123,6 +133,29 @@ watchdog, or block Panic. Flow bypasses the policy completely. Switching to Manu
 restores the saved/automated attack, active-limit, and spread values; Adaptive never
 overwrites them.
 
+### Pressure-aware Safety Governor
+
+The v2.5 **Safety Governor** is separate from the musical Adaptive Crowd Governor.
+It watches validated OSC ingress rate, lifecycle-queue pressure, dropped/coalesced
+motion, Time Field pending pressure, external-MIDI FIFO pressure and age, and audio
+callback deadline ratio. It escalates immediately through **NORMAL**, **HIGH**,
+**CRITICAL**, and **EMERGENCY**, then recovers one level at a time with hysteresis and
+holds. Higher states progressively thin redundant motion, lower new-attack and active
+voice ceilings, increase minimum spread, suspend macros, and finally close new attack
+admission. Flow remains direct in NORMAL and adopts those safety ceilings only while
+pressure is elevated. Releases, the watchdog, and Panic remain available. Show Console exposes
+the active state, reason flags, ingress/deadline/FIFO telemetry, and effective limits.
+
+### Global Conductor
+
+Up to 16 Cosmic Microwave instances in the same plugin process can share one of four
+**Global Conductor** groups. Set instances to Leader or Follower; the deterministically
+elected leader publishes a global attack budget (`1..64`) and voice budget (`1..128`)
+at 10 Hz. Each live zone receives a fair, density-weighted quota, with scarce capacity
+rotating deterministically. Groups are isolated. Missing, stale, or incoherent leader
+data fails back to each instance's local Time Field policy after 1.5 seconds; the audio
+thread never waits. `Off` keeps the instance local.
+
 ## Pitch systems
 
 **Tonal** provides seven familiar 12-TET maps: Major, Natural Minor, Pentatonic,
@@ -175,10 +208,17 @@ The editor offers:
   instance's UDP port.
 - Available system or hardware MIDI outputs.
 
-Selecting a virtual or hardware destination does not disable the host bus; the same
-MIDI stream remains available to the host. The port-named virtual endpoint is the
-recommended route when an Ableton set needs separate receiving tracks for Channels
-1-16.
+**MIDI Output Path** decides where generated MIDI is delivered:
+
+- **Host Only** (new-session default) sends only to the DAW bus.
+- **External Only** sends only to the selected virtual/hardware destination and clears
+  the host buffer fail-closed.
+- **Mirror** sends to both paths deliberately.
+
+The port-named virtual endpoint is the recommended external route when an Ableton set
+needs separate receiving tracks for Channels 1-16. Route changes are safety boundaries,
+so held state is released before switching. Schema-7-and-earlier sessions migrate to
+Mirror to preserve their historical dual-output behaviour.
 
 ## Ableton layout
 
@@ -187,9 +227,10 @@ For each audience zone:
 1. Put one Cosmic Microwave instance on its own track.
 2. Apply that zone's UDP port.
 3. Select **Normal MIDI** and **Per source 1-16**.
-4. Select `Virtual: Cosmic Microwave <port> Out` as the destination.
-5. On receiving tracks, choose that endpoint under **MIDI From** and select the
-   required channel.
+4. Choose **External Only** and select `Virtual: Cosmic Microwave <port> Out`, or use
+   **Host Only** when routing exclusively through Ableton's device output.
+5. On receiving tracks, choose the Cosmic Microwave device for Host Only or that
+   endpoint for External Only, then select the required channel.
 6. Put the sound-producing instruments on those receiving tracks.
 
 Each Cosmic Microwave instance has an independent set of Channels 1-16. For MPE,
@@ -198,9 +239,9 @@ instead of treating its member channels as independent source channels.
 
 ## Editor
 
-The MIDI-only editor contains:
+The MIDI-only editor is split into **PERFORM** and **SHOW CONSOLE** views and contains:
 
-- a permanent build-derived **v2.4.0** version label in the header;
+- a permanent build-derived **v2.5.0** version label in the header;
 - live **SOURCES**, **TOUCHES**, **NOTES**, and **MPE VOICES** metrics;
 - an **OSC INPUT** card with port and validated-traffic status;
 - a source-routing summary with observed zone letters;
@@ -211,14 +252,29 @@ The MIDI-only editor contains:
   Pending/Active/Merged telemetry;
 - a Tonal/Atomic pitch system with element and density selection;
 - Normal MIDI and MPE routing controls;
-- host, virtual, and hardware destination selection; and
-- a global **PANIC** control.
+- host, virtual, and hardware destination selection;
+- a global **PANIC** control;
+- explicit Host Only / External Only / Mirror routing, Expected Zone, and exclusive
+  UDP ownership controls;
+- Safety Governor state, reasons, and pressure telemetry;
+- a seven-point Venue Preflight checklist for receiver, zone contract, UDP ownership,
+  MIDI route, safety, Time Field, and Global Conductor readiness;
+- process-local Global Conductor role/group/budget and live-quota controls; and
+- Crowd Expression macro enable, channel, rate, CC mapping, and live values.
+
+Show Console also displays commands for the external Capture/Replay Chaos Lab. The Lab
+is a separate Node.js rehearsal tool; it is not embedded in the plugin and performs no
+filesystem or network capture from the audio callback.
 
 ## Flagship parameters
 
 | Parameter | Choices/range | Default |
 |---|---|---|
 | MIDI Format | Off, Normal MIDI, MPE MIDI | Normal MIDI |
+| MIDI Output Path | Host Only, External Only, Mirror | Host Only |
+| Expected OSC Zone | Any, A..Z | Any |
+| Exclusive UDP Port | Off, On | On |
+| Safety Governor | Off, On | On |
 | Normal MIDI Routing | Single Channel, Per Source 1-16 | Per Source 1-16 |
 | Normal MIDI Channel | 1..16 | 1 |
 | MPE Zone | Lower, Upper | Lower |
@@ -234,6 +290,14 @@ The MIDI-only editor contains:
 | Gate Length | 5..100% | 70% |
 | Temporal Spread | 1, 2, 4, 8, 16 steps | 4 steps |
 | Adaptive Crowd Governor | Manual, Adaptive | Adaptive |
+| Global Conductor Role | Off, Leader, Follower | Off |
+| Global Conductor Group | 1..4 | 1 |
+| Global Attack Budget | 1..64 | 16 |
+| Global Voice Budget | 1..128 | 64 |
+| Crowd Expression Macros | Off, On | Off |
+| Crowd Macro Channel | Channels 1..16, Broadcast | Channel 1 |
+| Crowd Macro CCs | Density/X/Y/Motion: 0..127 | 20/21/22/23 |
+| Crowd Macro Rate | 5, 10, 20, 30 Hz | 10 Hz |
 | Pitch System | Tonal, Atomic | Atomic |
 | Root | C..B | C |
 | Root Octave | 0..6 | 2 |
@@ -242,13 +306,24 @@ The MIDI-only editor contains:
 | Atomic Scale Mode | Core, Extended, Microtonal, Scientific, Raw 128 | Extended |
 | Octave Range | 1..6 | 4 |
 
-The UDP port and selected MIDI destination are also saved with plugin state. Incoming
-host MIDI is passed through unchanged whenever MIDI output is enabled.
+The UDP port, selected MIDI destination, safety/routing policy, conductor settings, and
+macro mapping are also saved with plugin state. Incoming host MIDI is passed through
+unchanged whenever MIDI output is enabled and the selected output path includes the
+host.
+
+## Capture/Replay Chaos Lab
+
+`tools/cosmic-chaos-lab.mjs` is an external, dependency-free Node.js CLI for bounded
+UDP proxy/capture, deterministic replay (`0.25x..16x`), production-OSC generation, and
+seeded drop/duplicate/reorder/jitter/burst-loss rehearsal. Captures are newline-delimited
+JSON with the original datagram preserved as base64. Lifecycle packets have priority
+over coalescible motion in bounded queues. See [docs/chaos-lab.md](docs/chaos-lab.md).
 
 ## Build
 
 Requirements: CMake 3.22+, a C++17 toolchain, and internet access for the first
-configure. JUCE 8.0.4 is fetched with CMake `FetchContent`.
+configure. JUCE 8.0.4 is fetched with CMake `FetchContent`. Node.js 20+ is recommended
+for the external Chaos Lab; when Node is present, its regression suite joins CTest.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -281,9 +356,10 @@ The CMake project contains four MIDI-oriented products:
 
 ```text
 already-separated OSC zone / simulator
-  -> OscBridge validation
+  -> OscBridge validation + expected-zone filter + exclusive ownership
   -> MidiAudienceModel (256 sources x one admitted live touch)
   -> OscFingerRouter fixed-capacity event queue
+  -> PressureAwareSafetyGovernor (traffic/deadline/FIFO protection)
   -> AdaptiveCrowdGovernor (soft Grid/Ensemble admission policy)
   -> CrowdTimeField
        -> Flow: direct lifecycle/motion
@@ -295,10 +371,19 @@ already-separated OSC zone / simulator
   -> MpeMidiOutput
        -> Normal MIDI: fixed channel or stable source -> Ch 1..16
        -> MPE: one member channel per active source touch
-  -> host MIDI bus
-  -> optional port-derived virtual or hardware MIDI destination
+  -> optional CrowdExpressionMacros (density/centroid/motion CCs)
+  -> explicit Host Only / External Only / Mirror output policy
+       -> host MIDI bus
+       -> port-derived virtual or hardware MIDI destination
 
-host MIDI input -> unchanged MIDI thru when output is enabled
+up to 16 in-process instances
+  <-> GlobalConductorHub group (10 Hz density-weighted attack/voice quotas)
+
+external rehearsal process
+  -> tools/cosmic-chaos-lab.mjs proxy / capture / replay / generate
+
+host MIDI input -> unchanged MIDI thru when output is enabled, then routed by the
+                   same Host Only / External Only / Mirror policy
 stereo instrument output -> silent compatibility shell
 ```
 
@@ -316,13 +401,19 @@ bundle identity for existing session lookup. Do not keep `SpektraSynth.vst3` and
 same plugin class. Back up the old bundle outside the plugin folder, install Cosmic
 Microwave, and rescan the host.
 
-New 2.4.0 sessions open on Ensemble timing with the Adaptive Crowd Governor enabled,
-plus Atomic / Helium / Extended pitch mapping. Existing state from schema 6 or earlier
-receives Manual Governor mode, preserving its saved attack, active-limit, and spread
-behaviour. State from schema 3 or earlier additionally receives Flow timing, so
-upgrading does not move established attacks onto a grid. Schema-5 input remains
+New 2.5.0 sessions open on Ensemble timing with both the musical Adaptive Crowd
+Governor and the pressure-aware Safety Governor enabled, exclusive UDP ownership,
+Host Only routing, and Atomic / Helium / Extended pitch mapping. Expected Zone remains
+Any until the operator locks it. Global Conductor and Crowd Expression macros are
+opt-in.
+
+Existing state from schema 7 or earlier receives Mirror output, shared-port behaviour,
+and the Safety Governor disabled so an upgrade cannot silently change its routing or
+admission behaviour. Existing state from schema 6 or earlier receives Manual Crowd
+Governor mode, preserving its saved attack, active-limit, and spread behaviour. State
+from schema 3 or earlier additionally receives Flow timing. Schema-5 input remains
 compatible; schema 6 discarded its retired experimental fields, and migrated state is
-now stamped as schema 7.
+now stamped as schema 8.
 Existing schema-2 MIDI-only sessions still
 migrate explicitly to Tonal so they keep their previous pitch-map intent.
 Released 1.x sessions that selected an element spectrum migrate to Atomic and recover
@@ -330,7 +421,7 @@ the corresponding element; their stable `spectralElement` and `atomicScaleMode`
 parameter values are retained.
 
 Repositories upgraded from pre-2.0 versions may still contain old media, preparation
-tools, or implementation files. The `AudienceHarmonicSynth` 2.4.0 target does not load
+tools, or implementation files. The `AudienceHarmonicSynth` 2.5.0 target does not load
 or compile them; `CMakeLists.txt` is the authoritative runtime source list.
 
 ## Manual

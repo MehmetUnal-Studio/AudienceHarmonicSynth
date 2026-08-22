@@ -32,6 +32,12 @@ public:
         finger0Only
     };
 
+    enum class PortPolicy
+    {
+        shared,
+        exclusive
+    };
+
     // Maximum number of in-process OscBridge clients that may share one UDP
     // port. Surfaced so callers/tests can reason about the cap (B25).
     static constexpr int MAX_SHARED_CLIENTS = 16;
@@ -44,12 +50,26 @@ public:
                         FingerPolicy policy = FingerPolicy::all);
     ~OscBridge();
 
-    bool start (int port);
+    bool start (int port, PortPolicy policy = PortPolicy::shared);
     void stop();
 
     bool isRunning()    const noexcept { return running; }
     bool isReceiving()  const noexcept { return receiving; }
     int  getCurrentPort() const noexcept { return currentPort; }
+    bool isExclusive() const noexcept { return portPolicy == PortPolicy::exclusive; }
+
+    // -1 accepts any zone. 0..25 accepts only A..Z respectively. This can be
+    // changed without restarting the UDP receiver; the network callback reads
+    // the atomic once for each syntactically valid message.
+    void setExpectedZone (int zone) noexcept
+    {
+        expectedZone.store(juce::jlimit(-1, 25, zone), std::memory_order_release);
+    }
+
+    int getExpectedZone() const noexcept
+    {
+        return expectedZone.load(std::memory_order_acquire);
+    }
 
     uint32_t getValidMessageCount() const noexcept
     {
@@ -64,6 +84,11 @@ public:
     uint32_t getMalformedDatagramCount() const noexcept
     {
         return malformedDatagramCount.load(std::memory_order_relaxed);
+    }
+
+    uint32_t getZoneMismatchCount() const noexcept
+    {
+        return zoneMismatchCount.load(std::memory_order_relaxed);
     }
 
     uint32_t getLastValidMessageAgeMs() const noexcept
@@ -88,6 +113,7 @@ private:
 
     SeatEventSink&    target;
     const FingerPolicy fingerPolicy;
+    PortPolicy portPolicy = PortPolicy::shared;
     std::shared_ptr<SharedPort> sharedPort;
     int  currentPort = 0;
     bool running     = false;
@@ -97,5 +123,7 @@ private:
     std::atomic<uint32_t> observedZoneMask { 0 };
     std::atomic<uint32_t> lastValidMessageMs { 0 };
     std::atomic<uint32_t> malformedDatagramCount { 0 };
+    std::atomic<uint32_t> zoneMismatchCount { 0 };
     std::atomic<bool> hasReceivedValidMessage { false };
+    std::atomic<int> expectedZone { -1 };
 };

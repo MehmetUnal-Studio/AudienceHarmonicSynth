@@ -55,6 +55,18 @@ namespace
         return rawParamValue(param, fallback ? 1.0f : 0.0f) > 0.5f;
     }
 
+    std::uint32_t packConductorPolicy (
+        GlobalConductorHub::SnapshotSource source,
+        int attackQuota, int voiceQuota) noexcept
+    {
+        const auto sourceBits = static_cast<std::uint32_t>(source) & 0x3u;
+        const auto attackBits = static_cast<std::uint32_t>(
+            juce::jlimit(0, 31, attackQuota));
+        const auto voiceBits = static_cast<std::uint32_t>(
+            juce::jlimit(0, 31, voiceQuota));
+        return sourceBits | (attackBits << 2u) | (voiceBits << 7u);
+    }
+
     int boundedStateInt (const juce::var& value, int minimum, int maximum,
                          int fallback) noexcept
     {
@@ -100,6 +112,7 @@ AudienceProcessor::AudienceProcessor()
     updatePitchMap();
     mpeOut.reset();
     setUdpPort(getUdpPort());
+    refreshGlobalConductor();
     juce::Timer::startTimerHz(60);
 }
 
@@ -107,6 +120,7 @@ AudienceProcessor::~AudienceProcessor()
 {
     juce::Timer::stopTimer();
     juce::HighResolutionTimer::stopTimer();
+    unregisterGlobalConductor();
     closeMidiOutput();
     osc.stop();
 }
@@ -119,6 +133,22 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
     layout.add(std::make_unique<AudioParameterChoice>(
         ParameterID("midiOutputType", 1), "MIDI Format",
         StringArray { "Off", "Normal MIDI", "MPE MIDI" }, 1));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("midiOutputPath", 1), "MIDI Output Path",
+        StringArray { "Host Only", "External Only", "Mirror" }, 0));
+
+    StringArray zones { "Any" };
+    for (char zone = 'A'; zone <= 'Z'; ++zone)
+        zones.add(String::charToString((juce::juce_wchar) zone));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("expectedZone", 1), "Expected OSC Zone", zones, 0));
+
+    layout.add(std::make_unique<AudioParameterBool>(
+        ParameterID("exclusiveUdpPort", 1), "Exclusive UDP Port", true));
+
+    layout.add(std::make_unique<AudioParameterBool>(
+        ParameterID("safetyGovernorEnabled", 1), "Safety Governor", true));
 
     layout.add(std::make_unique<AudioParameterChoice>(
         ParameterID("normalMidiRoutingMode", 1), "Normal MIDI Routing",
@@ -179,6 +209,45 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
         ParameterID("crowdGovernorEnabled", 1), "Adaptive Crowd Governor", true));
 
     layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("conductorRole", 1), "Global Conductor Role",
+        StringArray { "Off", "Leader", "Follower" }, 0));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("conductorGroup", 1), "Global Conductor Group",
+        StringArray { "1", "2", "3", "4" }, 0));
+
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("conductorAttackBudget", 1), "Conductor Attack Budget",
+        1, 64, 16));
+
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("conductorVoiceBudget", 1), "Conductor Voice Budget",
+        1, 128, 64));
+
+    layout.add(std::make_unique<AudioParameterBool>(
+        ParameterID("crowdMacrosEnabled", 1), "Crowd Macros", false));
+
+    StringArray macroChannels;
+    for (int channel = 1; channel <= 16; ++channel)
+        macroChannels.add("Ch " + String(channel));
+    macroChannels.add("Broadcast");
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("crowdMacroChannel", 1), "Crowd Macro Channel",
+        macroChannels, 0));
+
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("crowdMacroDensityCc", 1), "Crowd Density CC", 0, 127, 20));
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("crowdMacroCentroidXCc", 1), "Crowd Centroid X CC", 0, 127, 21));
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("crowdMacroCentroidYCc", 1), "Crowd Centroid Y CC", 0, 127, 22));
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("crowdMacroMotionCc", 1), "Crowd Motion CC", 0, 127, 23));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("crowdMacroRate", 1), "Crowd Macro Rate",
+        StringArray { "5 Hz", "10 Hz", "20 Hz", "30 Hz" }, 1));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
         ParameterID("pitchSystem", 1), "Pitch System",
         StringArray { "Tonal", "Atomic" }, 1));
 
@@ -224,6 +293,10 @@ void AudienceProcessor::cacheParameterPointers()
     rawParams.spectralElement = apvts.getRawParameterValue("spectralElement");
     rawParams.atomicScaleMode = apvts.getRawParameterValue("atomicScaleMode");
     rawParams.midiOutputType = apvts.getRawParameterValue("midiOutputType");
+    rawParams.midiOutputPath = apvts.getRawParameterValue("midiOutputPath");
+    rawParams.expectedZone = apvts.getRawParameterValue("expectedZone");
+    rawParams.exclusiveUdpPort = apvts.getRawParameterValue("exclusiveUdpPort");
+    rawParams.safetyGovernorEnabled = apvts.getRawParameterValue("safetyGovernorEnabled");
     rawParams.normalMidiRoutingMode = apvts.getRawParameterValue("normalMidiRoutingMode");
     rawParams.normalMidiChannel = apvts.getRawParameterValue("normalMidiChannel");
     rawParams.mpeZone = apvts.getRawParameterValue("mpeZone");
@@ -239,6 +312,17 @@ void AudienceProcessor::cacheParameterPointers()
     rawParams.gatePercent = apvts.getRawParameterValue("gatePercent");
     rawParams.temporalSpread = apvts.getRawParameterValue("temporalSpread");
     rawParams.crowdGovernorEnabled = apvts.getRawParameterValue("crowdGovernorEnabled");
+    rawParams.conductorRole = apvts.getRawParameterValue("conductorRole");
+    rawParams.conductorGroup = apvts.getRawParameterValue("conductorGroup");
+    rawParams.conductorAttackBudget = apvts.getRawParameterValue("conductorAttackBudget");
+    rawParams.conductorVoiceBudget = apvts.getRawParameterValue("conductorVoiceBudget");
+    rawParams.crowdMacrosEnabled = apvts.getRawParameterValue("crowdMacrosEnabled");
+    rawParams.crowdMacroChannel = apvts.getRawParameterValue("crowdMacroChannel");
+    rawParams.crowdMacroDensityCc = apvts.getRawParameterValue("crowdMacroDensityCc");
+    rawParams.crowdMacroCentroidXCc = apvts.getRawParameterValue("crowdMacroCentroidXCc");
+    rawParams.crowdMacroCentroidYCc = apvts.getRawParameterValue("crowdMacroCentroidYCc");
+    rawParams.crowdMacroMotionCc = apvts.getRawParameterValue("crowdMacroMotionCc");
+    rawParams.crowdMacroRate = apvts.getRawParameterValue("crowdMacroRate");
 }
 
 void AudienceProcessor::prepareToPlay (double sampleRate, int)
@@ -264,18 +348,29 @@ void AudienceProcessor::prepareToPlay (double sampleRate, int)
     mpeOut.reset();
     mpeOut.markSetupDirty();
     crowdTimeField.reset();
+    resetCrowdExpressionMacros();
     adaptiveCrowdGovernor.reset();
+    pressureSafetyGovernor.reset();
+    safetyOutput = pressureSafetyGovernor.getOutput();
     governorLastUpdateSeconds = 0.0;
     governorControlClockInitialised = false;
     governorLastVoiceLimit = 16;
+    safetyLastUpdateSeconds = 0.0;
+    safetyLastOscMessages = osc.getValidMessageCount();
+    safetyLastDroppedMotion = fingerRouter.getDroppedEventCount();
+    safetyClockInitialised = false;
     governorObservedDensity.store(0, std::memory_order_relaxed);
     governorEffectiveAttacks.store(4, std::memory_order_relaxed);
     governorEffectiveActive.store(8, std::memory_order_relaxed);
     governorEffectiveSpread.store(1, std::memory_order_relaxed);
     governorBand.store(0, std::memory_order_relaxed);
+    safetyGovernorState.store(0, std::memory_order_relaxed);
+    safetyGovernorReasons.store(0, std::memory_order_relaxed);
+    safetyIngressRate.store(0.0, std::memory_order_relaxed);
+    safetyExternalFifoPressure.store(0.0, std::memory_order_relaxed);
+    externalFifoOldestAgeSeconds.store(0.0, std::memory_order_relaxed);
+    lastProcessDeadlineRatio.store(0.0, std::memory_order_relaxed);
     timeFieldRehydratePending = true;
-    retriggerFingerMidi = true;
-    fingerRetriggerCursor = 0;
     // A host can call prepareToPlay again without delivering note-offs from the
     // previous processing epoch. The first new block therefore emits a bounded
     // channel reset and re-arms any OSC fingers that are still held.
@@ -347,8 +442,6 @@ void AudienceProcessor::updatePitchMap()
         if (changed)
         {
             pitchMapChangedThisBlock = true;
-            retriggerFingerMidi = true;
-            fingerRetriggerCursor = 0;
         }
     }
 
@@ -519,7 +612,124 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         timeConfig.maxActive = governorOutput.maxActive;
         timeConfig.spreadSlots = governorOutput.spreadSlots;
     }
+
+    constexpr double safetyControlPeriodSeconds = 0.1;
+    const bool safetyClockMovedBack = safetyClockInitialised
+                                   && clockFrame.monotonicSeconds
+                                        < safetyLastUpdateSeconds;
+    const bool safetyUpdateDue = ! safetyClockInitialised
+                              || safetyClockMovedBack
+                              || clockFrame.monotonicSeconds
+                                   - safetyLastUpdateSeconds
+                                     >= safetyControlPeriodSeconds;
+    const bool safetyEnabled = rawParamBool(rawParams.safetyGovernorEnabled, true);
+    if (safetyUpdateDue)
+    {
+        const uint32_t oscMessages = osc.getValidMessageCount();
+        const uint32_t droppedMotion = fingerRouter.getDroppedEventCount();
+        const double elapsed = safetyClockInitialised && ! safetyClockMovedBack
+                             ? juce::jmax(1.0e-3,
+                                 clockFrame.monotonicSeconds - safetyLastUpdateSeconds)
+                             : safetyControlPeriodSeconds;
+        const uint32_t messageDelta = oscMessages >= safetyLastOscMessages
+                                    ? oscMessages - safetyLastOscMessages
+                                    : oscMessages;
+        const uint32_t dropDelta = droppedMotion - safetyLastDroppedMotion;
+
+        PressureAwareSafetyGovernor::Input input;
+        input.ingressEventsPerSecond = (double) messageDelta / elapsed;
+        input.lifecycleQueuePressure = (double) fingerRouter.getLifecycleQueueDepth()
+                                     / (double) OscFingerRouter::EVENT_QUEUE_SIZE;
+        input.motionDropDelta = (double) dropDelta;
+        input.timeFieldPendingPressure = (double) timeFieldPending.load(
+                                             std::memory_order_relaxed)
+                                       / (double) MidiAudienceModel::MAX_SOURCES;
+        input.externalFifoPressure = (double) externalMidiFifo.getNumReady()
+                                   / (double) externalMidiQueueSize;
+        input.externalFifoOldestAgeSeconds = externalFifoOldestAgeSeconds.load(
+            std::memory_order_relaxed);
+        input.processDeadlineRatio = lastProcessDeadlineRatio.load(
+            std::memory_order_relaxed);
+        input.monotonicSeconds = clockFrame.monotonicSeconds;
+
+        if (safetyEnabled)
+            safetyOutput = pressureSafetyGovernor.update({}, input);
+        else
+        {
+            pressureSafetyGovernor.reset();
+            safetyOutput = pressureSafetyGovernor.getOutput();
+        }
+
+        safetyLastUpdateSeconds = clockFrame.monotonicSeconds;
+        safetyLastOscMessages = oscMessages;
+        safetyLastDroppedMotion = droppedMotion;
+        safetyClockInitialised = true;
+        safetyIngressRate.store(input.ingressEventsPerSecond,
+                                std::memory_order_relaxed);
+        safetyExternalFifoPressure.store(input.externalFifoPressure,
+                                         std::memory_order_relaxed);
+        safetyGovernorState.store((int) safetyOutput.state,
+                                  std::memory_order_relaxed);
+        safetyGovernorReasons.store(safetyOutput.reasonBits,
+                                    std::memory_order_relaxed);
+    }
+
+    if (safetyEnabled)
+    {
+        timeConfig.maxAttacksPerStep = juce::jmin(
+            timeConfig.maxAttacksPerStep, safetyOutput.maxAttacksCeiling);
+        timeConfig.maxActive = juce::jmin(
+            timeConfig.maxActive, safetyOutput.maxActiveCeiling);
+        timeConfig.spreadSlots = juce::jmax(
+            timeConfig.spreadSlots, safetyOutput.minSpread);
+
+        if (timeConfig.mode != CrowdTimeField::Mode::Flow)
+        {
+            timeConfig.attackAdmissionOpen = safetyOutput.admitNewAttacks;
+        }
+        else if (safetyOutput.state
+                 != PressureAwareSafetyGovernor::State::NORMAL)
+        {
+            // NORMAL keeps Flow's direct legacy behaviour. Under actual
+            // pressure, the same scheduler becomes a release-safe admission
+            // queue instead of letting the production Flow path bypass the
+            // Safety Governor.
+            timeConfig.attackAdmissionOpen = safetyOutput.admitNewAttacks;
+            timeConfig.flowMaxAttacksPerBlock = safetyOutput.maxAttacksCeiling;
+            timeConfig.flowMaxActive = safetyOutput.maxActiveCeiling;
+        }
+        fingerRouter.setMotionUpdateDivisor(safetyOutput.motionUpdateDivisor);
+    }
+    else
+    {
+        timeConfig.attackAdmissionOpen = true;
+        fingerRouter.setMotionUpdateDivisor(1);
+    }
+
+    const std::uint32_t conductorPolicy = conductorAudioPolicy.load(
+        std::memory_order_acquire);
+    const bool conductorGlobal = (conductorPolicy & 0x3u)
+        == static_cast<std::uint32_t>(GlobalConductorHub::SnapshotSource::Global);
+    if (conductorGlobal && timeConfig.mode != CrowdTimeField::Mode::Flow)
+    {
+        const int attackQuota = juce::jlimit(
+            0, 16, static_cast<int>((conductorPolicy >> 2u) & 0x1fu));
+        const int voiceQuota = juce::jlimit(
+            0, 16, static_cast<int>((conductorPolicy >> 7u) & 0x1fu));
+        timeConfig.attackAdmissionOpen = timeConfig.attackAdmissionOpen
+                                      && attackQuota > 0 && voiceQuota > 0;
+        if (attackQuota > 0)
+            timeConfig.maxAttacksPerStep = juce::jmin(
+                timeConfig.maxAttacksPerStep, attackQuota);
+        if (voiceQuota > 0)
+            timeConfig.maxActive = juce::jmin(timeConfig.maxActive, voiceQuota);
+    }
     const int midiType = midiConfig.outputType;
+    const bool outputEnabled = midiType != 0;
+    const auto crowdMacroConfig = buildCrowdMacroRoutingConfig(
+        outputEnabled, safetyEnabled);
+    const int midiOutputPath = juce::jlimit(
+        0, 2, rawParamInt(rawParams.midiOutputPath, 0));
     const int routingMode = midiConfig.normalRoutingMode;
     const int normalChannel = midiConfig.normalMidiChannel;
     const int bendRange = MpeMidiOutput::bendRangeFromChoice(
@@ -533,7 +743,10 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float gatePercent = static_cast<float>(timeConfig.gatePercent);
     const bool routeChanged = midiOutputRouteChangedPending.exchange(false, std::memory_order_acq_rel);
 
+    const int previousMidiOutputPath = lastMidiOutputPath;
+    const bool outputPathChanged = midiOutputPath != previousMidiOutputPath;
     const bool midiConfigChanged = midiType != lastMidiOutputType
+                                || outputPathChanged
                                 || routingMode != lastNormalMidiRoutingMode
                                 || normalChannel != lastNormalMidiChannel
                                 || bendRange != lastMpeBendRange
@@ -556,7 +769,15 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const bool needsSafetyReset = ((configChanged || routeChanged || pitchMapChanged) && hadActiveOutput)
                                || (midiInputOverflowed && (hadActiveOutput || midiType != 0));
 
+    if (outputPathChanged
+        && midiOutputOptionIndex.load(std::memory_order_relaxed) > 0)
+    {
+        externalMidiProducerQuarantined.store(true, std::memory_order_release);
+        externalMidiPanicPending.store(true, std::memory_order_release);
+    }
+
     lastMidiOutputType = midiType;
+    lastMidiOutputPath = midiOutputPath;
     lastNormalMidiRoutingMode = routingMode;
     lastNormalMidiChannel = normalChannel;
     lastMpeBendRange = bendRange;
@@ -577,18 +798,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     if (configChanged || routeChanged || midiInputOverflowed || pitchMapChanged)
     {
         mpeOut.markSetupDirty();
-        if (timeMode == 0)
-        {
-            retriggerFingerMidi = true;
-            fingerRetriggerCursor = 0;
-            timeFieldRehydratePending = true;
-        }
-        else
-        {
-            retriggerFingerMidi = false;
-            fingerRetriggerCursor = 0;
-            timeFieldRehydratePending = true;
-        }
+        timeFieldRehydratePending = true;
     }
 
     if (midiRenderScratchLoanedToHost)
@@ -615,7 +825,6 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         mpeOut.reset();
     }
 
-    const bool outputEnabled = midiType != 0;
     if (outputEnabled)
     {
         for (const auto metadata : midiInputScratch)
@@ -624,13 +833,42 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     renderOutgoingMidi(output, buffer.getNumSamples(), outputEnabled,
                        midiConfig, timeConfig, clockFrame, needsSafetyReset);
+    renderCrowdExpressionMacros(
+        output, buffer.getNumSamples(), clockFrame.monotonicSeconds,
+        crowdMacroConfig,
+        configChanged || routeChanged || midiInputOverflowed || pitchMapChanged);
 #if COSMIC_MIDI_DIAGNOSTICS
     mpeOut.recordOutgoingMidiDebugEvents(output);
 #endif
-    queueMidiToExternalOutput(output, externalBlockStartTimeMs, buffer.getNumSamples());
+    if (midiOutputPath != 0)
+        queueMidiToExternalOutput(output, externalBlockStartTimeMs, buffer.getNumSamples());
+
+    // External Only is deliberately fail-closed. An unavailable endpoint must
+    // not silently recreate the duplicate Host route this mode is meant to
+    // prevent; Venue Preflight exposes the incoherent selection instead.
+    if (midiOutputPath == 1)
+    {
+        output.clear();
+        if (outputPathChanged && previousMidiOutputPath != 1)
+            mpeOut.emitSafetyReset(output, 0);
+    }
 
     midiMessages.swapWith(midiRenderScratch);
     midiRenderScratchLoanedToHost = true;
+
+    const double processEndTimeMs = juce::Time::getMillisecondCounterHiRes();
+    const double deadlineMs = buffer.getNumSamples() > 0
+                            ? 1000.0 * (double) buffer.getNumSamples()
+                                / currentSampleRate
+                            : 0.0;
+    const double measuredRatio = deadlineMs > 0.0
+                               ? (processEndTimeMs - externalBlockStartTimeMs)
+                                   / deadlineMs
+                               : 0.0;
+    lastProcessDeadlineRatio.store(
+        std::isfinite(measuredRatio)
+            ? juce::jlimit(0.0, 1000.0, measuredRatio) : 1000.0,
+        std::memory_order_relaxed);
 }
 
 MpeMidiOutput::MpeConfig AudienceProcessor::buildMpeConfig() const
@@ -683,6 +921,172 @@ CrowdTimeField::Config AudienceProcessor::buildTimeFieldConfig (
     return CrowdTimeField::sanitiseConfig(config);
 }
 
+AudienceProcessor::CrowdMacroRoutingConfig
+AudienceProcessor::buildCrowdMacroRoutingConfig (
+    bool outputEnabled, bool safetyEnabled) const noexcept
+{
+    static constexpr double rateValues[] { 5.0, 10.0, 20.0, 30.0 };
+
+    CrowdMacroRoutingConfig config;
+    config.channelChoice = juce::jlimit(
+        0, 16, rawParamInt(rawParams.crowdMacroChannel));
+    config.controllers = {
+        juce::jlimit(0, 127, rawParamInt(rawParams.crowdMacroDensityCc, 20)),
+        juce::jlimit(0, 127, rawParamInt(rawParams.crowdMacroCentroidXCc, 21)),
+        juce::jlimit(0, 127, rawParamInt(rawParams.crowdMacroCentroidYCc, 22)),
+        juce::jlimit(0, 127, rawParamInt(rawParams.crowdMacroMotionCc, 23))
+    };
+    config.rateChoice = juce::jlimit(
+        0, 3, rawParamInt(rawParams.crowdMacroRate, 1));
+    config.rateHz = rateValues[config.rateChoice];
+
+    const bool requested = rawParamBool(rawParams.crowdMacrosEnabled, false);
+    const bool safetyAllowsMacros = ! safetyEnabled || safetyOutput.macrosEnabled;
+    config.effectiveEnabled = requested && outputEnabled && safetyAllowsMacros;
+    return config;
+}
+
+void AudienceProcessor::renderCrowdExpressionMacros (
+    juce::MidiBuffer& midiMessages, int numSamples,
+    double monotonicSeconds, const CrowdMacroRoutingConfig& config,
+    bool resetBoundary) noexcept
+{
+    static_assert(CrowdExpressionMacros::kMaxSources
+                    == static_cast<std::size_t>(MidiAudienceModel::MAX_SOURCES),
+                  "Crowd macro and audience source domains must match");
+
+    const bool mappingChanged = crowdMacroConfigInitialised
+        && (config.channelChoice != lastCrowdMacroConfig.channelChoice
+            || config.controllers != lastCrowdMacroConfig.controllers
+            || config.rateChoice != lastCrowdMacroConfig.rateChoice);
+    const bool enableChanged = ! crowdMacroConfigInitialised
+        || config.effectiveEnabled != lastCrowdMacroConfig.effectiveEnabled;
+
+    if (resetBoundary || mappingChanged)
+    {
+        crowdExpressionMacros.reset();
+        crowdMacroAnalysisClockInitialised = false;
+    }
+
+    const bool finiteClock = std::isfinite(monotonicSeconds);
+    const bool clockMovedBack = crowdMacroAnalysisClockInitialised
+                             && finiteClock
+                             && monotonicSeconds < crowdMacroLastAnalysisSeconds;
+    const double analysisPeriodSeconds = 1.0 / config.rateHz;
+    const bool periodElapsed = crowdMacroAnalysisClockInitialised
+                            && finiteClock
+                            && monotonicSeconds - crowdMacroLastAnalysisSeconds
+                                 + 1.0e-12 >= analysisPeriodSeconds;
+    const bool analysisDue = ! crowdMacroAnalysisClockInitialised
+                          || enableChanged || clockMovedBack || periodElapsed;
+
+    crowdMacroEffectiveEnabled.store(config.effectiveEnabled,
+                                     std::memory_order_relaxed);
+    if (! analysisDue)
+        return;
+
+    for (std::size_t index = 0;
+         index < CrowdExpressionMacros::kMaxSources; ++index)
+    {
+        const auto source = audienceModel.getSourceSnapshot(
+            static_cast<int>(index));
+        auto& destination = crowdMacroInputScratch.sources[index];
+        destination.active = source.active;
+        destination.x = source.x;
+        destination.y = source.y;
+    }
+    crowdMacroInputScratch.monotonicSeconds = monotonicSeconds;
+
+    CrowdExpressionMacros::Config engineConfig;
+    engineConfig.enabled = config.effectiveEnabled;
+    engineConfig.rateHz = config.rateHz;
+    crowdMacroOutput = crowdExpressionMacros.update(
+        engineConfig, crowdMacroInputScratch);
+
+    crowdMacroLastAnalysisSeconds = finiteClock ? monotonicSeconds : 0.0;
+    crowdMacroAnalysisClockInitialised = true;
+    lastCrowdMacroConfig = config;
+    crowdMacroConfigInitialised = true;
+
+    crowdMacroActiveSources.store(
+        static_cast<int>(crowdMacroOutput.activeSources),
+        std::memory_order_relaxed);
+    crowdMacroDensity.store(crowdMacroOutput.density,
+                            std::memory_order_relaxed);
+    crowdMacroCentroidX.store(crowdMacroOutput.centroidX,
+                              std::memory_order_relaxed);
+    crowdMacroCentroidY.store(crowdMacroOutput.centroidY,
+                              std::memory_order_relaxed);
+    crowdMacroMotion.store(crowdMacroOutput.motion,
+                           std::memory_order_relaxed);
+    crowdMacroDensityCcValue.store(crowdMacroOutput.values.density,
+                                   std::memory_order_relaxed);
+    crowdMacroCentroidXCcValue.store(crowdMacroOutput.values.centroidX,
+                                     std::memory_order_relaxed);
+    crowdMacroCentroidYCcValue.store(crowdMacroOutput.values.centroidY,
+                                     std::memory_order_relaxed);
+    crowdMacroMotionCcValue.store(crowdMacroOutput.values.motion,
+                                  std::memory_order_relaxed);
+
+    if (! crowdMacroOutput.emitDue
+        || crowdMacroOutput.changedMask == CrowdExpressionMacros::ChangedNone)
+        return;
+
+    const int firstChannel = config.channelChoice == 16
+                           ? 1 : config.channelChoice + 1;
+    const int lastChannel = config.channelChoice == 16 ? 16 : firstChannel;
+    const int sampleOffset = juce::jmax(0, numSamples - 1);
+    const auto changedMask = crowdMacroOutput.changedMask;
+
+    const auto emitController = [&] (std::uint8_t bit, int controller,
+                                     std::uint8_t value) noexcept
+    {
+        if ((changedMask & bit) == 0u)
+            return;
+
+        for (int channel = firstChannel; channel <= lastChannel; ++channel)
+        {
+            const juce::uint8 bytes[] {
+                static_cast<juce::uint8>(0xb0 | (channel - 1)),
+                static_cast<juce::uint8>(controller),
+                static_cast<juce::uint8>(value)
+            };
+            midiMessages.addEvent(bytes, 3, sampleOffset);
+        }
+    };
+
+    emitController(CrowdExpressionMacros::ChangedDensity,
+                   config.controllers[0], crowdMacroOutput.values.density);
+    emitController(CrowdExpressionMacros::ChangedCentroidX,
+                   config.controllers[1], crowdMacroOutput.values.centroidX);
+    emitController(CrowdExpressionMacros::ChangedCentroidY,
+                   config.controllers[2], crowdMacroOutput.values.centroidY);
+    emitController(CrowdExpressionMacros::ChangedMotion,
+                   config.controllers[3], crowdMacroOutput.values.motion);
+}
+
+void AudienceProcessor::resetCrowdExpressionMacros() noexcept
+{
+    crowdExpressionMacros.reset();
+    crowdMacroInputScratch = {};
+    crowdMacroOutput = crowdExpressionMacros.getOutput();
+    lastCrowdMacroConfig = {};
+    crowdMacroLastAnalysisSeconds = 0.0;
+    crowdMacroAnalysisClockInitialised = false;
+    crowdMacroConfigInitialised = false;
+
+    crowdMacroEffectiveEnabled.store(false, std::memory_order_relaxed);
+    crowdMacroActiveSources.store(0, std::memory_order_relaxed);
+    crowdMacroDensity.store(0.0, std::memory_order_relaxed);
+    crowdMacroCentroidX.store(0.5, std::memory_order_relaxed);
+    crowdMacroCentroidY.store(0.5, std::memory_order_relaxed);
+    crowdMacroMotion.store(0.0, std::memory_order_relaxed);
+    crowdMacroDensityCcValue.store(0, std::memory_order_relaxed);
+    crowdMacroCentroidXCcValue.store(64, std::memory_order_relaxed);
+    crowdMacroCentroidYCcValue.store(64, std::memory_order_relaxed);
+    crowdMacroMotionCcValue.store(0, std::memory_order_relaxed);
+}
+
 CrowdTimeField::ClockFrame AudienceProcessor::captureTimeFieldClock (
     int numSamples, double monotonicSeconds) const noexcept
 {
@@ -710,26 +1114,6 @@ CrowdTimeField::ClockFrame AudienceProcessor::captureTimeFieldClock (
     }
 
     return frame;
-}
-
-void AudienceProcessor::rehydrateDirectMidiFromCanonical() noexcept
-{
-    bool hasHeldFinger = false;
-    for (int voice = 0; voice < (int) fingerMidiStates.size(); ++voice)
-    {
-        const int sourceId = voice / OscFingerRouter::MAX_FINGERS;
-        const int finger = voice % OscFingerRouter::MAX_FINGERS;
-        const auto canonical = audienceModel.getFingerSnapshot(sourceId, finger);
-        auto& state = fingerMidiStates[(size_t) voice];
-        state = {};
-        state.x = canonical.x;
-        state.y = canonical.y;
-        state.active = canonical.active;
-        hasHeldFinger = hasHeldFinger || canonical.active;
-    }
-
-    retriggerFingerMidi = hasHeldFinger;
-    fingerRetriggerCursor = 0;
 }
 
 void AudienceProcessor::rehydrateTimeFieldFromCanonical() noexcept
@@ -761,192 +1145,9 @@ void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
                                             const CrowdTimeField::ClockFrame& clockFrame,
                                             bool resetAlreadyEmitted)
 {
-    if (timeConfig.mode != CrowdTimeField::Mode::Flow)
-    {
-        renderTimedOutgoingMidi(midiMessages, numSamples, outputEnabled,
-                                config, timeConfig, clockFrame,
-                                resetAlreadyEmitted);
-        return;
-    }
-
-    if (timeFieldRehydratePending)
-    {
-        // Timed modes may own only a subset of the canonical held audience.
-        // Rebuild the direct ledger when returning to Flow so a source held
-        // behind the active cap is not silently lost.
-        fingerRouter.discardPendingEvents();
-        rehydrateDirectMidiFromCanonical();
-        crowdTimeField.reset();
-        timeFieldRehydratePending = false;
-    }
-    timeFieldPending.store(0, std::memory_order_relaxed);
-    timeFieldActive.store(audienceModel.getActiveFingerCount(), std::memory_order_relaxed);
-    timeFieldMerged.store(0, std::memory_order_relaxed);
-    const bool hostLocked = clockFrame.hostValid && clockFrame.isPlaying;
-    const bool useHost = timeConfig.clockSource == CrowdTimeField::ClockSource::Host;
-    timeFieldClockLocked.store(useHost ? hostLocked : true, std::memory_order_relaxed);
-    timeFieldBpm.store(useHost && hostLocked ? clockFrame.bpm : timeConfig.internalBpm,
-                       std::memory_order_relaxed);
-
-    // Bound semantic work by both the fixed scratch capacity and the current
-    // audio deadline. Tiny host blocks (including pluginval's 1-sample case)
-    // must not be asked to emit a 64-voice MPE burst.
-    const int blockLifecycleBudget = juce::jlimit(1, midiLifecycleEventBudget,
-                                                   juce::jmax(1, numSamples));
-    int noteEventCount = 0;
-
-    auto appendEvent = [this, &noteEventCount, outputEnabled]
-                       (const MpeMidiOutput::NoteEvent& event) noexcept
-    {
-        if (outputEnabled && noteEventCount < (int) midiNoteEventScratch.size())
-            midiNoteEventScratch[(size_t) noteEventCount++] = event;
-    };
-
-    const bool reset = fingerRouter.takeResetRequest();
-    if (reset)
-    {
-        fingerRouter.discardPendingEvents();
-        rehydrateDirectMidiFromCanonical();
-        // A reset is a transport boundary, not deletion of authoritative OSC
-        // state. Rehydrate every held finger from the lock-free control ledger
-        // on following blocks. Events published after discard remain queued and
-        // will be applied normally, so clear/on races cannot lose a touch.
-        if (! resetAlreadyEmitted)
-        {
-            MpeMidiOutput::NoteEvent allOff;
-            allOff.type = MpeMidiOutput::NoteEvent::AllNotesOff;
-            appendEvent(allOff);
-        }
-    }
-
-    auto resolvePitch = [this] (float x, FingerMidiState& state) noexcept
-    {
-        if (lastPitchSystem == 1)
-        {
-            const auto pitch = atomicPitchMap.xToPitch(x);
-            state.pitchKey = pitch.step;
-            state.frequencyHz = pitch.isValid() ? pitch.frequencyHz : 261.6255653005986;
-        }
-        else
-        {
-            const auto pitch = pitchMap.xToPitch(x);
-            state.pitchKey = pitch.step;
-            state.frequencyHz = pitch.isValid() ? pitch.frequencyHz : 261.6255653005986;
-        }
-    };
-
-    auto appendFinger = [&] (MpeMidiOutput::NoteEvent::Type type,
-                             int sourceId, int finger,
-                             const FingerMidiState& state,
-                             int sampleOffset = 0) noexcept
-    {
-        MpeMidiOutput::NoteEvent event;
-        event.type = type;
-        event.sourceId = sourceId * OscFingerRouter::MAX_FINGERS + finger;
-        event.participantId = sourceId;
-        event.sampleOffset = sampleOffset;
-        event.frequencyHz = state.frequencyHz;
-        event.velocity = state.y;
-        event.x = state.x;
-        event.y = state.y;
-        appendEvent(event);
-    };
-
-    if (! reset)
-    {
-        const int count = fingerRouter.drain(fingerEventScratch.data(),
-                                             blockLifecycleBudget);
-        for (int i = 0; i < count; ++i)
-        {
-            const auto& event = fingerEventScratch[(size_t) i];
-            const int sourceId = (int) event.sourceId;
-            const int finger = (int) event.finger;
-            if (sourceId < 0 || sourceId >= OscFingerRouter::MAX_SOURCES
-                || finger < 0 || finger >= OscFingerRouter::MAX_FINGERS)
-                continue;
-
-            auto& state = fingerMidiStates[(size_t) (sourceId * OscFingerRouter::MAX_FINGERS + finger)];
-            switch ((OscFingerRouter::Event::Type) event.type)
-            {
-                case OscFingerRouter::Event::X:
-                {
-                    state.x = juce::jlimit(0.0f, 1.0f, event.value);
-                    if (state.active)
-                    {
-                        const int previousPitch = state.pitchKey;
-                        resolvePitch(state.x, state);
-                        appendFinger(state.pitchKey != previousPitch
-                                         ? MpeMidiOutput::NoteEvent::NoteOn
-                                         : MpeMidiOutput::NoteEvent::Expression,
-                                     sourceId, finger, state);
-                    }
-                    break;
-                }
-
-                case OscFingerRouter::Event::Y:
-                    state.y = juce::jlimit(0.0f, 1.0f, event.value);
-                    if (state.active)
-                        appendFinger(MpeMidiOutput::NoteEvent::Expression, sourceId, finger, state);
-                    break;
-
-                case OscFingerRouter::Event::On:
-                    if (! state.active)
-                    {
-                        state.active = true;
-                        resolvePitch(state.x, state);
-                        appendFinger(MpeMidiOutput::NoteEvent::NoteOn, sourceId, finger, state);
-                    }
-                    break;
-
-                case OscFingerRouter::Event::Off:
-                    if (state.active)
-                    {
-                        appendFinger(MpeMidiOutput::NoteEvent::NoteOff, sourceId, finger, state);
-                        state.active = false;
-                        state.pitchKey = -1;
-                    }
-                    break;
-            }
-        }
-    }
-
-    // MPE voice stealing and same-offset MidiBuffer insertion both become
-    // expensive for huge bursts. Keep one shared semantic budget for new OSC
-    // lifecycle work and held-finger rehydration. The router retains the rest
-    // in FIFO order for following callbacks, so NoteOn/Off order is preserved.
-    if (outputEnabled && retriggerFingerMidi && ! reset
-        && noteEventCount < blockLifecycleBudget)
-    {
-        const int remainingBudget = blockLifecycleBudget - noteEventCount;
-        int emitted = 0;
-        for (; fingerRetriggerCursor < (int) fingerMidiStates.size(); ++fingerRetriggerCursor)
-        {
-            auto& state = fingerMidiStates[(size_t) fingerRetriggerCursor];
-            if (! state.active)
-                continue;
-
-            resolvePitch(state.x, state);
-            appendFinger(MpeMidiOutput::NoteEvent::NoteOn,
-                         fingerRetriggerCursor / OscFingerRouter::MAX_FINGERS,
-                         fingerRetriggerCursor % OscFingerRouter::MAX_FINGERS,
-                         state);
-            if (++emitted >= remainingBudget)
-            {
-                ++fingerRetriggerCursor;
-                break;
-            }
-        }
-
-        if (fingerRetriggerCursor >= (int) fingerMidiStates.size())
-        {
-            retriggerFingerMidi = false;
-            fingerRetriggerCursor = 0;
-        }
-    }
-
-    if (outputEnabled && noteEventCount > 0)
-        mpeOut.render(config, midiNoteEventScratch.data(), noteEventCount,
-                      midiMessages, numSamples);
+    renderTimedOutgoingMidi(midiMessages, numSamples, outputEnabled,
+                            config, timeConfig, clockFrame,
+                            resetAlreadyEmitted);
 }
 
 void AudienceProcessor::renderTimedOutgoingMidi (
@@ -957,6 +1158,15 @@ void AudienceProcessor::renderTimedOutgoingMidi (
 {
     const int blockBudget = juce::jlimit(1, midiLifecycleEventBudget,
                                          juce::jmax(1, numSamples));
+    CrowdTimeField::Config effectiveTimeConfig = timeConfig;
+    if (effectiveTimeConfig.mode == CrowdTimeField::Mode::Flow)
+    {
+        // Flow remains immediate, but rehydration and hostile bursts must obey
+        // the same per-callback semantic budget as the former direct path.
+        // This is a soft policy field and never creates a transport reset.
+        effectiveTimeConfig.flowMaxAttacksPerBlock = juce::jmin(
+            effectiveTimeConfig.flowMaxAttacksPerBlock, blockBudget);
+    }
     int midiEventCount = 0;
 
     auto appendMidi = [this, &midiEventCount, outputEnabled]
@@ -977,7 +1187,7 @@ void AudienceProcessor::renderTimedOutgoingMidi (
     {
         crowdTimeField.reset();
         CrowdTimeField::OutputBlock prime;
-        crowdTimeField.process(timeConfig, clockFrame, nullptr, 0, prime);
+        crowdTimeField.process(effectiveTimeConfig, clockFrame, nullptr, 0, prime);
         rehydrateTimeFieldFromCanonical();
         timeFieldBpm.store(prime.effectiveBpm, std::memory_order_relaxed);
         timeFieldClockLocked.store(prime.clockLocked, std::memory_order_relaxed);
@@ -989,56 +1199,6 @@ void AudienceProcessor::renderTimedOutgoingMidi (
     const bool routerReset = fingerRouter.takeResetRequest();
     if (routerReset || timeFieldRehydratePending)
     {
-        fingerRouter.discardPendingEvents();
-        if (! resetAlreadyEmitted)
-            appendAllOff();
-        primeAndRehydrate();
-        if (midiEventCount > 0)
-            mpeOut.render(midiConfig, midiNoteEventScratch.data(), midiEventCount,
-                          midiMessages, numSamples);
-        return;
-    }
-
-    const int drained = fingerRouter.drain(fingerEventScratch.data(), blockBudget);
-    int inputCount = 0;
-    for (int index = 0; index < drained; ++index)
-    {
-        const auto& incoming = fingerEventScratch[(size_t) index];
-        const auto type = (OscFingerRouter::Event::Type) incoming.type;
-        if (type != OscFingerRouter::Event::On && type != OscFingerRouter::Event::Off)
-            continue;
-
-        const int sourceId = (int) incoming.sourceId;
-        const int finger = (int) incoming.finger;
-        if (sourceId < 0 || sourceId >= CrowdTimeField::kMaxSources
-            || finger < 0 || finger >= CrowdTimeField::kFingersPerSource)
-            continue;
-
-        auto& event = timeFieldInputScratch[(size_t) inputCount++];
-        event.type = type == OscFingerRouter::Event::On
-                   ? CrowdTimeField::InputEvent::Type::On
-                   : CrowdTimeField::InputEvent::Type::Off;
-        event.voiceId = CrowdTimeField::voiceIdFor(sourceId, finger);
-        event.sourceId = sourceId;
-        event.sampleOffset = 0;
-    }
-
-    crowdTimeField.process(timeConfig, clockFrame,
-                           timeFieldInputScratch.data(), inputCount,
-                           timeFieldOutputScratch);
-
-    timeFieldBpm.store(timeFieldOutputScratch.effectiveBpm, std::memory_order_relaxed);
-    timeFieldClockLocked.store(timeFieldOutputScratch.clockLocked, std::memory_order_relaxed);
-    timeFieldPending.store(timeFieldOutputScratch.pendingCount, std::memory_order_relaxed);
-    timeFieldActive.store(timeFieldOutputScratch.activeCount, std::memory_order_relaxed);
-    timeFieldMerged.store(timeFieldOutputScratch.mergedCount, std::memory_order_relaxed);
-
-    if (timeFieldOutputScratch.resetRequested)
-    {
-        // A seek/loop/clock-domain reset invalidates the undrained half of the
-        // old lifecycle stream too. Rebuild from the canonical finger ledger;
-        // events published concurrently after this snapshot remain queued and
-        // will be applied in their new order on the following block.
         fingerRouter.discardPendingEvents();
         if (! resetAlreadyEmitted)
             appendAllOff();
@@ -1081,6 +1241,74 @@ void AudienceProcessor::renderTimedOutgoingMidi (
         event.y = state.y;
         appendMidi(event);
     };
+
+    const int drained = fingerRouter.drain(fingerEventScratch.data(), blockBudget);
+    int inputCount = 0;
+    int flowMotionCount = 0;
+    for (int index = 0; index < drained; ++index)
+    {
+        const auto& incoming = fingerEventScratch[(size_t) index];
+        const auto type = (OscFingerRouter::Event::Type) incoming.type;
+        const int sourceId = (int) incoming.sourceId;
+        const int finger = (int) incoming.finger;
+        if (sourceId < 0 || sourceId >= CrowdTimeField::kMaxSources
+            || finger < 0 || finger >= CrowdTimeField::kFingersPerSource)
+            continue;
+
+        const int voiceId = CrowdTimeField::voiceIdFor(sourceId, finger);
+        if (type == OscFingerRouter::Event::X
+            || type == OscFingerRouter::Event::Y)
+        {
+            if (effectiveTimeConfig.mode != CrowdTimeField::Mode::Flow)
+                continue;
+
+            bool alreadyQueued = false;
+            for (int motion = 0; motion < flowMotionCount; ++motion)
+                alreadyQueued = alreadyQueued
+                             || flowMotionVoiceScratch[(size_t) motion] == voiceId;
+            if (! alreadyQueued && flowMotionCount < (int) flowMotionVoiceScratch.size())
+                flowMotionVoiceScratch[(size_t) flowMotionCount++] = voiceId;
+            continue;
+        }
+
+        if (type != OscFingerRouter::Event::On
+            && type != OscFingerRouter::Event::Off)
+            continue;
+
+        auto& event = timeFieldInputScratch[(size_t) inputCount++];
+        event.type = type == OscFingerRouter::Event::On
+                   ? CrowdTimeField::InputEvent::Type::On
+                   : CrowdTimeField::InputEvent::Type::Off;
+        event.voiceId = voiceId;
+        event.sourceId = sourceId;
+        event.sampleOffset = 0;
+    }
+
+    crowdTimeField.process(effectiveTimeConfig, clockFrame,
+                           timeFieldInputScratch.data(), inputCount,
+                           timeFieldOutputScratch);
+
+    timeFieldBpm.store(timeFieldOutputScratch.effectiveBpm, std::memory_order_relaxed);
+    timeFieldClockLocked.store(timeFieldOutputScratch.clockLocked, std::memory_order_relaxed);
+    timeFieldPending.store(timeFieldOutputScratch.pendingCount, std::memory_order_relaxed);
+    timeFieldActive.store(timeFieldOutputScratch.activeCount, std::memory_order_relaxed);
+    timeFieldMerged.store(timeFieldOutputScratch.mergedCount, std::memory_order_relaxed);
+
+    if (timeFieldOutputScratch.resetRequested)
+    {
+        // A seek/loop/clock-domain reset invalidates the undrained half of the
+        // old lifecycle stream too. Rebuild from the canonical finger ledger;
+        // events published concurrently after this snapshot remain queued and
+        // will be applied in their new order on the following block.
+        fingerRouter.discardPendingEvents();
+        if (! resetAlreadyEmitted)
+            appendAllOff();
+        primeAndRehydrate();
+        if (midiEventCount > 0)
+            mpeOut.render(midiConfig, midiNoteEventScratch.data(), midiEventCount,
+                          midiMessages, numSamples);
+        return;
+    }
 
     for (int index = 0; index < timeFieldOutputScratch.count; ++index)
     {
@@ -1129,6 +1357,47 @@ void AudienceProcessor::renderTimedOutgoingMidi (
                                  scheduled.sourceId, finger, state, sampleOffset);
                 }
                 break;
+        }
+    }
+
+    // Flow forwards motion continuously, unlike Grid/Ensemble which sample
+    // canonical position on their own ticks. Lifecycle output always runs
+    // first: an Off in this block closes ownership before any expression can
+    // be emitted, and a newly admitted Attack already contains the latest
+    // position so it does not need a duplicate expression packet.
+    if (effectiveTimeConfig.mode == CrowdTimeField::Mode::Flow)
+    {
+        for (int index = 0; index < flowMotionCount
+                            && midiEventCount < (int) midiNoteEventScratch.size(); ++index)
+        {
+            const int voiceId = flowMotionVoiceScratch[(size_t) index];
+            auto& state = fingerMidiStates[(size_t) voiceId];
+            if (! state.active)
+                continue;
+
+            bool attackedThisBlock = false;
+            for (int eventIndex = 0; eventIndex < timeFieldOutputScratch.count; ++eventIndex)
+            {
+                const auto& scheduled = timeFieldOutputScratch.events[(size_t) eventIndex];
+                attackedThisBlock = attackedThisBlock
+                                 || (scheduled.voiceId == voiceId
+                                     && scheduled.type
+                                        == CrowdTimeField::OutputEvent::Type::Attack);
+            }
+            if (attackedThisBlock)
+                continue;
+
+            const int sourceId = CrowdTimeField::sourceIdForVoice(voiceId);
+            const int finger = voiceId % CrowdTimeField::kFingersPerSource;
+            const auto canonical = audienceModel.getFingerSnapshot(sourceId, finger);
+            const int previousPitch = state.pitchKey;
+            state.x = canonical.x;
+            state.y = canonical.y;
+            resolvePitch(state.x, state);
+            appendFinger(state.pitchKey != previousPitch
+                             ? MpeMidiOutput::NoteEvent::NoteOn
+                             : MpeMidiOutput::NoteEvent::Expression,
+                         sourceId, finger, state, 0);
         }
     }
 
@@ -1221,10 +1490,18 @@ void AudienceProcessor::drainExternalMidiOutputQueue()
         int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
         externalMidiFifo.prepareToRead(1, start1, size1, start2, size2);
         if (size1 <= 0 && size2 <= 0)
+        {
+            externalFifoOldestAgeSeconds.store(0.0, std::memory_order_relaxed);
             return;
+        }
 
         const int slotIndex = size1 > 0 ? start1 : start2;
         const auto& event = externalMidiEvents[(size_t) slotIndex];
+        externalFifoOldestAgeSeconds.store(
+            std::isfinite(event.dueTimeMs)
+                ? juce::jmax(0.0, (nowMs - event.dueTimeMs) * 0.001)
+                : 86400.0,
+            std::memory_order_relaxed);
         if (event.dueTimeMs > nowMs)
             return;
 
@@ -1238,11 +1515,15 @@ void AudienceProcessor::discardExternalMidiOutputQueue() noexcept
 {
     const int available = externalMidiFifo.getNumReady();
     if (available <= 0)
+    {
+        externalFifoOldestAgeSeconds.store(0.0, std::memory_order_relaxed);
         return;
+    }
 
     int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
     externalMidiFifo.prepareToRead(available, start1, size1, start2, size2);
     externalMidiFifo.finishedRead(size1 + size2);
+    externalFifoOldestAgeSeconds.store(0.0, std::memory_order_relaxed);
 }
 
 void AudienceProcessor::sendExternalResetSweep()
@@ -1259,6 +1540,62 @@ void AudienceProcessor::sendExternalResetSweep()
     }
 }
 
+void AudienceProcessor::unregisterGlobalConductor() noexcept
+{
+    if (conductorHandle.isValid())
+        GlobalConductorHub::shared().unregisterInstance(conductorHandle);
+    conductorHandle = {};
+    conductorRegisteredPort = 0;
+    conductorRegisteredRoleChoice = -1;
+    conductorRegisteredGroup = -1;
+    conductorRegisteredZoneChoice = -1;
+    conductorAudioPolicy.store(packConductorPolicy(
+        GlobalConductorHub::SnapshotSource::LocalFallback,
+        governorEffectiveAttacks.load(std::memory_order_relaxed),
+        governorEffectiveActive.load(std::memory_order_relaxed)),
+        std::memory_order_release);
+    conductorActiveZones.store(0, std::memory_order_relaxed);
+    conductorLeaderPort.store(0, std::memory_order_relaxed);
+}
+
+void AudienceProcessor::refreshGlobalConductor()
+{
+    const int roleChoice = juce::jlimit(
+        0, 2, rawParamInt(rawParams.conductorRole, 0));
+    const int group = juce::jlimit(
+        0, 3, rawParamInt(rawParams.conductorGroup, 0));
+    const int port = getUdpPort();
+    const int zoneChoice = juce::jlimit(
+        0, 26, rawParamInt(rawParams.expectedZone, 0));
+    if (conductorHandle.isValid()
+        && conductorRegisteredPort == port
+        && conductorRegisteredRoleChoice == roleChoice
+        && conductorRegisteredGroup == group
+        && conductorRegisteredZoneChoice == zoneChoice)
+        return;
+
+    unregisterGlobalConductor();
+    const auto role = roleChoice == 1 ? GlobalConductorHub::Role::Leader
+                    : roleChoice == 2 ? GlobalConductorHub::Role::Follower
+                                      : GlobalConductorHub::Role::Off;
+    GlobalConductorHub::Registration registration;
+    registration.udpPort = port;
+    registration.zoneKey = static_cast<std::uint32_t>(zoneChoice);
+    registration.role = role;
+    registration.groupKey = static_cast<std::uint32_t>(group + 1);
+    const auto result = GlobalConductorHub::shared().registerInstance(registration);
+    conductorRegistrationStatus.store((int) result.status,
+                                      std::memory_order_relaxed);
+    if (result.status == GlobalConductorHub::RegistrationStatus::Registered)
+    {
+        conductorHandle = result.handle;
+        conductorRegisteredPort = port;
+        conductorRegisteredRoleChoice = roleChoice;
+        conductorRegisteredGroup = group;
+        conductorRegisteredZoneChoice = zoneChoice;
+    }
+}
+
 void AudienceProcessor::timerCallback()
 {
     // Processor-owned timer runs for the full plug-in lifetime, including when
@@ -1268,6 +1605,9 @@ void AudienceProcessor::timerCallback()
     governorRecentSourceCount.store(
         audienceModel.getRecentLiveSourceCount(), std::memory_order_release);
 
+    // Apply one complete restored routing snapshot before deriving OSC or
+    // Conductor identity. Otherwise a restored role/group could be registered
+    // for one timer tick against the previous UDP port.
     int restoredPort = 6060;
     int restoredOutput = 0;
     int restoredRouteKind = -1;
@@ -1288,7 +1628,48 @@ void AudienceProcessor::timerCallback()
     if (applyState)
     {
         setUdpPort(restoredPort);
-        restoreMidiOutputRoute(restoredRouteKind, restoredDeviceIdentifier, restoredOutput);
+        restoreMidiOutputRoute(restoredRouteKind, restoredDeviceIdentifier,
+                               restoredOutput);
+    }
+
+    const int expectedZoneChoice = juce::jlimit(
+        0, 26, rawParamInt(rawParams.expectedZone, 0));
+    const bool exclusivePort = rawParamBool(rawParams.exclusiveUdpPort, true);
+    const std::uint32_t now = juce::Time::getMillisecondCounter();
+    const bool retryDue = ! osc.isReceiving()
+                       && static_cast<std::uint32_t>(now - lastOscRetryMs) >= 1000u;
+    if (expectedZoneChoice != lastExpectedZoneChoice
+        || exclusivePort != lastExclusiveUdpPort || retryDue)
+        setUdpPort(getUdpPort());
+
+    refreshGlobalConductor();
+    if (conductorHandle.isValid())
+    {
+        auto& hub = GlobalConductorHub::shared();
+        hub.publishZoneDensity(conductorHandle,
+                               governorObservedDensity.load(std::memory_order_relaxed),
+                               now);
+        if (conductorRegisteredRoleChoice == 1)
+        {
+            hub.publishLeaderBudgets(
+                conductorHandle,
+                juce::jlimit(1, 64,
+                    rawParamInt(rawParams.conductorAttackBudget, 16)),
+                juce::jlimit(1, 128,
+                    rawParamInt(rawParams.conductorVoiceBudget, 64)),
+                now);
+            hub.allocationTick(conductorHandle, now);
+        }
+
+        GlobalConductorHub::LocalPolicy local;
+        local.attackQuota = governorEffectiveAttacks.load(std::memory_order_relaxed);
+        local.voiceQuota = governorEffectiveActive.load(std::memory_order_relaxed);
+        const auto snapshot = hub.readAudioSnapshot(conductorHandle, now, local);
+        conductorActiveZones.store(snapshot.activeZoneCount, std::memory_order_relaxed);
+        conductorLeaderPort.store(snapshot.leaderUdpPort, std::memory_order_relaxed);
+        conductorAudioPolicy.store(packConductorPolicy(
+            snapshot.source, snapshot.attackQuota, snapshot.voiceQuota),
+            std::memory_order_release);
     }
 }
 
@@ -1363,11 +1744,23 @@ juce::String AudienceProcessor::getMidiOutputStatus() const
     return midiOutputStatus;
 }
 
+int AudienceProcessor::getMidiOutputPath() const noexcept
+{
+    return juce::jlimit(0, 2, rawParamInt(rawParams.midiOutputPath, 0));
+}
+
 juce::String AudienceProcessor::getMidiOutputDescription() const
 {
-    if (midiOutputOptionIndex.load(std::memory_order_relaxed) == 0)
-        return "Host MIDI Output | use the port output for channel-separated Ableton routing";
-    return midiOutputStatus + " | host MIDI output also remains available";
+    const int path = getMidiOutputPath();
+    if (path == 0)
+        return "HOST ONLY | external endpoint is isolated";
+    if (path == 1)
+        return midiOutputOptionIndex.load(std::memory_order_relaxed) > 0
+             ? "EXTERNAL ONLY | " + midiOutputStatus
+             : "EXTERNAL ONLY | no endpoint selected (fail-closed)";
+    return midiOutputOptionIndex.load(std::memory_order_relaxed) > 0
+         ? "MIRROR | Host + " + midiOutputStatus
+         : "MIRROR | Host only until an external endpoint is selected";
 }
 
 int AudienceProcessor::getResolvedMidiOutputOptionIndex()
@@ -1567,20 +1960,41 @@ void AudienceProcessor::setUdpPort (int port)
 {
     const int safePort = juce::jlimit(1, 65535, port);
     const int previousPort = getUdpPort();
-    if (safePort == previousPort && osc.isReceiving())
+    const bool exclusive = rawParamBool(rawParams.exclusiveUdpPort, true);
+    const auto portPolicy = exclusive ? OscBridge::PortPolicy::exclusive
+                                      : OscBridge::PortPolicy::shared;
+    const int expectedZoneChoice = juce::jlimit(
+        0, 26, rawParamInt(rawParams.expectedZone, 0));
+    const int expectedZone = expectedZoneChoice - 1;
+    const bool expectedZoneChanged = expectedZone != osc.getExpectedZone();
+    if (safePort == previousPort && osc.isReceiving()
+        && osc.isExclusive() == exclusive && ! expectedZoneChanged)
     {
         oscStatus = osc.oscStatus();
+        lastExclusiveUdpPort = exclusive;
+        lastExpectedZoneChoice = expectedZoneChoice;
+        lastOscRetryMs = juce::Time::getMillisecondCounter();
         return;
     }
 
-    const bool reopenVirtualPort = midiOutputOptionIndex.load(std::memory_order_relaxed) == 1;
-    const bool needsReset = osc.isRunning() || safePort != previousPort;
+    // The virtual endpoint identity is derived only from the UDP port. A
+    // same-port zone/policy change or a 1 Hz ownership retry must not tear down
+    // the endpoint and disconnect Ableton from its stable source.
+    const bool reopenVirtualPort = safePort != previousPort
+                                && midiOutputOptionIndex.load(
+                                       std::memory_order_relaxed) == 1;
+    const bool needsReset = osc.isReceiving() || safePort != previousPort
+                         || expectedZoneChanged;
     osc.stop();
     if (needsReset)
         panic();
     udpPort.store(safePort, std::memory_order_relaxed);
-    osc.start(safePort);
+    osc.setExpectedZone(expectedZone);
+    osc.start(safePort, portPolicy);
     oscStatus = osc.oscStatus();
+    lastExclusiveUdpPort = exclusive;
+    lastExpectedZoneChoice = expectedZoneChoice;
+    lastOscRetryMs = juce::Time::getMillisecondCounter();
 
     if (reopenVirtualPort)
         setMidiOutputOptionIndex(1);
@@ -1594,16 +2008,29 @@ void AudienceProcessor::panic()
     releaseAllIncomingMidiNotes();
     audienceModel.clear();
     crowdTimeField.reset();
+    resetCrowdExpressionMacros();
     adaptiveCrowdGovernor.reset();
+    pressureSafetyGovernor.reset();
+    safetyOutput = pressureSafetyGovernor.getOutput();
     governorLastUpdateSeconds = 0.0;
     governorControlClockInitialised = false;
     governorLastVoiceLimit = 16;
+    safetyLastUpdateSeconds = 0.0;
+    safetyLastOscMessages = osc.getValidMessageCount();
+    safetyLastDroppedMotion = fingerRouter.getDroppedEventCount();
+    safetyClockInitialised = false;
     governorRecentSourceCount.store(0, std::memory_order_release);
     governorObservedDensity.store(0, std::memory_order_relaxed);
     governorEffectiveAttacks.store(4, std::memory_order_relaxed);
     governorEffectiveActive.store(8, std::memory_order_relaxed);
     governorEffectiveSpread.store(1, std::memory_order_relaxed);
     governorBand.store(0, std::memory_order_relaxed);
+    safetyGovernorState.store(0, std::memory_order_relaxed);
+    safetyGovernorReasons.store(0, std::memory_order_relaxed);
+    safetyIngressRate.store(0.0, std::memory_order_relaxed);
+    safetyExternalFifoPressure.store(0.0, std::memory_order_relaxed);
+    externalFifoOldestAgeSeconds.store(0.0, std::memory_order_relaxed);
+    lastProcessDeadlineRatio.store(0.0, std::memory_order_relaxed);
     timeFieldRehydratePending = true;
     // Drop packets produced before the panic while the audio producer is
     // quiescent. Otherwise an old NoteOn could be drained after the immediate

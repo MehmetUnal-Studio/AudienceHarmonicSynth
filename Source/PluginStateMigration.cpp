@@ -209,6 +209,43 @@ void migrate (juce::ValueTree& state)
         writeNumericValue(governorEnabled, 0.0f);
     }
 
+    // Schema 8 makes every venue-critical route explicit. Existing sessions
+    // used the host and selected external endpoint simultaneously, so they
+    // migrate to Mirror. New/partial schema-8 states default to Host Only and
+    // must opt into an external route deliberately. Zone filtering, exclusive
+    // port ownership, the pressure governor, conductor and macro output are
+    // conservative opt-ins for older sessions.
+    if (! containsParameter(state, "midiOutputPath"))
+        appendParameterValue(state, "midiOutputPath", schema <= 7 ? 2.0f : 0.0f);
+    if (! containsParameter(state, "expectedZone"))
+        appendParameterValue(state, "expectedZone", 0.0f);        // Any
+    if (! containsParameter(state, "exclusiveUdpPort"))
+        appendParameterValue(state, "exclusiveUdpPort", schema <= 7 ? 0.0f : 1.0f);
+    if (! containsParameter(state, "safetyGovernorEnabled"))
+        appendParameterValue(state, "safetyGovernorEnabled", schema <= 7 ? 0.0f : 1.0f);
+    if (! containsParameter(state, "conductorRole"))
+        appendParameterValue(state, "conductorRole", 0.0f);       // Off
+    if (! containsParameter(state, "conductorGroup"))
+        appendParameterValue(state, "conductorGroup", 0.0f);      // Group 1
+    if (! containsParameter(state, "conductorAttackBudget"))
+        appendParameterValue(state, "conductorAttackBudget", 16.0f);
+    if (! containsParameter(state, "conductorVoiceBudget"))
+        appendParameterValue(state, "conductorVoiceBudget", 64.0f);
+    if (! containsParameter(state, "crowdMacrosEnabled"))
+        appendParameterValue(state, "crowdMacrosEnabled", 0.0f);
+    if (! containsParameter(state, "crowdMacroChannel"))
+        appendParameterValue(state, "crowdMacroChannel", 0.0f);   // Ch 1
+    if (! containsParameter(state, "crowdMacroDensityCc"))
+        appendParameterValue(state, "crowdMacroDensityCc", 20.0f);
+    if (! containsParameter(state, "crowdMacroCentroidXCc"))
+        appendParameterValue(state, "crowdMacroCentroidXCc", 21.0f);
+    if (! containsParameter(state, "crowdMacroCentroidYCc"))
+        appendParameterValue(state, "crowdMacroCentroidYCc", 22.0f);
+    if (! containsParameter(state, "crowdMacroMotionCc"))
+        appendParameterValue(state, "crowdMacroMotionCc", 23.0f);
+    if (! containsParameter(state, "crowdMacroRate"))
+        appendParameterValue(state, "crowdMacroRate", 1.0f);      // 10 Hz
+
     // State blobs are untrusted input. Clamp every choice touched by this
     // migration before APVTS publishes it to parameter atomics.
     const auto sanitizeChoice = [&state] (const char* id, int maximum, int fallback)
@@ -228,6 +265,15 @@ void migrate (juce::ValueTree& state)
     sanitizeChoice("gridDivision", 3, 2);
     sanitizeChoice("temporalSpread", 4, 2);
     sanitizeChoice("crowdGovernorEnabled", 1, schema <= 6 ? 0 : 1);
+    sanitizeChoice("midiOutputPath", 2, schema <= 7 ? 2 : 0);
+    sanitizeChoice("expectedZone", 26, 0);
+    sanitizeChoice("exclusiveUdpPort", 1, schema <= 7 ? 0 : 1);
+    sanitizeChoice("safetyGovernorEnabled", 1, schema <= 7 ? 0 : 1);
+    sanitizeChoice("conductorRole", 2, 0);
+    sanitizeChoice("conductorGroup", 3, 0);
+    sanitizeChoice("crowdMacrosEnabled", 1, 0);
+    sanitizeChoice("crowdMacroChannel", 16, 0);
+    sanitizeChoice("crowdMacroRate", 3, 1);
 
     const auto sanitizeNumeric = [&state] (const char* id,
                                            float minimum, float maximum,
@@ -246,6 +292,12 @@ void migrate (juce::ValueTree& state)
     sanitizeNumeric("maxAttacksPerStep", 1.0f, 16.0f, 4.0f, true);
     sanitizeNumeric("maxActiveVoices", 1.0f, 16.0f, 16.0f, true);
     sanitizeNumeric("gatePercent", 5.0f, 100.0f, 70.0f, false);
+    sanitizeNumeric("conductorAttackBudget", 1.0f, 64.0f, 16.0f, true);
+    sanitizeNumeric("conductorVoiceBudget", 1.0f, 128.0f, 64.0f, true);
+    sanitizeNumeric("crowdMacroDensityCc", 0.0f, 127.0f, 20.0f, true);
+    sanitizeNumeric("crowdMacroCentroidXCc", 0.0f, 127.0f, 21.0f, true);
+    sanitizeNumeric("crowdMacroCentroidYCc", 0.0f, 127.0f, 22.0f, true);
+    sanitizeNumeric("crowdMacroMotionCc", 0.0f, 127.0f, 23.0f, true);
     // Schema 6 retires the short-lived schema-5 gate experiment completely.
     // Remove only those exact obsolete IDs; every established parameter and
     // root routing property remains untouched.

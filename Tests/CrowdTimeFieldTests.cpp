@@ -1000,6 +1000,38 @@ int main()
                "block-1 empty/16-active hot path avoids full-ledger callback scans");
     }
 
+    // Safety admission is a soft policy: releases and cancellation always
+    // progress while closed, held intent waits without reset, and reopening
+    // emits through the ordinary bounded scheduler rather than a panic burst.
+    {
+        CrowdTimeField field;
+        auto config = configFor(CrowdTimeField::Mode::Flow);
+        config.attackAdmissionOpen = false;
+        auto frame = hostFrame(48000.0, 64);
+        auto on = input(CrowdTimeField::InputEvent::Type::On, 3, 0, 0);
+        CrowdTimeField::OutputBlock output;
+        field.process(config, frame, &on, 1, output);
+        const bool heldPending = ! output.resetRequested && output.count == 0
+                              && output.pendingCount == 1 && output.activeCount == 0;
+
+        frame = nextFrame(frame, 64);
+        auto off = input(CrowdTimeField::InputEvent::Type::Off, 3, 0, 0);
+        field.process(config, frame, &off, 1, output);
+        const bool cancelled = output.count == 0 && output.pendingCount == 0
+                            && output.activeCount == 0;
+
+        frame = nextFrame(frame, 64);
+        field.process(config, frame, &on, 1, output);
+        frame = nextFrame(frame, 64);
+        config.attackAdmissionOpen = true;
+        field.process(config, frame, nullptr, 0, output);
+        expect(heldPending && cancelled && ! output.resetRequested
+                   && firstOffset(output, CrowdTimeField::OutputEvent::Type::Attack,
+                                  3) == 0
+                   && output.activeCount == 1,
+               "soft safety admission retains/cancels intent and reopens without reset");
+    }
+
     // Process is mechanically watched for operator-new traffic as a regression
     // check in addition to the fixed-array API and noexcept contract.
     {
@@ -1014,6 +1046,102 @@ int main()
         watchAllocations = false;
         expect(watchedAllocations == 0,
                "process performs no heap allocations");
+    }
+
+    // Flow remains direct in Normal operation, but Safety Governor ceilings
+    // must bound overload recovery without delaying or dropping releases.
+    {
+        CrowdTimeField field;
+        auto config = configFor(CrowdTimeField::Mode::Flow);
+        config.flowMaxAttacksPerBlock = 2;
+        config.flowMaxActive = 4;
+        auto frame = hostFrame(48000.0, 64);
+        std::array<CrowdTimeField::InputEvent, 20> events {};
+        for (int source = 0; source < 20; ++source)
+            events[static_cast<std::size_t>(source)]
+                = input(CrowdTimeField::InputEvent::Type::On, source, 0, 0);
+
+        CrowdTimeField::OutputBlock output;
+        field.process(config, frame, events.data(), static_cast<int>(events.size()), output);
+        const bool firstBounded = ! output.resetRequested && output.count == 2
+                               && output.activeCount == 2 && output.pendingCount == 18;
+
+        frame = nextFrame(frame, 64);
+        field.process(config, frame, nullptr, 0, output);
+        const bool reachedCap = output.count == 2 && output.activeCount == 4
+                             && output.pendingCount == 16;
+
+        frame = nextFrame(frame, 64);
+        field.process(config, frame, nullptr, 0, output);
+        const bool heldAtCap = output.count == 0 && output.activeCount == 4
+                            && output.pendingCount == 16;
+
+        frame = nextFrame(frame, 64);
+        const auto off = input(CrowdTimeField::InputEvent::Type::Off, 0, 0, 0);
+        field.process(config, frame, &off, 1, output);
+        const bool releaseFirst = firstOffset(
+            output, CrowdTimeField::OutputEvent::Type::Release, 0) == 0;
+        expect(firstBounded && reachedCap && heldAtCap && releaseFirst
+                   && output.activeCount == 4 && output.pendingCount == 15,
+               "Flow safety ceilings bound attacks/voices while releases progress");
+    }
+
+    // Flow is clockless even though it shares the scheduler ledger. Transport
+    // start/stop/seek and hidden timing automation must not cut or retrigger a
+    // directly owned note.
+    {
+        CrowdTimeField field;
+        auto config = configFor(CrowdTimeField::Mode::Flow);
+        auto frame = hostFrame(48000.0, 64);
+        const auto on = input(CrowdTimeField::InputEvent::Type::On, 7, 0, 0);
+        CrowdTimeField::OutputBlock output;
+        field.process(config, frame, &on, 1, output);
+        const bool started = ! output.resetRequested && output.activeCount == 1
+                          && firstOffset(output,
+                               CrowdTimeField::OutputEvent::Type::Attack, 7) == 0;
+
+        config.clockSource = CrowdTimeField::ClockSource::Internal;
+        config.division = CrowdTimeField::Division::Quarter;
+        config.internalBpm = 40.0;
+        config.gatePercent = 5.0;
+        config.laneSeed = 0xf00du;
+        frame.hostValid = false;
+        frame.isPlaying = false;
+        frame.ppqPosition = 999999.0;
+        frame.monotonicSeconds = 1000000.0;
+        frame.sampleRate = 96000.0;
+        field.process(config, frame, nullptr, 0, output);
+        const bool ignoredTimingDomain = ! output.resetRequested
+                                      && output.count == 0
+                                      && output.activeCount == 1;
+
+        config.clockSource = CrowdTimeField::ClockSource::Host;
+        frame.hostValid = true;
+        frame.isPlaying = false;
+        frame.monotonicSeconds += 500.0;
+        field.process(config, frame, nullptr, 0, output);
+        const bool ignoredStoppedFallback = ! output.resetRequested
+                                         && output.count == 0
+                                         && output.activeCount == 1;
+
+        frame.isPlaying = true;
+        frame.bpm = 240.0;
+        frame.ppqPosition = -128.0;
+        frame.sampleRate = 44100.0;
+        field.process(config, frame, nullptr, 0, output);
+        const bool ignoredPlayingSeek = ! output.resetRequested
+                                     && output.count == 0
+                                     && output.activeCount == 1;
+
+        frame.ppqPosition = 123456.0;
+        const auto off = input(CrowdTimeField::InputEvent::Type::Off, 7, 0, 0);
+        field.process(config, frame, &off, 1, output);
+        expect(started && ignoredTimingDomain && ignoredStoppedFallback
+                   && ignoredPlayingSeek && ! output.resetRequested
+                   && output.activeCount == 0
+                   && firstOffset(output,
+                        CrowdTimeField::OutputEvent::Type::Release, 7) == 0,
+               "Flow ignores transport/timing domains and preserves its owned release");
     }
 
     // A Flow burst larger than the mandatory output contract explicitly asks

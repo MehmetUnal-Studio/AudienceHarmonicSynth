@@ -51,6 +51,23 @@ public:
         return coalescedMotionEvents.load(std::memory_order_relaxed);
     }
 
+    int getLifecycleQueueDepth() const noexcept { return lifecycleFifo.getNumReady(); }
+    int getMotionQueueDepth() const noexcept { return motionFifo.getNumReady(); }
+    uint32_t getLifecycleHighWater() const noexcept
+    {
+        return lifecycleHighWater.load(std::memory_order_relaxed);
+    }
+    uint32_t getMotionHighWater() const noexcept
+    {
+        return motionHighWater.load(std::memory_order_relaxed);
+    }
+
+    void setMotionUpdateDivisor (int divisor) noexcept
+    {
+        motionUpdateDivisor.store(juce::jlimit(1, 8, divisor),
+                                  std::memory_order_relaxed);
+    }
+
 private:
     struct QueuedEvent
     {
@@ -77,6 +94,8 @@ private:
     static uint32_t nextEpoch (uint32_t current) noexcept;
     static void incrementSaturating (std::atomic<uint32_t>& counter,
                                      uint32_t amount = 1) noexcept;
+    static void updateHighWater (std::atomic<uint32_t>& highWater,
+                                 int depth) noexcept;
 
     void pushMotion (Event::Type type, int sourceId, int finger, float value) noexcept;
     void pushLifecycle (int sourceId, int finger, bool on) noexcept;
@@ -105,4 +124,8 @@ private:
     std::atomic<bool> resetPending { false };
     std::atomic<uint32_t> droppedEvents { 0 };
     std::atomic<uint32_t> coalescedMotionEvents { 0 };
+    std::atomic<uint32_t> lifecycleHighWater { 0 };
+    std::atomic<uint32_t> motionHighWater { 0 };
+    std::atomic<int> motionUpdateDivisor { 1 };
+    std::atomic<uint32_t> motionIngressCounter { 0 };
 };

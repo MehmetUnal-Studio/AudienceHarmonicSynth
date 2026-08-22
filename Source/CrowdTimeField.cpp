@@ -237,6 +237,10 @@ CrowdTimeField::Config CrowdTimeField::sanitiseConfig (const Config& input) noex
                                   finiteOr(input.internalBpm, 120.0)));
     result.maxAttacksPerStep = std::max(1, std::min(16, input.maxAttacksPerStep));
     result.maxActive = std::max(1, std::min(16, input.maxActive));
+    result.flowMaxAttacksPerBlock = std::max(
+        0, std::min(kMaxVoices, input.flowMaxAttacksPerBlock));
+    result.flowMaxActive = std::max(
+        0, std::min(kMaxVoices, input.flowMaxActive));
     result.gatePercent = std::max(5.0, std::min(100.0,
                                 finiteOr(input.gatePercent, 70.0)));
 
@@ -400,6 +404,13 @@ bool CrowdTimeField::domainChanged (const Config& config,
     if (! domainInitialised_)
         return false;
 
+    // Flow is deliberately clockless. Host start/stop/seek, callback gaps and
+    // automation of hidden timing controls must not reset or retrigger its
+    // source-owned notes. Mode transitions still fall through and form an
+    // explicit reset boundary.
+    if (config_.mode == Mode::Flow && config.mode == Mode::Flow)
+        return false;
+
     if (! domainConfigsEqual(config_, config)
         || clock.hostPrimary != lastHostPrimary_
         || clock.running != lastRunning_
@@ -451,6 +462,9 @@ void CrowdTimeField::applySoftPolicy (const Config& config,
     config_.maxAttacksPerStep = config.maxAttacksPerStep;
     config_.maxActive = config.maxActive;
     config_.spreadSlots = config.spreadSlots;
+    config_.attackAdmissionOpen = config.attackAdmissionOpen;
+    config_.flowMaxAttacksPerBlock = config.flowMaxAttacksPerBlock;
+    config_.flowMaxActive = config.flowMaxActive;
 }
 
 int CrowdTimeField::rehydrate (const HeldVoice* held, int count) noexcept
@@ -495,7 +509,8 @@ int CrowdTimeField::rehydrate (const HeldVoice* held, int count) noexcept
     return accepted;
 }
 
-void CrowdTimeField::processFlow (const ResolvedClock& clock,
+void CrowdTimeField::processFlow (const Config& config,
+                                  const ResolvedClock& clock,
                                   const InputEvent* inputs, int inputCount,
                                   EventCollector& collector) noexcept
 {
@@ -518,12 +533,20 @@ void CrowdTimeField::processFlow (const ResolvedClock& clock,
                 continue;
 
             voice.held = true;
-            if (! voice.sounding && ! voice.pending)
+            if (! voice.sounding && ! voice.pending
+                && config.attackAdmissionOpen
+                && collector.attackCount < config.flowMaxAttacksPerBlock
+                && activeCount_ < config.flowMaxActive)
             {
                 voice.sounding = true;
                 ++activeCount_;
                 collector.push(OutputEvent::Type::Attack, event.voiceId,
                                event.sourceId, offset);
+            }
+            else if (! voice.sounding && ! voice.pending)
+            {
+                setPending(event.voiceId, 0.0,
+                           std::numeric_limits<double>::infinity());
             }
             continue;
         }
@@ -539,7 +562,14 @@ void CrowdTimeField::processFlow (const ResolvedClock& clock,
 
     // Rehydration is intentionally bounded and comes after fresh lifecycle
     // input, so an Off at this block's start can cancel a stale retrigger.
-    int room = kMaxOutputEvents - collector.releaseCount - collector.attackCount;
+    if (! config.attackAdmissionOpen)
+        return;
+
+    int room = std::min({
+        kMaxOutputEvents - collector.releaseCount - collector.attackCount,
+        config.flowMaxAttacksPerBlock - collector.attackCount,
+        config.flowMaxActive - activeCount_
+    });
     if (room <= 0 || pendingCount_ <= 0)
         return;
 
@@ -795,8 +825,10 @@ void CrowdTimeField::processGridTick (const Config& config,
                                       double tickBeat, int offset,
                                       EventCollector& collector) noexcept
 {
-    const int attackLimit = std::min(config.maxAttacksPerStep,
-                                     std::max(0, config.maxActive - activeCount_));
+    const int attackLimit = config.attackAdmissionOpen
+                          ? std::min(config.maxAttacksPerStep,
+                                     std::max(0, config.maxActive - activeCount_))
+                          : 0;
     const int activeLane = positiveModulo(stepIndex, config.spreadSlots);
     int selected = 0;
     int cursor = fairCursor_;
@@ -1075,7 +1107,7 @@ void CrowdTimeField::process (const Config& requestedConfig,
 
     EventCollector collector;
     if (config.mode == Mode::Flow)
-        processFlow(clock, inputs, inputCount, collector);
+        processFlow(config, clock, inputs, inputCount, collector);
     else
         processTimed(config, clock, inputs, inputCount, collector);
 

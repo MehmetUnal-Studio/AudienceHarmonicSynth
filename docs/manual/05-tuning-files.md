@@ -1,6 +1,6 @@
 # 05 - Pitch Systems and External Tuning
 
-Cosmic Microwave 2.4.0 maps normalized horizontal position through one of two pitch
+Cosmic Microwave 2.5.0 maps normalized horizontal position through one of two pitch
 systems. **Tonal** provides seven conventional 12-TET scale tables. **Atomic** projects
 stored element emission spectra into playable one-octave degree banks. Both systems
 share **ROOT**, **OCTAVE**, and **RANGE**.
@@ -150,7 +150,7 @@ not discard Cosmic Microwave's pitch wheel.
 
 ## Session migration
 
-Cosmic Microwave 2.4.0 uses state schema 7. Pitch migration remains compatible with the
+Cosmic Microwave 2.5.0 uses state schema 8. Pitch migration remains compatible with the
 earlier schema-3 Pitch System transition:
 
 - new sessions start at Atomic / Helium / Extended;
@@ -161,12 +161,15 @@ earlier schema-3 Pitch System transition:
   `atomicScaleMode` choice where possible; and
 - invalid or non-finite stored choice values are clamped to safe defaults.
 
-Schema 4 added the Time Field. New 2.4.0 sessions start in Ensemble with Adaptive Crowd
+Schema 4 added the Time Field. New 2.5.0 sessions start in Ensemble with Adaptive Crowd
 Governor enabled; any state that lacks the schema-4 timing parameters receives Flow so
 an older session's attacks stay direct. Schema-5 input remains compatible and its
 retired experimental fields are discarded. Every schema-6-or-earlier state receives
 Manual Governor mode while retaining its saved Time Field values; new state is stamped
-as schema 7.
+as schema 8. Schema 8 also adds routing safety, the pressure-aware Safety Governor,
+Global Conductor, and Crowd Expression parameters. Schema-7-and-earlier sessions keep
+their historical Mirror/shared-port behaviour with Safety Governor disabled; these
+compatibility defaults do not change any saved pitch selection.
 
 This migration restores pitch intent only. Removed sample, granular, timbre, and
-internal sound-generation controls do not return in the 2.4.0 flagship.
+internal sound-generation controls do not return in the 2.5.0 flagship.
