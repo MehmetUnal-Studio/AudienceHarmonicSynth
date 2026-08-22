@@ -7,10 +7,18 @@
 #include <cmath>
 #include <chrono>
 #include <iostream>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
+
+// PartialEngine owns several large fixed real-time arrays. Keep test instances
+// on the heap so this long Debug test does not reserve every scoped instance in
+// one main-thread stack frame.
+#define HEAP_PARTIAL_ENGINE(name)                         \
+    auto name##Storage = std::make_unique<PartialEngine>(); \
+    auto& name = *name##Storage
 
 #ifndef AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH
 #define AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH ""
@@ -407,7 +415,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads Piano Dream");
         engine.scaleRootMidi.store(36);
@@ -422,7 +430,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for spectral scale tables");
         engine.scaleRootMidi.store(72);
@@ -545,7 +553,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for silence test");
         const auto stats = renderSeconds(engine, 0.5);
@@ -557,7 +565,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for trigger test");
         const auto stats = triggerSeatAndRender(engine, 0.0f, 1.0f, 0.6);
@@ -577,7 +585,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.samplePlaybackMode.store(1);
         engine.grainDensity.store(0.8f);
@@ -592,7 +600,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.spectralElement.store(1);
@@ -620,7 +628,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.spectralElement.store(2);
@@ -642,7 +650,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.spectralElement.store(3);
@@ -702,7 +710,7 @@ int main()
 
         for (const auto& e : expectations)
         {
-            PartialEngine engine;
+            HEAP_PARTIAL_ENGINE(engine);
             configureDryTestEngine(engine);
             engine.engineSource.store(1);
             engine.spectralElement.store(e.index);
@@ -726,7 +734,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.spectralElement.store(1);
@@ -748,7 +756,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for scale keyboard test");
         engine.setKeyboardStep(0, 2, 1.0f, true);
@@ -772,7 +780,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for realtime MIDI keyboard polyphony test");
         engine.scaleRootMidi.store(36);
@@ -790,7 +798,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for direct MIDI keyboard polyphony test");
 
@@ -815,7 +823,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for MIDI keyboard spectral fallback test");
         engine.scaleRootMidi.store(48);
@@ -829,7 +837,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.scaleRootMidi.store(12);
         engine.scaleMode.store(9); // Lithium Spectrum
@@ -855,7 +863,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.scaleRootMidi.store(12);
@@ -874,7 +882,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for X movement replacement test");
         engine.releaseMs.store(6000.0f);
@@ -896,7 +904,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for polyphony limit test");
 
@@ -912,7 +920,7 @@ int main()
     }
 
     {
-        PartialEngine normalCrowd;
+        HEAP_PARTIAL_ENGINE(normalCrowd);
         configureDryTestEngine(normalCrowd);
         normalCrowd.polyphonyMode.store(0);
         r.expect(loadPianoDream(normalCrowd), "engine loads samples for adaptive normal crowd test");
@@ -930,7 +938,7 @@ int main()
     }
 
     {
-        PartialEngine highCrowd;
+        HEAP_PARTIAL_ENGINE(highCrowd);
         configureDryTestEngine(highCrowd);
         highCrowd.polyphonyMode.store(1);
         r.expect(loadPianoDream(highCrowd), "engine loads samples for adaptive high crowd test");
@@ -948,13 +956,13 @@ int main()
     }
 
     {
-        PartialEngine low;
+        HEAP_PARTIAL_ENGINE(low);
         configureDryTestEngine(low);
         r.expect(loadPianoDream(low), "engine loads samples for low Y test");
         triggerSeatAndRender(low, 0.45f, 0.15f, 0.8);
         const float lowAmp = maxVoiceAmp(low);
 
-        PartialEngine high;
+        HEAP_PARTIAL_ENGINE(high);
         configureDryTestEngine(high);
         r.expect(loadPianoDream(high), "engine loads samples for high Y test");
         triggerSeatAndRender(high, 0.45f, 1.0f, 0.8);
@@ -966,13 +974,13 @@ int main()
     }
 
     {
-        PartialEngine lowPitch;
+        HEAP_PARTIAL_ENGINE(lowPitch);
         configureDryTestEngine(lowPitch);
         r.expect(loadPianoDream(lowPitch), "engine loads samples for low pitch test");
         lowPitch.scaleOctaves.store(1);
         triggerSeatAndRender(lowPitch, 0.0f, 1.0f, 0.35);
 
-        PartialEngine highPitch;
+        HEAP_PARTIAL_ENGINE(highPitch);
         configureDryTestEngine(highPitch);
         r.expect(loadPianoDream(highPitch), "engine loads samples for high pitch test");
         highPitch.scaleOctaves.store(1);
@@ -983,7 +991,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for off/release test");
         triggerSeatAndRender(engine, 0.25f, 1.0f, 0.4);
@@ -998,7 +1006,7 @@ int main()
     }
 
     {
-        PartialEngine dryRelease;
+        HEAP_PARTIAL_ENGINE(dryRelease);
         configureDryTestEngine(dryRelease);
         dryRelease.samplePlaybackMode.store(1);
         r.expect(loadPianoDream(dryRelease), "engine loads samples for freeze off test");
@@ -1008,7 +1016,7 @@ int main()
         const int dryVoices = dryRelease.getActiveVoiceCount();
         const float dryMaxAmp = maxVoiceAmp(dryRelease);
 
-        PartialEngine frozen;
+        HEAP_PARTIAL_ENGINE(frozen);
         configureDryTestEngine(frozen);
         frozen.samplePlaybackMode.store(1);
         frozen.freeze.store(1);
@@ -1027,13 +1035,13 @@ int main()
     }
 
     {
-        PartialEngine mutedByMaster;
+        HEAP_PARTIAL_ENGINE(mutedByMaster);
         configureDryTestEngine(mutedByMaster);
         mutedByMaster.masterGain.store(0.0f);
         r.expect(loadPianoDream(mutedByMaster), "engine loads samples for master mute test");
         const auto mutedStats = triggerSeatAndRender(mutedByMaster, 0.5f, 1.0f, 0.7);
 
-        PartialEngine loud;
+        HEAP_PARTIAL_ENGINE(loud);
         configureDryTestEngine(loud);
         loud.masterGain.store(1.0f);
         r.expect(loadPianoDream(loud), "engine loads samples for loud master test");
@@ -1046,7 +1054,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.masterGain.store(3.0f);
         engine.energyMacro.store(1.0f);
@@ -1076,7 +1084,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.freeze.store(1);
         engine.reverbAmount.store(1.0f);
@@ -1094,7 +1102,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.freeze.store(1);
         engine.reverbAmount.store(1.0f);
@@ -1112,7 +1120,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for aurora band test");
         triggerSeatAndRender(engine, 0.5f, 1.0f, 0.5);

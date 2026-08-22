@@ -1,117 +1,164 @@
-# 05 — Tuning Files (Atomic CORE WhiteKeys)
+# 05 - Pitch Systems and External Tuning
 
-The translation at the heart of SpektraSynth — atomic spectra translated into playable
-musical scales — does not have to stay inside the plugin. The companion
-**“Atomic CORE WhiteKeys”** tuning library exports the same translated scales as
-AnaMark **`.tun`** files, so other instruments can play the elemental tunings too. The
-set targets **Spectrum's Omnisphere** out of the box, and the format is readable by
-many other `.tun`-aware synths.
+Cosmic Microwave 2.1 maps normalized horizontal position through one of two pitch
+systems. **Tonal** provides seven conventional 12-TET scale tables. **Atomic** projects
+stored element emission spectra into playable one-octave degree banks. Both systems
+share **ROOT**, **OCTAVE**, and **RANGE**.
 
-It is the same pipeline, a different output: instead of an oscillator bank, each
-element becomes a keyboard *tuning*.
+The plugin does not load or export `.tun`, `.scl`, or `.kbm` files. Receiver-side
+tuning can still be applied after Cosmic Microwave's MIDI output.
 
-## What's in the library
+## Choosing a pitch system
 
-- **29 tuning files**, one per element from **Hydrogen to Zinc** — `Hydrogen_CORE_WhiteKeys.tun`,
-  `Helium_CORE_WhiteKeys.tun`, … `Zinc_CORE_WhiteKeys.tun`.
-  (**Nitrogen is omitted**, matching the plugin: no local `N.txt` spectral dataset is
-  available yet.)
-- A manifest, `Atomic_CORE_WhiteKeys_manifest.txt`, summarizing every element's degree
-  count, raw line count, reference wavelength, and white-key mapping in cents.
+The selector in the **PITCH MAPPING** card switches between:
 
-## The concept: an element as a 12-key tuning
+- **Tonal** - choose a familiar scale under **SCALE**.
+- **Atomic** - choose an **ELEMENT** and a **DENSITY**.
 
-Each element's clustered spectrum is laid onto the ordinary 12-key octave so it is
-*immediately* playable on a normal keyboard:
+New sessions default to **Atomic / Helium / Extended**. Existing Cosmic Microwave 2.0
+schema-2 sessions migrate to Tonal so their established pitch mapping does not change
+when opened in 2.1.
 
-- **Degrees 1–7 go to the white keys C D E F G A B**, in ascending cents order, with
-  degree 1 (the spectral root) on **C at 0 cents**.
-- **Degree 8 and above** (for elements whose CORE scale has more than 7 degrees) go to
-  the **nearest free black key**.
-- **Unassigned keys duplicate the nearest assigned atomic degree** — so every key
-  always sounds an actual translated spectral pitch; there are no dead or arbitrary
-  keys. The 12-key pattern repeats identically in every octave (+1200 cents per
-  octave).
+## The seven Tonal maps
 
-Practical consequence: play only white keys and you are playing the element's CORE
-scale in order; black keys are safe doublings (or extra degrees, where they exist).
+Tonal degrees are semitone offsets from the selected root:
 
-## The CORE recipe
+| Scale | Semitone offsets | Steps per octave |
+|---|---|---:|
+| Major | `0, 2, 4, 5, 7, 9, 11` | 7 |
+| Natural Minor | `0, 2, 3, 5, 7, 8, 10` | 7 |
+| Pentatonic | `0, 2, 4, 7, 9` | 5 |
+| Dorian | `0, 2, 3, 5, 7, 9, 10` | 7 |
+| Lydian | `0, 2, 4, 6, 7, 9, 11` | 7 |
+| Harmonic Minor | `0, 2, 3, 5, 7, 8, 11` | 7 |
+| Whole Tone | `0, 2, 4, 6, 8, 10` | 6 |
 
-The scale reduction used for these files is the same **Core** mode you see in the
-plugin's **ATOM SCALE** control:
+These entries are exact 12-TET MIDI notes. In MPE, their pitch wheel is normally
+centered.
 
-- **Maximum 7 degrees** per element.
-- **Minimum 80 cents separation** between degrees.
-- **Medoid clustering** — each degree is represented by a *real* emission line from
-  inside its cluster (the one with the smallest weighted circular distance to its
-  neighbours), never an invented average pitch.
-- **The root is always included**: the element's reference emission line,
-  **λ_ref** — its longest positive-intensity catalogue wavelength — is fixed at
-  **0 cents** on C.
+## Atomic elements
 
-Every other line's pitch comes from the standard translation:
+Atomic mode contains 29 catalog entries spanning Hydrogen (`H`) through Zinc (`Zn`):
 
-```
-cents_i = 1200 · log2(λ_ref / λ_i)   (folded into one octave, 0–1200)
+```text
+H  He Li Be B  C  O  F  Ne Na Mg Al Si P  S
+Cl Ar K  Ca Sc Ti V  Cr Mn Fe Co Ni Cu Zn
 ```
 
-## Reading the values: cents from the root
+Nitrogen is not present because the current source dataset does not contain its
+matching spectral catalog. Element names in the menu are the authoritative available
+set.
 
-All tuning values are **cents above the root key** (C = 0). Example — **Boron**,
-whose reference line is **λ_ref = 678.612 nm** (74 raw positive lines in the
-catalogue):
+For each element, valid positive emission wavelengths are converted into wavelength
+ratios against that element's longest usable line, then folded into one octave as
+cents. Intensity-guided selection keeps the most useful separated representatives.
+The musical Root anchors this interval bank; Cosmic Microwave does not treat optical
+wavelength in nanometres as an audible frequency.
 
-| Key | Cents | Representative line |
-|---|---:|---|
-| C | 0.0 | 678.612 nm (root) |
-| D | 177.4 | 612.502 nm |
-| E | 322.3 | 563.327 nm |
-| F | 472.3 | 516.596 nm |
-| G | 605.2 | 478.421 nm |
-| A | 721.7 | 447.285 nm |
-| B | 863.1 | 412.193 nm |
+The Pitch System tooltip reports the chosen element, its actual degree count, and the
+reference wavelength used to derive the ratios.
 
-Boron's CORE scale has exactly 7 degrees, so all black keys are duplicates of their
-nearest white-key degree (C♯ doubles D's 177 ct, D♯ doubles E's 322 ct, and so on).
-An element like Hydrogen, with only 5 CORE degrees, fills C–G and duplicates more
-keys; the manifest lists each element's exact mapping.
+## Atomic density modes
 
-Inside each `.tun` file you'll find the same data in AnaMark form — a commented header
-documenting the recipe and the per-key atomic-degree placement, then `[Tuning]` /
-`[Exact Tuning]` sections with `note 0` … `note 127` entries in (integer-rounded)
-cents relative to note 0.
+| Density | Maximum degrees per octave | Minimum separation used by the catalog |
+|---|---:|---:|
+| Core | 7 | 80 cents |
+| Extended | 12 | 40 cents |
+| Microtonal | 24 | 20 cents |
+| Scientific | 48 | 10 cents |
+| Raw 128 | 128 | no added separation |
 
-## Installing in Omnisphere
+These are caps, not promises that every element has that many usable lines. For
+example, Helium Extended exposes the actual count shown in the UI rather than padding
+the bank to 12 duplicate degrees. **Raw 128** is still bounded: it uses at most 128
+selected spectral representatives so the realtime MIDI table remains finite.
 
-1. Quit Omnisphere / your host.
-2. Copy the `.tun` files into Omnisphere's tuning-file folder inside its STEAM data
-   directory:
+## Root note, octave, and range
 
-   ```
-   …/STEAM/Omnisphere/Settings Library/Presets/Tuning File/
-   ```
+**ROOT** chooses a pitch class from C through B. **OCTAVE** uses standard MIDI note
+numbering:
 
-   A subfolder keeps things tidy, e.g. `…/Tuning File/Atomic/`.
-3. Reopen Omnisphere and choose the tuning from its tuning-file selector (SYSTEM
-   page). Pick e.g. **Boron_CORE_WhiteKeys** — the keyboard now plays Boron's
-   translated spectrum, root on C.
+```text
+root_midi = (octave + 1) * 12 + root_pitch_class
+```
 
-Tip: pair an Omnisphere patch tuned to an element with SpektraSynth playing the *same*
-element (same **ROOT**), and layer the translated timbre with the translated tuning.
+Examples:
 
-## Scala and the wider microtonal ecosystem
+| Root setting | MIDI note |
+|---|---:|
+| C0 | 12 |
+| C2 (default) | 36 |
+| A4 | 69 |
 
-The `.tun` set is one export of the translation. If your instrument speaks **Scala**
-(`.scl`, plus `.kbm` keyboard mappings) rather than AnaMark `.tun`, the same data
-converts directly — the manifest's cents-from-root values per element *are* the scale
-definition (7 degrees + the 1200 ct octave), and the white-key-first layout is a
-keyboard-mapping concern. Scala is the de-facto interchange format of the microtonal
-world, so treat the manifest as the authoritative, human-readable source for porting
-the atomic CORE scales to any tuning-capable environment.
+**RANGE** repeats the selected one-octave degree bank from one through six octaves.
+Tonal tables stop before exceeding MIDI note 127. Atomic tables also stop safely at
+the upper representable edge rather than pinning multiple microtonal targets to the
+same endpoint.
 
-And remember the framing that governs the whole project: these files do not make your
-synth sound "like an atom" — they let it play scales *translated from* each element's
-emission-line structure. That translation, consistently applied across the plugin, the
-MPE output, and these tuning files, is what makes the elements recognizable from one
-instrument to the next.
+## How U/X selects a pitch
+
+Incoming `u` values are clamped to `0..1`. The active pitch table is divided into
+equal-width regions:
+
+```text
+step = floor(clamp(u, 0, 1) * table_size)
+step = min(step, table_size - 1)
+```
+
+U=`0` selects the first step and U=`1` selects the last. Every finger stores its own
+current U/X position. Send U before `on` so the first note starts at the intended step.
+
+Movement inside one region updates CC74 but keeps the same pitch. Crossing a region
+selects a new pitch. Changing Pitch System, Root, Octave, Scale, Element, Density, or
+Range safely re-resolves held fingers in bounded batches.
+
+## Normal MIDI versus MPE pitch
+
+Tonal maps produce the same base note in both output models. Atomic maps expose an
+important difference:
+
+| Output | Atomic result |
+|---|---|
+| Normal MIDI | Send the nearest 12-TET MIDI note. No per-note pitch wheel is sent for OSC fingers. |
+| MPE MIDI | Keep the element-derived target frequency. Send the nearest MIDI base note plus a per-note pitch-wheel offset before Note On. |
+
+MPE pitch wheel has finite 14-bit resolution, so “exact” means the catalog's exact
+frequency is the target and is represented to MIDI pitch-wheel resolution. Match the
+receiver's bend range to Cosmic Microwave. The Atomic offset is measured from the
+nearest semitone, but an incorrect receiver range still produces the wrong pitch.
+
+With **Retrigger**, crossing to another pitch step releases the old note and starts the
+new one. **Glide** can move by pitch bend without retriggering only while the target
+can remain on the same nearest base note; changing the required base note retriggers.
+
+## Applying tuning in a receiving instrument
+
+A receiving instrument can reinterpret Cosmic Microwave's MIDI note numbers using its
+own tuning system. Keep these ownership boundaries in mind:
+
+- Cosmic Microwave selects the outgoing base note and owns matching Note Off messages.
+- In Atomic MPE, Cosmic Microwave also owns the element-derived pitch-wheel offset.
+- The receiver owns the final sounding result after applying its tuning map, transpose,
+  and pitch-bend configuration.
+- Adding receiver tuning on top of Atomic MPE compounds both tunings; do this only when
+  intentional.
+- CC74, CC11, velocity, pressure, source channels, and finger lifecycles are unaffected.
+
+For Normal MIDI, receiver-side microtuning is one way to reinterpret the nearest notes.
+For MPE, ensure the receiver applies tuning independently per member channel and does
+not discard Cosmic Microwave's pitch wheel.
+
+## Session migration
+
+Cosmic Microwave 2.1 uses a new state schema for the Pitch System selector:
+
+- new sessions start at Atomic / Helium / Extended;
+- existing schema-2 MIDI-only sessions receive an explicit Tonal selection;
+- released 1.x sessions whose old 36-choice Scale selected an element migrate to
+  Atomic and recover that corresponding element;
+- released 1.x element-engine sessions retain their stored `spectralElement` and
+  `atomicScaleMode` choice where possible; and
+- invalid or non-finite stored choice values are clamped to safe defaults.
+
+This migration restores pitch intent only. Removed sample, granular, timbre, and
+internal sound-generation controls do not return in the 2.1 flagship.

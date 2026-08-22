@@ -19,7 +19,8 @@
 class Simulator : private juce::Timer
 {
 public:
-    explicit Simulator (SeatEventSink& target);
+    explicit Simulator (SeatEventSink& target,
+                        int sourceCapacity = SeatEventSink::MAX_COLS);
     ~Simulator() override;
 
     void addRandomSeat();
@@ -43,6 +44,7 @@ private:
     };
 
     SeatEventSink&        target;
+    const int             maxSourceCount;
     std::vector<SimSeat>  simSeats;
     juce::Random          rng;
     bool                  randomMovement = false;

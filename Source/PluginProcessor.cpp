@@ -1,36 +1,41 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "PluginStateMigration.h"
+
 #include <cmath>
-#include <limits>
 
-// AUTHORITATIVE capacity guard. MpeMidiOutput.h/.cpp are kept free of
-// PartialEngine.h so the lightweight MPE test target stays decoupled, which
-// means MpeMidiOutput::kMaxMidiSources is a hand-maintained mirror of the real
-// PartialEngine seat + keyboard count. This static_assert (here, where both
-// PartialEngine.h and MpeMidiOutput.h are visible) breaks the build if those
-// two ever drift again.
-static_assert (MpeMidiOutput::kMaxMidiSources == PartialEngine::MAX_SEATS + PartialEngine::MAX_KEYBOARD_SLOTS,
-               "MpeMidiOutput seat capacity must match PartialEngine seat+keyboard count");
-
-#ifndef AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH
-#define AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH ""
-#endif
+static_assert (OscFingerRouter::MAX_SOURCES == SeatEventSink::MAX_OSC_SOURCES,
+               "OSC parser and MIDI audience capacities must match");
+static_assert (OscFingerRouter::MAX_VOICES == MpeMidiOutput::kMaxMidiSources,
+               "OSC finger and MIDI output voice capacities must match");
 
 namespace
 {
-    std::atomic<int> nextSynthInstanceId { 1 };
-
-    juce::File getBundledSamplesDirectory()
+    class ScopedProcessorSuspension final
     {
-        return juce::File::getSpecialLocation(juce::File::currentExecutableFile)
-            .getParentDirectory()
-            .getParentDirectory()
-            .getChildFile("Resources/Samples");
-    }
+    public:
+        explicit ScopedProcessorSuspension (juce::AudioProcessor& owner)
+            : processor(owner), didSuspend(! owner.isSuspended())
+        {
+            if (didSuspend)
+                processor.suspendProcessing(true);
+        }
+
+        ~ScopedProcessorSuspension()
+        {
+            if (didSuspend)
+                processor.suspendProcessing(false);
+        }
+
+    private:
+        juce::AudioProcessor& processor;
+        const bool didSuspend;
+    };
 
     float rawParamValue (const std::atomic<float>* param, float fallback = 0.0f) noexcept
     {
-        return param != nullptr ? param->load(std::memory_order_relaxed) : fallback;
+        const float value = param != nullptr ? param->load(std::memory_order_relaxed) : fallback;
+        return std::isfinite(value) ? value : fallback;
     }
 
     int rawParamInt (const std::atomic<float>* param, int fallback = 0) noexcept
@@ -43,112 +48,41 @@ namespace
         return rawParamValue(param, fallback ? 1.0f : 0.0f) > 0.5f;
     }
 
-    // B8: the MPE zone fully determines the channel layout. Maps the mpeZone choice
-    // index to its legal MPE master + member-channel range. This is the single
-    // source of truth shared by buildMpeConfig() (which feeds MpeMidiOutput) and the
-    // processBlock change-detection (which decides when to re-send setup / all-off),
-    // so the two can never disagree about which channels a zone uses.
-    struct MpeZoneChannels { int master; int memberFirst; int memberLast; };
+    struct MpeZoneChannels
+    {
+        int master;
+        int memberFirst;
+        int memberLast;
+    };
 
     MpeZoneChannels zoneChannels (int zoneIndex) noexcept
     {
-        // Upper (1): master 16, members 1..15. Anything else -> Lower (0): master 1,
-        // members 2..16 (the historical default; byte-identical to prior behaviour).
-        if (zoneIndex == 1)
-            return { 16, 1, 15 };
-        return { 1, 2, 16 };
+        return zoneIndex == 1 ? MpeZoneChannels { 16, 1, 15 }
+                              : MpeZoneChannels { 1, 2, 16 };
     }
+
 }
 
 AudienceProcessor::AudienceProcessor()
-    : juce::AudioProcessor (BusesProperties()
-	                              .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-	      apvts (*this, nullptr, "PARAMS", createLayout()),
-	      seatRouter (engine),
-	      osc (seatRouter),
-	      simulator (seatRouter)
+    : juce::AudioProcessor(BusesProperties()
+                               .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      apvts(*this, nullptr, "PARAMS", createLayout()),
+      audienceModel(fingerRouter),
+      osc(audienceModel),
+      simulator(audienceModel, MidiAudienceModel::MAX_SOURCES)
 {
-    instanceId = nextSynthInstanceId.fetch_add(1, std::memory_order_relaxed);
     cacheParameterPointers();
-    midiKeyToKeyboardSlot.fill(-1);
-    keyboardSlotToMidiKey.fill(-1);
-    for (auto& key : keyboardDebugKeys)
-        key.store(-1, std::memory_order_relaxed);
+    releaseAllIncomingMidiNotes();
+    updatePitchMap();
     mpeOut.reset();
-    setUdpPort(udpPort);
-    startTimerHz(60);
-
-    const std::initializer_list<juce::File> rootCandidates {
-        getBundledSamplesDirectory(),
-        juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-            .getChildFile("SpektraSynth/Samples"),
-        juce::File(AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH)
-    };
-    for (auto& c : rootCandidates)
-        if (c.isDirectory()) { libraryRoot = c; break; }
-
-    rescanLibraryRoot();
-
-    // pick the first available library (or fall back to the root itself if it
-    // still has loose .wav files lying around - backward compatibility)
-    const auto libs = getAvailableLibraries();
-    if (! libs.isEmpty())
-        setCurrentLibrary(libs[0]);
-    else if (libraryRoot.isDirectory())
-        setSampleDirectory(libraryRoot);
-}
-
-void AudienceProcessor::rescanLibraryRoot()
-{
-    if (libraryRoot.isDirectory())
-        return;
-
-    const std::initializer_list<juce::File> rootCandidates {
-        getBundledSamplesDirectory(),
-        juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-            .getChildFile("SpektraSynth/Samples"),
-        juce::File(AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH)
-    };
-
-    for (auto& c : rootCandidates)
-    {
-        if (c.isDirectory())
-        {
-            libraryRoot = c;
-            return;
-        }
-    }
-
-    librariesStatus = "Samples folder not found";
-}
-
-juce::StringArray AudienceProcessor::getAvailableLibraries() const
-{
-    juce::StringArray names;
-    if (! libraryRoot.isDirectory()) return names;
-    juce::Array<juce::File> subs;
-    libraryRoot.findChildFiles(subs, juce::File::findDirectories, false);
-    for (auto& d : subs)
-    {
-        if (d.getFileName().startsWith(".")) continue;
-        names.add(d.getFileName());
-    }
-    names.sortNatural();
-    return names;
-}
-
-void AudienceProcessor::setCurrentLibrary (const juce::String& libraryName)
-{
-    const auto dir = libraryRoot.getChildFile(libraryName);
-    if (! dir.isDirectory()) return;
-    currentLibraryName = libraryName;
-    setSampleDirectory(dir);
+    setUdpPort(getUdpPort());
+    juce::Timer::startTimerHz(60);
 }
 
 AudienceProcessor::~AudienceProcessor()
 {
-    stopTimer();
-    sendImmediateAllNotesOffToExternal();
+    juce::Timer::stopTimer();
+    juce::HighResolutionTimer::stopTimer();
     closeMidiOutput();
     osc.stop();
 }
@@ -158,411 +92,332 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
     using namespace juce;
     AudioProcessorValueTreeState::ParameterLayout layout;
 
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("pitch", 1), "Pitch (semitones)",
-        NormalisableRange<float>(-12.0f, 12.0f, 0.01f), 0.0f));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("midiOutputType", 1), "MIDI Format",
+        StringArray { "Off", "Normal MIDI", "MPE MIDI" }, 1));
 
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("layerMix", 1), "Layer Mix",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.7f));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("normalMidiRoutingMode", 1), "Normal MIDI Routing",
+        StringArray { "Single Channel", "Per Source 1-16" }, 1));
 
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("attack", 1), "Attack",
-        NormalisableRange<float>(10.0f, 3000.0f, 1.0f, 0.4f), 800.0f));
+    StringArray midiChannels;
+    for (int channel = 1; channel <= 16; ++channel)
+        midiChannels.add(String(channel));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("normalMidiChannel", 1), "Normal MIDI Channel", midiChannels, 0));
 
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("release", 1), "Release",
-        NormalisableRange<float>(100.0f, 6000.0f, 1.0f, 0.4f), 2500.0f));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("mpeZone", 1), "MPE Zone",
+        StringArray { "Lower", "Upper" }, 0));
 
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("brightness", 1), "Brightness",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.6f));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("mpePitchBendRange", 1), "MPE Pitch Bend Range",
+        StringArray { "2 st", "12 st", "24 st", "48 st" }, 0));
 
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("movement", 1), "Movement (Grain)",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.45f));
+    layout.add(std::make_unique<AudioParameterBool>(
+        ParameterID("mpeSendSetupMessages", 1), "MPE Send Setup Messages", true));
 
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("reverb", 1), "Reverb",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.35f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("delay", 1), "Delay",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.25f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("master", 1), "Master",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.7f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("energy", 1), "Energy",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("motionMacro", 1), "Motion",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("toneMacro", 1), "Tone",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("spaceMacro", 1), "Space",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("signatureMode", 1), "Signature Mode",
-        StringArray { "Choir Cloud", "Glass Harmonics", "Sub Swarm", "Spectral Rain", "Frozen Hall" }, 0));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("grainSize", 1), "Grain Size",
-        NormalisableRange<float>(40.0f, 800.0f, 1.0f, 0.55f), 260.0f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("grainDensity", 1), "Grain Density",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.55f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("pitchSpread", 1), "Pitch Spread",
-        NormalisableRange<float>(0.0f, 12.0f, 0.01f, 0.45f), 0.0f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("positionJitter", 1), "Position Jitter",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.35f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("stereoSpread", 1), "Stereo Spread",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.45f));
-
-    layout.add (std::make_unique<AudioParameterBool>(
-        ParameterID ("reverseGrains", 1), "Reverse Grains", false));
-
-    layout.add (std::make_unique<AudioParameterBool>(
-        ParameterID ("freeze", 1), "Freeze", false));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("grainShape", 1), "Grain Envelope",
-        StringArray { "Hann", "Triangle", "Soft Gate", "Pulse" }, 0));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("wetDry", 1), "Wet Dry",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.85f));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("tapeDrive", 1), "Tape Drive",
-        NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("polyphonyMode", 1), "Polyphony Mode",
-        StringArray { "Normal", "High", "Ultra" }, 0));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("engineSource", 1), "Sound Engine",
-        StringArray { "Sample Library", "Element Spectral Synth" }, 0));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("samplePlaybackMode", 1), "Sample Playback",
-        StringArray { "Sample Player", "Granular" }, 0));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("audioMidiOutputMode", 1), "Audio MIDI Output Mode",
-        StringArray { "Audio Only", "MIDI Only", "Audio + MIDI" }, 0));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("midiOutputType", 1), "MIDI Output Type",
-        StringArray { "Off", "Normal MIDI", "MPE MIDI" }, 0));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("externalMidiPitchMode", 1), "External MIDI Pitch Mode",
-        StringArray { "Direct MIDI Pitch", "Quantize To Current Scale", "Use As Trigger For Audience Pitch" }, 0));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("mpeZone", 1), "MPE Zone",
-        StringArray { "Lower", "Upper" }, 0));   // 0 = Lower (default), 1 = Upper.
-        // The zone now fully OWNS the MPE channel layout (master + member range);
-        // see buildMpeConfig(). Lower keeps the historical master1/members2-16,
-        // Upper uses master16/members1-15.
-
-    {
-        // Choice (not Int) so the editor's ComboBoxAttachment indexes correctly.
-        // 16 choices keep the same normalised 0..1 mapping as the old Int(1..16),
-        // so existing sessions recall the same channel.
-        juce::StringArray midiChannelChoices;
-        for (int ch = 1; ch <= 16; ++ch)
-            midiChannelChoices.add (juce::String (ch));
-        layout.add (std::make_unique<AudioParameterChoice>(
-            ParameterID ("normalMidiChannel", 1), "Normal MIDI Channel", midiChannelChoices, 0));
-    }
-
-    layout.add (std::make_unique<AudioParameterInt>(
-        ParameterID ("mpeMasterChannel", 1), "MPE Master Channel", 1, 16, 1));
-
-    layout.add (std::make_unique<AudioParameterInt>(
-        ParameterID ("mpeMemberFirstChannel", 1), "MPE First Member Channel", 2, 16, 2));
-
-    layout.add (std::make_unique<AudioParameterInt>(
-        ParameterID ("mpeMemberLastChannel", 1), "MPE Last Member Channel", 2, 16, 16));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("mpePitchBendRange", 1), "MPE Pitch Bend Range",
-        StringArray { "2 st", "12 st", "24 st", "48 st" }, 0));   // default 2 st:
-        // spectral degrees are emitted as nearest 12-TET note + bend, and that
-        // offset is always <= +/-50 cents. 2 st (the universal MPE/synth default)
-        // gives ample range AND is interpreted correctly by receivers that don't
-        // adopt our bend-range RPN, so the microtonal scale survives. Wider ranges
-        // are only needed for large Glide-mode pitch slides.
-
-    layout.add (std::make_unique<AudioParameterBool>(
-        ParameterID ("mpeSendSetupMessages", 1), "MPE Send Setup Messages", true));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("mpePitchMode", 1), "MPE Pitch Mode",
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("mpePitchMode", 1), "MPE Pitch Mode",
         StringArray { "Retrigger", "Glide" }, 0));
 
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("spectralElement", 1), "Element",
-        StringArray { "Hydrogen", "Helium", "Lithium", "Beryllium",
-                      "Boron", "Carbon", "Oxygen", "Fluorine", "Neon",
-                      "Sodium", "Magnesium", "Aluminium", "Silicon", "Phosphorus",
-                      "Sulfur", "Chlorine", "Argon", "Potassium", "Calcium",
-                      "Scandium", "Titanium", "Vanadium", "Chromium", "Manganese",
-                      "Iron", "Cobalt", "Nickel", "Copper", "Zinc" }, 1));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("pitchSystem", 1), "Pitch System",
+        StringArray { "Tonal", "Atomic" }, 1));
 
-    layout.add (std::make_unique<AudioParameterInt>(
-        ParameterID ("spectralPartialCount", 1), "Element Partial", 1, PartialEngine::MAX_ELEMENT_PARTIALS, PartialEngine::MAX_ELEMENT_PARTIALS));
-
-    layout.add (std::make_unique<AudioParameterBool>(
-        ParameterID ("spectralPartialSolo", 1), "Partial Solo", false));
-
-    layout.add (std::make_unique<AudioParameterFloat>(
-        ParameterID ("spectralStretch", 1), "Spectral Stretch",
-        NormalisableRange<float>(-0.35f, 0.35f, 0.001f), 0.0f));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("atomicScaleMode", 1), "Atomic Scale Mode",
-        StringArray { "Core", "Extended", "Microtonal", "Scientific", "Raw" }, 1));
-
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("scaleRoot", 1), "Root",
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("scaleRoot", 1), "Root",
         StringArray { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }, 0));
 
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("scaleRootOctave", 1), "Root Octave",
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("scaleRootOctave", 1), "Root Octave",
         StringArray { "0", "1", "2", "3", "4", "5", "6" }, 2));
 
-    layout.add (std::make_unique<AudioParameterChoice>(
-        ParameterID ("scaleMode", 1), "Scale",
-        StringArray { "Major", "Natural Minor", "Pentatonic", "Dorian", "Lydian", "Harmonic Minor", "Whole Tone",
-                      "Hydrogen Spectrum", "Helium Spectrum", "Lithium Spectrum", "Beryllium Spectrum",
-                      "Boron Spectrum", "Carbon Spectrum", "Oxygen Spectrum", "Fluorine Spectrum", "Neon Spectrum",
-                      "Sodium Spectrum", "Magnesium Spectrum", "Aluminium Spectrum", "Silicon Spectrum",
-                      "Phosphorus Spectrum", "Sulfur Spectrum", "Chlorine Spectrum", "Argon Spectrum",
-                      "Potassium Spectrum", "Calcium Spectrum", "Scandium Spectrum", "Titanium Spectrum",
-                      "Vanadium Spectrum", "Chromium Spectrum", "Manganese Spectrum",
-                      "Iron Spectrum", "Cobalt Spectrum", "Nickel Spectrum", "Copper Spectrum",
-                      "Zinc Spectrum" }, 0));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("scaleMode", 1), "Scale",
+        StringArray { "Major", "Natural Minor", "Pentatonic", "Dorian",
+                      "Lydian", "Harmonic Minor", "Whole Tone" }, 0));
 
-    layout.add (std::make_unique<AudioParameterInt>(
-        ParameterID ("scaleOctaves", 1), "Octaves", 1, 6, 4));
+    layout.add(std::make_unique<AudioParameterInt>(
+        ParameterID("scaleOctaves", 1), "Octave Range", 1, 6, 4));
+
+    StringArray atomicElements;
+    for (int index = 0; index < AtomicScaleCatalog::numElements; ++index)
+        atomicElements.add(String::fromUTF8(AtomicScaleCatalog::elementName(index))
+                           + " (" + String::fromUTF8(AtomicScaleCatalog::elementSymbol(index)) + ")");
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("spectralElement", 1), "Atomic Element", atomicElements, 1));
+
+    StringArray atomicModes;
+    for (int index = 0; index < AtomicScaleCatalog::numModes; ++index)
+        atomicModes.add(String::fromUTF8(AtomicScaleCatalog::modeName(index)));
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("atomicScaleMode", 1), "Atomic Scale Mode", atomicModes, 1));
 
     return layout;
 }
 
 void AudienceProcessor::cacheParameterPointers()
 {
-    rawParams.pitch = apvts.getRawParameterValue("pitch");
-    rawParams.layerMix = apvts.getRawParameterValue("layerMix");
-    rawParams.attack = apvts.getRawParameterValue("attack");
-    rawParams.release = apvts.getRawParameterValue("release");
-    rawParams.brightness = apvts.getRawParameterValue("brightness");
-    rawParams.movement = apvts.getRawParameterValue("movement");
-    rawParams.reverb = apvts.getRawParameterValue("reverb");
-    rawParams.delay = apvts.getRawParameterValue("delay");
-    rawParams.master = apvts.getRawParameterValue("master");
-    rawParams.energy = apvts.getRawParameterValue("energy");
-    rawParams.motionMacro = apvts.getRawParameterValue("motionMacro");
-    rawParams.toneMacro = apvts.getRawParameterValue("toneMacro");
-    rawParams.spaceMacro = apvts.getRawParameterValue("spaceMacro");
-    rawParams.signatureMode = apvts.getRawParameterValue("signatureMode");
-    rawParams.grainSize = apvts.getRawParameterValue("grainSize");
-    rawParams.grainDensity = apvts.getRawParameterValue("grainDensity");
-    rawParams.pitchSpread = apvts.getRawParameterValue("pitchSpread");
-    rawParams.positionJitter = apvts.getRawParameterValue("positionJitter");
-    rawParams.stereoSpread = apvts.getRawParameterValue("stereoSpread");
-    rawParams.reverseGrains = apvts.getRawParameterValue("reverseGrains");
-    rawParams.freeze = apvts.getRawParameterValue("freeze");
-    rawParams.grainShape = apvts.getRawParameterValue("grainShape");
-    rawParams.wetDry = apvts.getRawParameterValue("wetDry");
-    rawParams.tapeDrive = apvts.getRawParameterValue("tapeDrive");
-    rawParams.polyphonyMode = apvts.getRawParameterValue("polyphonyMode");
     rawParams.scaleRoot = apvts.getRawParameterValue("scaleRoot");
     rawParams.scaleRootOctave = apvts.getRawParameterValue("scaleRootOctave");
     rawParams.scaleMode = apvts.getRawParameterValue("scaleMode");
     rawParams.scaleOctaves = apvts.getRawParameterValue("scaleOctaves");
-    rawParams.engineSource = apvts.getRawParameterValue("engineSource");
-    rawParams.samplePlaybackMode = apvts.getRawParameterValue("samplePlaybackMode");
+    rawParams.pitchSystem = apvts.getRawParameterValue("pitchSystem");
     rawParams.spectralElement = apvts.getRawParameterValue("spectralElement");
-    rawParams.spectralPartialCount = apvts.getRawParameterValue("spectralPartialCount");
-    rawParams.spectralPartialSolo = apvts.getRawParameterValue("spectralPartialSolo");
-    rawParams.spectralStretch = apvts.getRawParameterValue("spectralStretch");
     rawParams.atomicScaleMode = apvts.getRawParameterValue("atomicScaleMode");
-    rawParams.audioMidiOutputMode = apvts.getRawParameterValue("audioMidiOutputMode");
     rawParams.midiOutputType = apvts.getRawParameterValue("midiOutputType");
+    rawParams.normalMidiRoutingMode = apvts.getRawParameterValue("normalMidiRoutingMode");
     rawParams.normalMidiChannel = apvts.getRawParameterValue("normalMidiChannel");
     rawParams.mpeZone = apvts.getRawParameterValue("mpeZone");
-    rawParams.mpeMasterChannel = apvts.getRawParameterValue("mpeMasterChannel");
-    rawParams.mpeMemberFirstChannel = apvts.getRawParameterValue("mpeMemberFirstChannel");
-    rawParams.mpeMemberLastChannel = apvts.getRawParameterValue("mpeMemberLastChannel");
     rawParams.mpePitchBendRange = apvts.getRawParameterValue("mpePitchBendRange");
     rawParams.mpeSendSetupMessages = apvts.getRawParameterValue("mpeSendSetupMessages");
     rawParams.mpePitchMode = apvts.getRawParameterValue("mpePitchMode");
-    rawParams.externalMidiPitchMode = apvts.getRawParameterValue("externalMidiPitchMode");
 }
 
-void AudienceProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
+void AudienceProcessor::prepareToPlay (double sampleRate, int)
 {
-    currentSampleRate = juce::jmax(1.0, sampleRate);
-    engine.prepare(sampleRate, samplesPerBlock);
-    monoScratch.setSize(2, juce::jmax(samplesPerBlock, realtimeScratchBlockSize), false, false, true);
+    currentSampleRate = std::isfinite(sampleRate) && sampleRate > 0.0 ? sampleRate : 44100.0;
+    // Do not cancel an unacknowledged releaseResources reset. A rapid
+    // release->prepare sequence can happen before the 2 ms MIDI sender tick;
+    // reopening here would let old-epoch NoteOns cross into the new epoch. The
+    // sender discards that queue, emits the sweep, then reopens the gate.
+    if (! externalTransportResetPending.load(std::memory_order_acquire))
+        externalMidiProducerQuarantined.store(false, std::memory_order_release);
+    midiInputScratch.ensureSize(realtimeMidiBufferReserveBytes);
     midiRenderScratch.ensureSize(realtimeMidiBufferReserveBytes);
+    midiInputScratch.clear();
+    midiRenderScratch.clear();
     midiRenderScratchLoanedToHost = false;
+    releaseAllIncomingMidiNotes();
     mpeOut.reset();
     mpeOut.markSetupDirty();
+    retriggerFingerMidi = true;
+    fingerRetriggerCursor = 0;
+    // A host can call prepareToPlay again without delivering note-offs from the
+    // previous processing epoch. The first new block therefore emits a bounded
+    // channel reset and re-arms any OSC fingers that are still held.
+    midiOutputRouteChangedPending.store(true, std::memory_order_release);
 }
 
-void AudienceProcessor::releaseResources() {}
+void AudienceProcessor::releaseResources()
+{
+    // releaseResources may be called from a host-owned processing thread, so it
+    // only publishes work. Close the producer gate before publishing the reset,
+    // so the high-resolution consumer can discard the complete old-epoch queue
+    // without a later block adding a post-snapshot NoteOn. JUCE calls this only
+    // after processing has stopped; prepareToPlay explicitly reopens the gate.
+    externalMidiProducerQuarantined.store(true, std::memory_order_release);
+    externalTransportResetPending.store(true, std::memory_order_release);
+    midiOutputRouteChangedPending.store(true, std::memory_order_release);
+}
 
 bool AudienceProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    const auto out = layouts.getMainOutputChannelSet();
-    return out == juce::AudioChannelSet::mono() || out == juce::AudioChannelSet::stereo();
+    const auto output = layouts.getMainOutputChannelSet();
+    return output == juce::AudioChannelSet::mono()
+        || output == juce::AudioChannelSet::stereo();
 }
 
-void AudienceProcessor::pullParams()
+void AudienceProcessor::updatePitchMap()
 {
-    const int rootPitchClass = rawParamInt(rawParams.scaleRoot);
-    const int rootOctave = rawParamInt(rawParams.scaleRootOctave, 2);
-    const int rootMidi = (rootOctave + 1) * 12 + rootPitchClass;
-    const int scaleMode = rawParamInt(rawParams.scaleMode);
-    const int octaves = rawParamInt(rawParams.scaleOctaves, 4);
-    const int engineSource = rawParamInt(rawParams.engineSource);
-    const int samplePlaybackMode = rawParamInt(rawParams.samplePlaybackMode);
-    const int spectralElement = rawParamInt(rawParams.spectralElement, 1);
-    const int atomicScaleMode = rawParamInt(rawParams.atomicScaleMode, 1);
-    const float energy = rawParamValue(rawParams.energy, 0.5f);
-    const float motion = rawParamValue(rawParams.motionMacro, 0.5f);
-    const float tone = rawParamValue(rawParams.toneMacro, 0.5f);
-    const float space = rawParamValue(rawParams.spaceMacro, 0.5f);
+    const int root = juce::jlimit(0, 11, rawParamInt(rawParams.scaleRoot));
+    const int rootOctave = juce::jlimit(0, 6, rawParamInt(rawParams.scaleRootOctave, 2));
+    const int mode = juce::jlimit(0, MidiPitchMap::numScaleModes - 1,
+                                  rawParamInt(rawParams.scaleMode));
+    const int octaves = juce::jlimit(1, 6, rawParamInt(rawParams.scaleOctaves, 4));
+    const int pitchSystem = juce::jlimit(0, 1, rawParamInt(rawParams.pitchSystem, 1));
+    const int atomicElement = AtomicScaleCatalog::clampElementIndex(
+        rawParamInt(rawParams.spectralElement, 1));
+    const int atomicMode = AtomicScaleCatalog::clampModeIndex(
+        rawParamInt(rawParams.atomicScaleMode, 1));
 
-    engine.pitchSemitones.store(rawParamValue(rawParams.pitch));
-    engine.layerMix      .store(rawParamValue(rawParams.layerMix, 0.7f));
-    engine.attackMs      .store(rawParamValue(rawParams.attack, 800.0f));
-    engine.releaseMs     .store(rawParamValue(rawParams.release, 2500.0f));
-    engine.brightness    .store(rawParamValue(rawParams.brightness, 0.6f));
-    engine.movement      .store(rawParamValue(rawParams.movement, 0.45f));
-    engine.reverbAmount  .store(rawParamValue(rawParams.reverb, 0.35f));
-    engine.delayAmount   .store(rawParamValue(rawParams.delay, 0.25f));
-    engine.masterGain    .store(rawParamValue(rawParams.master, 0.7f));
-    engine.energyMacro   .store(energy);
-    engine.motionMacro   .store(motion);
-    engine.toneMacro     .store(tone);
-    engine.spaceMacro    .store(space);
-    engine.signatureMode .store(rawParamInt(rawParams.signatureMode));
-    engine.grainSizeMs   .store(rawParamValue(rawParams.grainSize, 260.0f));
-    engine.grainDensity  .store(rawParamValue(rawParams.grainDensity, 0.55f));
-    engine.pitchSpread   .store(rawParamValue(rawParams.pitchSpread));
-    engine.positionJitter.store(rawParamValue(rawParams.positionJitter));
-    engine.stereoSpread  .store(rawParamValue(rawParams.stereoSpread, 0.5f));
-    engine.reverseGrains .store(rawParamBool(rawParams.reverseGrains) ? 1 : 0);
-    engine.freeze        .store(rawParamBool(rawParams.freeze) ? 1 : 0);
-    engine.grainShape    .store(rawParamInt(rawParams.grainShape));
-    engine.wetDry        .store(rawParamValue(rawParams.wetDry, 0.5f));
-    engine.tapeDrive     .store(rawParamValue(rawParams.tapeDrive));
-    engine.polyphonyMode .store(rawParamInt(rawParams.polyphonyMode));
-    engine.engineSource  .store(engineSource);
-    engine.samplePlaybackMode.store(samplePlaybackMode);
-    engine.spectralElement.store(spectralElement);
-    engine.spectralPartialCount.store(rawParamInt(rawParams.spectralPartialCount, PartialEngine::MAX_ELEMENT_PARTIALS));
-    engine.spectralPartialSolo.store(rawParamBool(rawParams.spectralPartialSolo) ? 1 : 0);
-    engine.spectralStretch.store(rawParamValue(rawParams.spectralStretch));
-    engine.atomicScaleMode.store(atomicScaleMode);
-    engine.scaleRootMidi .store(rootMidi);
-    engine.scaleMode     .store(scaleMode);
-    engine.scaleOctaves  .store(octaves);
+    const bool changed = lastPitchSystem >= 0
+                      && (root != lastScaleRootPitchClass
+                       || rootOctave != lastScaleRootOctave
+                       || mode != lastScaleMode
+                       || octaves != lastScaleOctaves
+                       || pitchSystem != lastPitchSystem
+                       || atomicElement != lastAtomicElement
+                       || atomicMode != lastAtomicScaleMode);
 
-    const bool scaleChanged = lastScaleRoot >= 0
-                           && (lastScaleRoot != rootMidi
-                            || lastScaleMode != scaleMode
-                            || lastScaleOctaves != octaves
-                            || lastEngineSource != engineSource
-                            || lastSamplePlaybackMode != samplePlaybackMode
-                            || lastSpectralElement != spectralElement
-                            || lastAtomicScaleMode != atomicScaleMode);
-
-    if (scaleChanged)
+    if (root != lastScaleRootPitchClass
+        || rootOctave != lastScaleRootOctave
+        || mode != lastScaleMode
+        || octaves != lastScaleOctaves
+        || pitchSystem != lastPitchSystem
+        || atomicElement != lastAtomicElement
+        || atomicMode != lastAtomicScaleMode)
     {
-        releaseAllMidiKeyboardNotes();
-        engine.requestRetuneActiveSeats();
+        if (pitchSystem == 1)
+        {
+            // The catalog is constructed before processing and is immutable.
+            // Copying and re-rooting this fixed-capacity map is bounded and
+            // allocation-free, including under host parameter automation.
+            atomicPitchMap = AtomicScaleCatalog::instance().getMap(atomicElement, atomicMode);
+            atomicPitchMap.setRootPitchClassAndOctave(root, rootOctave, octaves);
+        }
+        else
+        {
+            pitchMap.configure(root, rootOctave, mode, octaves);
+        }
+        if (changed)
+        {
+            retriggerFingerMidi = true;
+            fingerRetriggerCursor = 0;
+        }
     }
 
-    lastScaleRoot = rootMidi;
-    lastScaleMode = scaleMode;
+    lastScaleRootPitchClass = root;
+    lastScaleRootOctave = rootOctave;
+    lastScaleMode = mode;
     lastScaleOctaves = octaves;
-    lastEngineSource = engineSource;
-    lastSamplePlaybackMode = samplePlaybackMode;
-    lastSpectralElement = spectralElement;
-    lastAtomicScaleMode = atomicScaleMode;
+    lastPitchSystem = pitchSystem;
+    lastAtomicElement = atomicElement;
+    lastAtomicScaleMode = atomicMode;
 }
 
-void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+bool AudienceProcessor::processIncomingMidi (const juce::MidiBuffer& input)
+{
+#if COSMIC_MIDI_DIAGNOSTICS
+    recordIncomingMidiDebugEvents(input);
+#endif
+    midiInputScratch.clear();
+
+    size_t storedBytes = 0;
+    int storedEvents = 0;
+    bool copyInput = true;
+    bool overflowed = false;
+    int activeCount = activeExternalMidiKeys.load(std::memory_order_relaxed);
+    for (const auto metadata : input)
+    {
+        const auto eventBytes = metadata.numBytes > 0
+                              ? (size_t) metadata.numBytes + sizeof(int32_t) + sizeof(uint16_t)
+                              : 0;
+        if (copyInput && metadata.data != nullptr
+            && metadata.numBytes > 0 && metadata.numBytes <= 65535
+            && storedEvents < realtimeMidiInputEventLimit
+            && eventBytes <= realtimeMidiInputBudgetBytes - storedBytes
+            && midiInputScratch.addEvent(metadata.data, metadata.numBytes, metadata.samplePosition))
+        {
+            storedBytes += eventBytes;
+            ++storedEvents;
+        }
+        else if (metadata.numBytes > 0)
+        {
+            // Drop the whole thru block. processBlock clears lifecycle telemetry
+            // on this path, so stop scanning here as well. This leaves enough of
+            // the preallocated output buffer for the
+            // bounded OSC/MPE reset + retrigger burst, prevents growth, and caps
+            // MidiBuffer's sorted-insertion work at a fixed event count.
+            copyInput = false;
+            overflowed = true;
+            midiInputScratch.clear();
+            break;
+        }
+
+        if (metadata.data == nullptr || metadata.numBytes < 1)
+            continue;
+
+        const auto status = metadata.data[0];
+        if (status >= 0xf0)
+            continue;
+        const int channel = (status & 0x0f) + 1;
+
+        const int messageType = status & 0xf0;
+        if (messageType == 0xb0 && metadata.numBytes >= 2
+            && (metadata.data[1] == 120 || metadata.data[1] == 123))
+        {
+            const int first = (channel - 1) * midiInputNotes;
+            for (int note = 0; note < midiInputNotes; ++note)
+            {
+                auto& active = incomingMidiKeys[(size_t) (first + note)];
+                if (active)
+                {
+                    active = false;
+                    activeCount = juce::jmax(0, activeCount - 1);
+                }
+            }
+            continue;
+        }
+
+        if ((messageType != 0x80 && messageType != 0x90) || metadata.numBytes < 3)
+            continue;
+
+        const int note = metadata.data[1] & 0x7f;
+        if (note < 0 || note >= midiInputNotes)
+            continue;
+
+        lastExternalMidiChannel.store(channel, std::memory_order_relaxed);
+        lastExternalMidiNote.store(note, std::memory_order_relaxed);
+        auto& active = incomingMidiKeys[(size_t) ((channel - 1) * midiInputNotes + note)];
+        const bool shouldBeActive = messageType == 0x90 && metadata.data[2] != 0;
+        if (shouldBeActive != active)
+        {
+            active = shouldBeActive;
+            activeCount += shouldBeActive ? 1 : -1;
+        }
+    }
+
+    activeExternalMidiKeys.store(juce::jmax(0, activeCount), std::memory_order_relaxed);
+    return overflowed;
+}
+
+void AudienceProcessor::releaseAllIncomingMidiNotes() noexcept
+{
+    incomingMidiKeys.fill(false);
+    activeExternalMidiKeys.store(0, std::memory_order_relaxed);
+}
+
+void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
+                                      juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
-    pullParams();
-    processIncomingMidiKeyboard(midiMessages);
+    const double externalBlockStartTimeMs = juce::Time::getMillisecondCounterHiRes();
 
-    const int outputMode = rawParamInt(rawParams.audioMidiOutputMode);
-    const int midiType = rawParamInt(rawParams.midiOutputType);
-    const bool renderAudio = outputMode != 1 && ! muted.load();
-    const bool renderMidi = outputMode != 0 && midiType != 0;
-    const int bendRange = MpeMidiOutput::bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
-    // B8: the member range (and master) are now DERIVED from the MPE zone, so the
-    // change-detection tracks the ZONE-derived channels. Switching Lower<->Upper
-    // changes both the master and the member first/last, which flips
-    // midiConfigChanged -> the existing safety path (emitSafetyReset + reset on the
-    // OLD channels, then markSetupDirty so the MCM is re-sent on the NEW master and
-    // allocation moves to the NEW member range) fires exactly as for any other
-    // config change.
-    const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone, 0));
-    const int mpeMaster = juce::jlimit(1, 16, zone.master);
-    const int mpeFirst = juce::jlimit(1, 16, zone.memberFirst);
-    const int mpeLast = juce::jlimit(mpeFirst, 16, zone.memberLast);
+    // Preserve the host input before reclaiming the preallocated output buffer.
+    const bool midiInputOverflowed = processIncomingMidi(midiMessages);
+    updatePitchMap();
+
+    const int midiType = juce::jlimit(0, 2, rawParamInt(rawParams.midiOutputType, 1));
+    const int routingMode = juce::jlimit(0, 1, rawParamInt(rawParams.normalMidiRoutingMode, 1));
+    const int normalChannel = juce::jlimit(0, 15, rawParamInt(rawParams.normalMidiChannel));
+    const int bendRange = MpeMidiOutput::bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange));
+    const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone));
     const int setupEnabled = rawParamBool(rawParams.mpeSendSetupMessages, true) ? 1 : 0;
+    const int pitchMode = juce::jlimit(0, 1, rawParamInt(rawParams.mpePitchMode));
+    const bool routeChanged = midiOutputRouteChangedPending.exchange(false, std::memory_order_acq_rel);
 
-    const bool midiConfigChanged = outputMode != lastAudioMidiOutputMode
-        || midiType != lastMidiOutputType
-        || bendRange != lastMpeBendRange
-        || mpeMaster != lastMpeMaster
-        || mpeFirst != lastMpeMemberFirst
-        || mpeLast != lastMpeMemberLast
-        || setupEnabled != lastMpeSetupEnabled;
-    const bool needsSafetyAllOff = midiConfigChanged
-        && (lastAudioMidiOutputMode != 0 && lastMidiOutputType != 0);
+    const bool configChanged = midiType != lastMidiOutputType
+                            || routingMode != lastNormalMidiRoutingMode
+                            || normalChannel != lastNormalMidiChannel
+                            || bendRange != lastMpeBendRange
+                            || zone.master != lastMpeMaster
+                            || zone.memberFirst != lastMpeMemberFirst
+                            || zone.memberLast != lastMpeMemberLast
+                            || setupEnabled != lastMpeSetupEnabled
+                            || pitchMode != lastMpePitchMode;
+    const bool hadActiveOutput = lastMidiOutputType != 0;
+    const bool needsSafetyReset = ((configChanged || routeChanged) && hadActiveOutput)
+                               || (midiInputOverflowed && (hadActiveOutput || midiType != 0));
 
-    lastAudioMidiOutputMode = outputMode;
     lastMidiOutputType = midiType;
+    lastNormalMidiRoutingMode = routingMode;
+    lastNormalMidiChannel = normalChannel;
     lastMpeBendRange = bendRange;
-    lastMpeMaster = mpeMaster;
-    lastMpeMemberFirst = mpeFirst;
-    lastMpeMemberLast = mpeLast;
+    lastMpeMaster = zone.master;
+    lastMpeMemberFirst = zone.memberFirst;
+    lastMpeMemberLast = zone.memberLast;
     lastMpeSetupEnabled = setupEnabled;
+    lastMpePitchMode = pitchMode;
 
-    // Mirror the just-computed member range into the MPE output engine before any
-    // reset below, matching the old ordering where lastMpeMemberFirst/Last were
-    // assigned ahead of resetMidiOutputState (so availableMpeChannels is correct).
-    mpeOut.setMemberRange(mpeFirst, mpeLast);
-
-    if (midiConfigChanged)
+    mpeOut.setMemberRange(zone.memberFirst, zone.memberLast);
+    if (configChanged || routeChanged || midiInputOverflowed)
+    {
         mpeOut.markSetupDirty();
+        retriggerFingerMidi = true;
+        fingerRetriggerCursor = 0;
+    }
 
     if (midiRenderScratchLoanedToHost)
     {
@@ -571,796 +426,444 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     }
 
     midiRenderScratch.clear();
-    buffer.clear();
     midiMessages.clear();
+    buffer.clear();
 
-    auto& outputMidi = midiRenderScratch;
-    if (needsSafetyAllOff)
+    if (midiInputOverflowed)
+        releaseAllIncomingMidiNotes();
+
+    auto& output = midiRenderScratch;
+    if (needsSafetyReset)
     {
-        mpeOut.emitSafetyReset(outputMidi, 0);
+        mpeOut.emitSafetyReset(output, 0);
         mpeOut.reset();
     }
-    else if (midiConfigChanged)
+    else if (configChanged)
     {
-        mpeOut.reset();
-    }
-
-    if (renderAudio && buffer.getNumChannels() < 2)
-    {
-        const int n = buffer.getNumSamples();
-        auto* mono = buffer.getWritePointer(0);
-        int rendered = 0;
-        const int scratchSamples = monoScratch.getNumSamples();
-        while (rendered < n && scratchSamples > 0)
-        {
-            const int chunk = juce::jmin(scratchSamples, n - rendered);
-            engine.render(monoScratch.getWritePointer(0), monoScratch.getWritePointer(1), chunk);
-            for (int i = 0; i < chunk; ++i)
-                mono[rendered + i] = 0.5f * (monoScratch.getSample(0, i) + monoScratch.getSample(1, i));
-            rendered += chunk;
-        }
-    }
-    else if (renderAudio)
-    {
-        engine.render(buffer.getWritePointer(0),
-                      buffer.getWritePointer(1),
-                      buffer.getNumSamples());
-    }
-    else
-    {
-        engine.processControlEvents(buffer.getNumSamples());
-    }
-
-    if (renderMidi)
-        renderOutgoingMidi(outputMidi, buffer.getNumSamples());
-    else
-    {
-        (void) engine.drainMidiSourceEvents(midiSourceScratch.data(), (int) midiSourceScratch.size());
         mpeOut.reset();
     }
 
-    mpeOut.recordOutgoingMidiDebugEvents(outputMidi);
-    queueMidiToExternalOutput(outputMidi);
+    const bool outputEnabled = midiType != 0;
+    if (outputEnabled)
+    {
+        for (const auto metadata : midiInputScratch)
+            output.addEvent(metadata.data, metadata.numBytes, metadata.samplePosition);
+    }
+
+    renderOutgoingMidi(output, buffer.getNumSamples(), outputEnabled);
+#if COSMIC_MIDI_DIAGNOSTICS
+    mpeOut.recordOutgoingMidiDebugEvents(output);
+#endif
+    queueMidiToExternalOutput(output, externalBlockStartTimeMs, buffer.getNumSamples());
+
     midiMessages.swapWith(midiRenderScratch);
     midiRenderScratchLoanedToHost = true;
-}
-
-void AudienceProcessor::processIncomingMidiKeyboard (const juce::MidiBuffer& midiMessages)
-{
-    recordIncomingMidiDebugEvents(midiMessages);
-
-    enum PitchMode
-    {
-        directMidiPitch = 0,
-        quantizeToCurrentScale = 1,
-        triggerAudiencePitch = 2
-    };
-
-    const int pitchMode = juce::jlimit(0, 2, rawParamInt(rawParams.externalMidiPitchMode));
-    externalMidiPitchModeSnapshot.store(pitchMode, std::memory_order_relaxed);
-    const int totalSteps = engine.getScaleTableSize();
-    const int rootMidi = engine.scaleRootMidi.load(std::memory_order_relaxed);
-    const bool mpeOutputActive = rawParamInt(rawParams.midiOutputType) == 2;
-    // B8: derive the member range we guard against from the active MPE zone (the
-    // zone owns the layout) so the "ignore local MPE member input" range matches
-    // what we actually emit on (Lower: 2..16, Upper: 1..15).
-    const auto incomingZone = zoneChannels(rawParamInt(rawParams.mpeZone, 0));
-    const int mpeFirst = juce::jlimit(1, 16, incomingZone.memberFirst);
-    const int mpeLast = juce::jlimit(mpeFirst, 16, incomingZone.memberLast);
-
-    auto midiKeyIndex = [] (int channel, int note) noexcept
-    {
-        if (channel < 1 || channel > 16 || note < 0 || note >= 128)
-            return -1;
-
-        return (channel - 1) * 128 + note;
-    };
-
-    auto refreshActiveKeyCount = [this] () noexcept
-    {
-        int count = 0;
-        for (const auto key : keyboardSlotToMidiKey)
-            if (key >= 0)
-                ++count;
-
-        activeExternalMidiKeys.store(count, std::memory_order_relaxed);
-    };
-
-    auto releaseSlot = [this] (int slot)
-    {
-        if (slot < 0 || slot >= PartialEngine::MAX_KEYBOARD_SLOTS)
-            return;
-
-        const int oldKey = keyboardSlotToMidiKey[(size_t) slot];
-        if (oldKey >= 0 && oldKey < (int) midiKeyToKeyboardSlot.size())
-            midiKeyToKeyboardSlot[(size_t) oldKey] = -1;
-
-        engine.processKeyboardPitchRealtime(slot, 0, 0.0, 0.0f, false);
-        keyboardSlotToMidiKey[(size_t) slot] = -1;
-        keyboardDebugKeys[(size_t) slot].store(-1, std::memory_order_relaxed);
-    };
-
-    auto releaseNote = [&] (int channel, int note)
-    {
-        const int key = midiKeyIndex(channel, note);
-        if (key < 0)
-            return;
-
-        const int slot = midiKeyToKeyboardSlot[(size_t) key];
-        if (slot < 0 || slot >= PartialEngine::MAX_KEYBOARD_SLOTS)
-            return;
-
-        releaseSlot(slot);
-        refreshActiveKeyCount();
-    };
-
-    auto allocateSlot = [&] (int key)
-    {
-        if (key >= 0 && key < (int) midiKeyToKeyboardSlot.size())
-        {
-            const int existing = midiKeyToKeyboardSlot[(size_t) key];
-            if (existing >= 0 && existing < PartialEngine::MAX_KEYBOARD_SLOTS)
-                return existing;
-        }
-
-        for (int slot = 0; slot < PartialEngine::MAX_KEYBOARD_SLOTS; ++slot)
-            if (keyboardSlotToMidiKey[(size_t) slot] < 0)
-                return slot;
-
-        const int stolen = juce::jlimit(0, PartialEngine::MAX_KEYBOARD_SLOTS - 1,
-                                        key % PartialEngine::MAX_KEYBOARD_SLOTS);
-        releaseSlot(stolen);
-        return stolen;
-    };
-
-    std::array<int, midiInputKeyCount> pendingAction {};
-    std::array<float, midiInputKeyCount> pendingVelocity {};
-    std::array<unsigned char, midiInputKeyCount> pendingForcedOff {};
-
-    for (const auto metadata : midiMessages)
-    {
-        const auto msg = metadata.getMessage();
-        const int channel = msg.getChannel();
-
-        if (mpeOutputActive && channel >= mpeFirst && channel <= mpeLast)
-            continue;
-
-        if (msg.isAllNotesOff() || msg.isAllSoundOff())
-        {
-            if (channel >= 1 && channel <= 16)
-            {
-                const int firstKey = (channel - 1) * 128;
-                const int lastKey = firstKey + 127;
-                for (int key = firstKey; key <= lastKey; ++key)
-                {
-                    if (midiKeyToKeyboardSlot[(size_t) key] >= 0)
-                    {
-                        pendingAction[(size_t) key] = -1;
-                        pendingForcedOff[(size_t) key] = 1;
-                    }
-                }
-            }
-            continue;
-        }
-
-        if (msg.isNoteOff(true))
-        {
-            lastExternalMidiChannel.store(channel, std::memory_order_relaxed);
-            lastExternalMidiNote.store(msg.getNoteNumber(), std::memory_order_relaxed);
-            const int key = midiKeyIndex(channel, msg.getNoteNumber());
-            if (key >= 0)
-                pendingAction[(size_t) key] = -1;
-            continue;
-        }
-
-        if (! msg.isNoteOn(false))
-            continue;
-
-        const int note = msg.getNoteNumber();
-        const int key = midiKeyIndex(channel, note);
-        if (key < 0)
-            continue;
-
-        lastExternalMidiChannel.store(channel, std::memory_order_relaxed);
-        lastExternalMidiNote.store(note, std::memory_order_relaxed);
-
-        pendingAction[(size_t) key] = 1;
-        pendingVelocity[(size_t) key] = juce::jlimit(0.0f, 1.0f, msg.getFloatVelocity());
-    }
-
-    for (int key = 0; key < midiInputKeyCount; ++key)
-    {
-        const int action = pendingAction[(size_t) key];
-        if (action == 0)
-            continue;
-
-        const int channel = key / 128 + 1;
-        const int note = key % 128;
-
-        if (action < 0)
-        {
-            releaseNote(channel, note);
-            continue;
-        }
-
-        const int existingSlot = midiKeyToKeyboardSlot[(size_t) key];
-        const bool alreadyActive = existingSlot >= 0 && existingSlot < PartialEngine::MAX_KEYBOARD_SLOTS;
-        // Feedback / redundant-trigger guard: a key that is already sounding must NOT be
-        // retriggered by another Note On unless it was force-released. When our MPE output
-        // is monitored or looped back (virtual port also open as input, or a host routing
-        // out -> in), our own notes echo back as repeated Note Ons; retriggering on them
-        // produced a Note Off/On storm that destabilised polyphonic per-note pitch bends
-        // (the receiver collapsed to 12-TET). Holding a key is a single press, so any
-        // further Note On with no intervening Note Off is redundant -> keep the voice.
-        // Re-strikes across blocks still work: the Note Off in an earlier block frees
-        // the slot, so the later Note On allocates fresh. (A same-block NoteOff+NoteOn
-        // collapses into pendingAction, so a re-strike within one block is dropped.)
-        if (alreadyActive && pendingForcedOff[(size_t) key] == 0)
-        {
-            refreshActiveKeyCount();
-            continue;
-        }
-
-        releaseNote(channel, note);
-        const int slot = allocateSlot(key);
-        const float velocity = pendingVelocity[(size_t) key];
-
-        midiKeyToKeyboardSlot[(size_t) key] = slot;
-        keyboardSlotToMidiKey[(size_t) slot] = key;
-        keyboardDebugKeys[(size_t) slot].store(key, std::memory_order_relaxed);
-
-        if (pitchMode == directMidiPitch)
-        {
-            engine.processKeyboardPitchRealtime(slot, note,
-                                                PartialEngine::midiNoteToFrequencyHz(note),
-                                                velocity,
-                                                true);
-        }
-        else
-        {
-            if (totalSteps <= 0)
-            {
-                releaseSlot(slot);
-                refreshActiveKeyCount();
-                continue;
-            }
-
-            int step = -1;
-            if (pitchMode == quantizeToCurrentScale)
-            {
-                step = engine.findNearestScaleStepForMidi(note);
-            }
-            else
-            {
-                step = engine.isSpectralScale() ? engine.findKeyboardScaleStepForMidi(note)
-                                                : note - rootMidi;
-                if (step < 0 || step >= totalSteps)
-                    step = engine.findNearestScaleStepForMidi(note);
-            }
-
-            if (step < 0 || step >= totalSteps)
-            {
-                releaseSlot(slot);
-                refreshActiveKeyCount();
-                continue;
-            }
-
-            engine.processKeyboardStepRealtime(slot, step, velocity, true);
-        }
-
-        refreshActiveKeyCount();
-    }
-}
-
-void AudienceProcessor::releaseAllMidiKeyboardNotes()
-{
-    for (int slot = 0; slot < PartialEngine::MAX_KEYBOARD_SLOTS; ++slot)
-    {
-        if (keyboardSlotToMidiKey[(size_t) slot] >= 0)
-            engine.processKeyboardPitchRealtime(slot, 0, 0.0, 0.0f, false);
-        keyboardSlotToMidiKey[(size_t) slot] = -1;
-    }
-
-    midiKeyToKeyboardSlot.fill(-1);
-    for (auto& key : keyboardDebugKeys)
-        key.store(-1, std::memory_order_relaxed);
-    activeExternalMidiKeys.store(0, std::memory_order_relaxed);
-}
-
-juce::String AudienceProcessor::getExternalMidiPitchModeName() const
-{
-    switch (juce::jlimit(0, 2, externalMidiPitchModeSnapshot.load(std::memory_order_relaxed)))
-    {
-        case 1:  return "Quantize To Current Scale";
-        case 2:  return "Use As Trigger For Audience Pitch";
-        default: return "Direct MIDI Pitch";
-    }
 }
 
 MpeMidiOutput::MpeConfig AudienceProcessor::buildMpeConfig() const
 {
     MpeMidiOutput::MpeConfig config;
-    config.outputType           = rawParamInt(rawParams.midiOutputType);
-
-    // B8: the MPE zone now fully OWNS the channel layout. We DERIVE the master and
-    // member-channel range from the mpeZone choice index instead of reading the
-    // manual mpeMasterChannel / mpeMemberFirstChannel / mpeMemberLastChannel params
-    // (those stay in the APVTS layout purely for session compatibility, but are no
-    // longer consulted here):
-    //   Lower (0): master 1,  members 2..16  (15 members) - historical default,
-    //              byte-identical to the prior behaviour.
-    //   Upper (1): master 16, members 1..15  (15 members).
-    // The derived member range never includes the master channel in either zone.
-    const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone, 0));
-    config.masterChannel        = zone.master;
-    config.memberFirst          = zone.memberFirst;
-    config.memberLast           = zone.memberLast;
-
-    config.pitchBendRangeChoice = rawParamInt(rawParams.mpePitchBendRange, 3);
-    config.normalMidiChannel    = rawParamInt(rawParams.normalMidiChannel, 0);
-    config.sendSetupMessages    = rawParamBool(rawParams.mpeSendSetupMessages, true);
-    config.pitchMode            = rawParamInt(rawParams.mpePitchMode);
-    config.motionMacro          = rawParamValue(rawParams.motionMacro, 0.5f);
-    config.energy               = rawParamValue(rawParams.energy, 0.5f);
+    config.outputType = juce::jlimit(0, 2, rawParamInt(rawParams.midiOutputType, 1));
+    const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone));
+    config.masterChannel = zone.master;
+    config.memberFirst = zone.memberFirst;
+    config.memberLast = zone.memberLast;
+    config.pitchBendRangeChoice = rawParamInt(rawParams.mpePitchBendRange);
+    config.normalRoutingMode = rawParamInt(rawParams.normalMidiRoutingMode, 1);
+    config.normalMidiChannel = rawParamInt(rawParams.normalMidiChannel);
+    config.sendSetupMessages = rawParamBool(rawParams.mpeSendSetupMessages, true);
+    config.pitchMode = juce::jlimit(0, 1, rawParamInt(rawParams.mpePitchMode));
     return config;
 }
 
-void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples)
+void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
+                                            int numSamples,
+                                            bool outputEnabled)
 {
     const auto config = buildMpeConfig();
+    // Bound semantic work by both the fixed scratch capacity and the current
+    // audio deadline. Tiny host blocks (including pluginval's 1-sample case)
+    // must not be asked to emit a 64-voice MPE burst.
+    const int blockLifecycleBudget = juce::jlimit(1, midiLifecycleEventBudget,
+                                                   juce::jmax(1, numSamples));
+    int noteEventCount = 0;
 
-    const int maxEvents = (int) midiSourceScratch.size();
-    const int count = engine.drainMidiSourceEvents(midiSourceScratch.data(), maxEvents);
-
-    // Convert PartialEngine::MidiSourceEvent -> MpeMidiOutput::NoteEvent (trivial
-    // field copy + event-type enum mapping). midiNoteEventScratch mirrors the
-    // size of midiSourceScratch so the conversion is allocation-free.
-    for (int i = 0; i < count; ++i)
+    auto appendEvent = [this, &noteEventCount, outputEnabled]
+                       (const MpeMidiOutput::NoteEvent& event) noexcept
     {
-        const auto& src = midiSourceScratch[(size_t) i];
-        auto& dst = midiNoteEventScratch[(size_t) i];
-        switch (src.type)
+        if (outputEnabled && noteEventCount < (int) midiNoteEventScratch.size())
+            midiNoteEventScratch[(size_t) noteEventCount++] = event;
+    };
+
+    const bool reset = fingerRouter.takeResetRequest();
+    if (reset)
+    {
+        fingerRouter.discardPendingEvents();
+        bool hasHeldFinger = false;
+        for (int voice = 0; voice < (int) fingerMidiStates.size(); ++voice)
         {
-            case PartialEngine::MidiSourceEvent::NoteOff:     dst.type = MpeMidiOutput::NoteEvent::NoteOff; break;
-            case PartialEngine::MidiSourceEvent::Expression:  dst.type = MpeMidiOutput::NoteEvent::Expression; break;
-            case PartialEngine::MidiSourceEvent::AllNotesOff: dst.type = MpeMidiOutput::NoteEvent::AllNotesOff; break;
-            case PartialEngine::MidiSourceEvent::NoteOn:
-            default:                                          dst.type = MpeMidiOutput::NoteEvent::NoteOn; break;
+            const int sourceId = voice / OscFingerRouter::MAX_FINGERS;
+            const int finger = voice % OscFingerRouter::MAX_FINGERS;
+            const auto canonical = audienceModel.getFingerSnapshot(sourceId, finger);
+            auto& state = fingerMidiStates[(size_t) voice];
+            state = {};
+            state.x = canonical.x;
+            state.y = canonical.y;
+            state.active = canonical.active;
+            hasHeldFinger = hasHeldFinger || canonical.active;
         }
-        dst.sourceId    = src.sourceId;
-        dst.frequencyHz = src.frequencyHz;
-        dst.velocity    = src.velocity;
-        dst.x           = src.x;
-        dst.y           = src.y;
+        // A reset is a transport boundary, not deletion of authoritative OSC
+        // state. Rehydrate every held finger from the lock-free control ledger
+        // on following blocks. Events published after discard remain queued and
+        // will be applied normally, so clear/on races cannot lose a touch.
+        retriggerFingerMidi = hasHeldFinger;
+        fingerRetriggerCursor = 0;
+
+        MpeMidiOutput::NoteEvent allOff;
+        allOff.type = MpeMidiOutput::NoteEvent::AllNotesOff;
+        appendEvent(allOff);
     }
 
-    mpeOut.render(config, midiNoteEventScratch.data(), count, midiMessages, numSamples);
+    auto resolvePitch = [this] (float x, FingerMidiState& state) noexcept
+    {
+        if (lastPitchSystem == 1)
+        {
+            const auto pitch = atomicPitchMap.xToPitch(x);
+            state.pitchKey = pitch.step;
+            state.frequencyHz = pitch.isValid() ? pitch.frequencyHz : 261.6255653005986;
+        }
+        else
+        {
+            const auto pitch = pitchMap.xToPitch(x);
+            state.pitchKey = pitch.step;
+            state.frequencyHz = pitch.isValid() ? pitch.frequencyHz : 261.6255653005986;
+        }
+    };
+
+    auto appendFinger = [&] (MpeMidiOutput::NoteEvent::Type type,
+                             int sourceId, int finger,
+                             const FingerMidiState& state) noexcept
+    {
+        MpeMidiOutput::NoteEvent event;
+        event.type = type;
+        event.sourceId = sourceId * OscFingerRouter::MAX_FINGERS + finger;
+        event.participantId = sourceId;
+        event.frequencyHz = state.frequencyHz;
+        event.velocity = state.y;
+        event.x = state.x;
+        event.y = state.y;
+        appendEvent(event);
+    };
+
+    if (! reset)
+    {
+        const int count = fingerRouter.drain(fingerEventScratch.data(),
+                                             blockLifecycleBudget);
+        for (int i = 0; i < count; ++i)
+        {
+            const auto& event = fingerEventScratch[(size_t) i];
+            const int sourceId = (int) event.sourceId;
+            const int finger = (int) event.finger;
+            if (sourceId < 0 || sourceId >= OscFingerRouter::MAX_SOURCES
+                || finger < 0 || finger >= OscFingerRouter::MAX_FINGERS)
+                continue;
+
+            auto& state = fingerMidiStates[(size_t) (sourceId * OscFingerRouter::MAX_FINGERS + finger)];
+            switch ((OscFingerRouter::Event::Type) event.type)
+            {
+                case OscFingerRouter::Event::X:
+                {
+                    state.x = juce::jlimit(0.0f, 1.0f, event.value);
+                    if (state.active)
+                    {
+                        const int previousPitch = state.pitchKey;
+                        resolvePitch(state.x, state);
+                        appendFinger(state.pitchKey != previousPitch
+                                         ? MpeMidiOutput::NoteEvent::NoteOn
+                                         : MpeMidiOutput::NoteEvent::Expression,
+                                     sourceId, finger, state);
+                    }
+                    break;
+                }
+
+                case OscFingerRouter::Event::Y:
+                    state.y = juce::jlimit(0.0f, 1.0f, event.value);
+                    if (state.active)
+                        appendFinger(MpeMidiOutput::NoteEvent::Expression, sourceId, finger, state);
+                    break;
+
+                case OscFingerRouter::Event::On:
+                    if (! state.active)
+                    {
+                        state.active = true;
+                        resolvePitch(state.x, state);
+                        appendFinger(MpeMidiOutput::NoteEvent::NoteOn, sourceId, finger, state);
+                    }
+                    break;
+
+                case OscFingerRouter::Event::Off:
+                    if (state.active)
+                    {
+                        appendFinger(MpeMidiOutput::NoteEvent::NoteOff, sourceId, finger, state);
+                        state.active = false;
+                        state.pitchKey = -1;
+                    }
+                    break;
+            }
+        }
+    }
+
+    // MPE voice stealing and same-offset MidiBuffer insertion both become
+    // expensive for huge bursts. Keep one shared semantic budget for new OSC
+    // lifecycle work and held-finger rehydration. The router retains the rest
+    // in FIFO order for following callbacks, so NoteOn/Off order is preserved.
+    if (outputEnabled && retriggerFingerMidi && ! reset
+        && noteEventCount < blockLifecycleBudget)
+    {
+        const int remainingBudget = blockLifecycleBudget - noteEventCount;
+        int emitted = 0;
+        for (; fingerRetriggerCursor < (int) fingerMidiStates.size(); ++fingerRetriggerCursor)
+        {
+            auto& state = fingerMidiStates[(size_t) fingerRetriggerCursor];
+            if (! state.active)
+                continue;
+
+            resolvePitch(state.x, state);
+            appendFinger(MpeMidiOutput::NoteEvent::NoteOn,
+                         fingerRetriggerCursor / OscFingerRouter::MAX_FINGERS,
+                         fingerRetriggerCursor % OscFingerRouter::MAX_FINGERS,
+                         state);
+            if (++emitted >= remainingBudget)
+            {
+                ++fingerRetriggerCursor;
+                break;
+            }
+        }
+
+        if (fingerRetriggerCursor >= (int) fingerMidiStates.size())
+        {
+            retriggerFingerMidi = false;
+            fingerRetriggerCursor = 0;
+        }
+    }
+
+    if (outputEnabled && noteEventCount > 0)
+        mpeOut.render(config, midiNoteEventScratch.data(), noteEventCount,
+                      midiMessages, numSamples);
 }
 
 void AudienceProcessor::recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept
 {
-    if (midiMessages.isEmpty())
-        return;
-
+#if COSMIC_MIDI_DIAGNOSTICS
+    int visited = 0;
     for (const auto metadata : midiMessages)
     {
-        const auto message = metadata.getMessage();
-        const int rawSize = message.getRawDataSize();
-        if (rawSize <= 0 || rawSize > 3)
+        if (visited++ >= realtimeMidiInputEventLimit)
+            break;
+
+        const int size = metadata.numBytes;
+        if (size <= 0 || size > 3)
             continue;
 
-        const auto seq = incomingMidiDebugWriteCounter.fetch_add(1, std::memory_order_relaxed) + 1;
-        auto& slot = incomingMidiDebugEvents[(size_t) ((seq - 1) % midiDebugEventQueueSize)];
+        const auto sequence = incomingMidiDebugWriteCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+        auto& slot = incomingMidiDebugEvents[(size_t) ((sequence - 1) % midiDebugEventQueueSize)];
         slot.sequence.store(0, std::memory_order_release);
         slot.sampleOffset.store(metadata.samplePosition, std::memory_order_relaxed);
-        slot.size.store(rawSize, std::memory_order_relaxed);
-
-        const auto* raw = message.getRawData();
-        slot.byte0.store(rawSize > 0 ? raw[0] : 0, std::memory_order_relaxed);
-        slot.byte1.store(rawSize > 1 ? raw[1] : 0, std::memory_order_relaxed);
-        slot.byte2.store(rawSize > 2 ? raw[2] : 0, std::memory_order_relaxed);
-        slot.sequence.store(seq, std::memory_order_release);
+        slot.size.store(size, std::memory_order_relaxed);
+        const auto* bytes = metadata.data;
+        slot.byte0.store(size > 0 ? bytes[0] : 0, std::memory_order_relaxed);
+        slot.byte1.store(size > 1 ? bytes[1] : 0, std::memory_order_relaxed);
+        slot.byte2.store(size > 2 ? bytes[2] : 0, std::memory_order_relaxed);
+        slot.sequence.store(sequence, std::memory_order_release);
     }
+#else
+    juce::ignoreUnused(midiMessages);
+#endif
 }
 
-void AudienceProcessor::queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages) noexcept
+void AudienceProcessor::queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages,
+                                                   double blockStartTimeMs,
+                                                   int numSamples) noexcept
 {
-    if (midiOutputOptionIndex.load(std::memory_order_relaxed) <= 0 || midiMessages.isEmpty())
+    if (midiOutputOptionIndex.load(std::memory_order_relaxed) <= 0
+        || externalMidiProducerQuarantined.load(std::memory_order_acquire))
         return;
+
+    const double safeBlockStart = std::isfinite(blockStartTimeMs)
+                                ? blockStartTimeMs : juce::Time::getMillisecondCounterHiRes();
+    const double millisecondsPerSample = 1000.0 / currentSampleRate;
+    const int lastSample = juce::jmax(0, numSamples - 1);
 
     for (const auto metadata : midiMessages)
     {
-        const auto message = metadata.getMessage();
-        const int rawSize = message.getRawDataSize();
-        if (rawSize <= 0 || rawSize > 3)
+        if (externalMidiProducerQuarantined.load(std::memory_order_acquire))
+            return;
+
+        const int size = metadata.numBytes;
+        if (size <= 0 || size > 3)
             continue;
 
-        int s1, sz1, s2, sz2;
-        externalMidiFifo.prepareToWrite(1, s1, sz1, s2, sz2);
-        if (sz1 <= 0 && sz2 <= 0)
+        int start1, size1, start2, size2;
+        externalMidiFifo.prepareToWrite(1, start1, size1, start2, size2);
+        if (size1 <= 0 && size2 <= 0)
         {
             externalMidiDropped.fetch_add(1, std::memory_order_relaxed);
-            continue;
+            // Stop this producer before publishing the panic. The timer consumer
+            // can then discard the complete pre-overflow queue, send one ordered
+            // reset sweep, and only afterwards re-open the producer gate.
+            externalMidiProducerQuarantined.store(true, std::memory_order_release);
+            externalMidiPanicPending.store(true, std::memory_order_release);
+            return;
         }
 
-        const int slot = sz1 > 0 ? s1 : s2;
-        auto& packed = externalMidiEvents[(size_t) slot];
-        packed.size = (juce::uint8) rawSize;
-        const auto* raw = message.getRawData();
-        for (int i = 0; i < rawSize; ++i)
-            packed.data[i] = raw[i];
-
+        const int slotIndex = size1 > 0 ? start1 : start2;
+        auto& packed = externalMidiEvents[(size_t) slotIndex];
+        packed.size = (juce::uint8) size;
+        const auto* bytes = metadata.data;
+        for (int i = 0; i < size; ++i)
+            packed.data[i] = bytes[i];
+        const int sampleOffset = juce::jlimit(0, lastSample, metadata.samplePosition);
+        packed.dueTimeMs = safeBlockStart + (double) sampleOffset * millisecondsPerSample;
         externalMidiFifo.finishedWrite(1);
     }
 }
 
 void AudienceProcessor::drainExternalMidiOutputQueue()
 {
-    if (midiOutput == nullptr)
-        return;
+    const double nowMs = juce::Time::getMillisecondCounterHiRes();
+    for (;;)
+    {
+        int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+        externalMidiFifo.prepareToRead(1, start1, size1, start2, size2);
+        if (size1 <= 0 && size2 <= 0)
+            return;
 
+        const int slotIndex = size1 > 0 ? start1 : start2;
+        const auto& event = externalMidiEvents[(size_t) slotIndex];
+        if (event.dueTimeMs > nowMs)
+            return;
+
+        if (midiOutput != nullptr && event.size > 0)
+            midiOutput->sendMessageNow(juce::MidiMessage(event.data, (int) event.size));
+        externalMidiFifo.finishedRead(1);
+    }
+}
+
+void AudienceProcessor::discardExternalMidiOutputQueue() noexcept
+{
     const int available = externalMidiFifo.getNumReady();
     if (available <= 0)
         return;
 
-    int s1, sz1, s2, sz2;
-    externalMidiFifo.prepareToRead(available, s1, sz1, s2, sz2);
+    int start1 = 0, size1 = 0, start2 = 0, size2 = 0;
+    externalMidiFifo.prepareToRead(available, start1, size1, start2, size2);
+    externalMidiFifo.finishedRead(size1 + size2);
+}
 
-    auto sendRange = [this] (int start, int count)
+void AudienceProcessor::sendExternalResetSweep()
+{
+    if (midiOutput == nullptr)
+        return;
+
+    for (int channel = 1; channel <= 16; ++channel)
     {
-        for (int i = 0; i < count; ++i)
-        {
-            const auto& event = externalMidiEvents[(size_t) (start + i)];
-            if (event.size > 0)
-                midiOutput->sendMessageNow(juce::MidiMessage(event.data, (int) event.size));
-        }
-    };
-
-    sendRange(s1, sz1);
-    sendRange(s2, sz2);
-    externalMidiFifo.finishedRead(sz1 + sz2);
+        midiOutput->sendMessageNow(juce::MidiMessage::channelPressureChange(channel, 0));
+        midiOutput->sendMessageNow(juce::MidiMessage::pitchWheel(channel, 8192));
+        midiOutput->sendMessageNow(juce::MidiMessage::allNotesOff(channel));
+        midiOutput->sendMessageNow(juce::MidiMessage::allSoundOff(channel));
+    }
 }
 
 void AudienceProcessor::timerCallback()
 {
+    int restoredPort = 6060;
+    int restoredOutput = 0;
+    int restoredRouteKind = -1;
+    juce::String restoredDeviceIdentifier;
+    bool applyState = false;
+    {
+        const juce::ScopedLock lock(pendingStateLock);
+        applyState = pendingStateApply.exchange(false, std::memory_order_acquire);
+        if (applyState)
+        {
+            restoredPort = pendingUdpPort;
+            restoredOutput = pendingMidiOutputOption;
+            restoredRouteKind = pendingMidiOutputRouteKind;
+            restoredDeviceIdentifier = pendingMidiOutputDeviceIdentifier;
+        }
+    }
+
+    if (applyState)
+    {
+        setUdpPort(restoredPort);
+        restoreMidiOutputRoute(restoredRouteKind, restoredDeviceIdentifier, restoredOutput);
+    }
+}
+
+void AudienceProcessor::hiResTimerCallback()
+{
+    const bool panicPending = externalMidiPanicPending.exchange(false, std::memory_order_acq_rel);
+    const bool transportResetPending = externalTransportResetPending.exchange(false, std::memory_order_acq_rel);
+    if (panicPending || transportResetPending)
+    {
+        // Panic/transport boundaries invalidate every queued packet, including
+        // future-offset events. Discard before all-off so no pre-boundary NoteOn
+        // can be emitted on a later timer tick after the reset.
+        discardExternalMidiOutputQueue();
+        sendExternalResetSweep();
+        externalMidiProducerQuarantined.store(false, std::memory_order_release);
+        // Publish the retrigger only after reopening the gate. Otherwise an
+        // audio block could consume this flag while still quarantined, clear
+        // the held-finger retrigger, and leave the reset endpoint silent.
+        midiOutputRouteChangedPending.store(true, std::memory_order_release);
+        return;
+    }
+
     drainExternalMidiOutputQueue();
-
-    if (pendingStateApply.exchange(false, std::memory_order_acquire))
-    {
-        setUdpPort(pendingUdpPort);
-        setMidiOutputOptionIndex(pendingMidiOutputOption);
-        if (pendingLibraryName.isNotEmpty())
-            setCurrentLibrary(pendingLibraryName);
-    }
-}
-
-juce::String AudienceProcessor::getOutgoingMidiDebugText (int maxEvents) const
-{
-    auto noteName = [] (int midi)
-    {
-        static const char* names[] = { "C", "C#", "D", "D#", "E", "F", "F#",
-                                       "G", "G#", "A", "A#", "B" };
-        return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
-    };
-
-    auto ccName = [] (int cc)
-    {
-        switch (cc)
-        {
-            case 6:   return "Data MSB";
-            case 11:  return "Expression";
-            case 38:  return "Data LSB";
-            case 74:  return "Timbre";
-            case 100: return "RPN LSB";
-            case 101: return "RPN MSB";
-            case 120: return "All Sound Off";
-            case 123: return "All Notes Off";
-            default:  return "CC";
-        }
-    };
-
-    const int outputMode = rawParamInt(rawParams.audioMidiOutputMode);
-    const int midiType = rawParamInt(rawParams.midiOutputType);
-    const int bendRange = MpeMidiOutput::bendRangeFromChoice(rawParamInt(rawParams.mpePitchBendRange, 3));
-    static const char* outputModeNames[] { "Audio Only", "MIDI Only", "Audio + MIDI" };
-    static const char* midiTypeNames[] { "Off", "Normal MIDI", "MPE MIDI" };
-
-    juce::String s;
-    s << "outgoing MIDI / MPE\n";
-    s << "mode        : " << outputModeNames[juce::jlimit(0, 2, outputMode)]
-      << " / " << midiTypeNames[juce::jlimit(0, 2, midiType)] << "\n";
-    s << "destination : " << getMidiOutputStatus() << "\n";
-    s << "MPE bend    : " << bendRange << " st"
-      << "   active " << getActiveMpeVoices()
-      << " / available " << getAvailableMpeChannels() << "\n";
-    s << "----------------------------------------------\n";
-
-    const auto latest = mpeOut.getOutgoingDebugLatest();
-    const int count = juce::jlimit(0, MpeMidiOutput::kDebugEventQueueSize,
-                                   juce::jmin(maxEvents, (int) latest));
-    if (count <= 0)
-    {
-        s << "(no outgoing MIDI captured yet)\n";
-        return s;
-    }
-
-    const uint32_t firstSeq = latest - (uint32_t) count + 1;
-    for (uint32_t seq = firstSeq; seq <= latest; ++seq)
-    {
-        MpeMidiOutput::OutgoingDebugEvent slot;
-        if (! mpeOut.readOutgoingDebugSlot(seq, slot))
-            continue;
-
-        const int sample = slot.sampleOffset;
-        const int size = slot.size;
-        const int b0 = slot.b0 & 0xff;
-        const int b1 = slot.b1 & 0xff;
-        const int b2 = slot.b2 & 0xff;
-        if (size <= 0)
-            continue;
-
-        const int status = b0 & 0xf0;
-        const int channel = (b0 & 0x0f) + 1;
-        s << juce::String(seq).paddedLeft(' ', 5) << "  +"
-          << juce::String(sample).paddedLeft(' ', 4) << "  ch "
-          << juce::String(channel).paddedLeft(' ', 2) << "  ";
-
-        if (status == 0x90 && b2 > 0)
-        {
-            s << "Note On   " << noteName(b1).paddedRight(' ', 4)
-              << " note " << juce::String(b1).paddedLeft(' ', 3)
-              << " vel " << juce::String(b2).paddedLeft(' ', 3);
-        }
-        else if (status == 0x80 || (status == 0x90 && b2 == 0))
-        {
-            s << "Note Off  " << noteName(b1).paddedRight(' ', 4)
-              << " note " << juce::String(b1).paddedLeft(' ', 3);
-        }
-        else if (status == 0xb0)
-        {
-            s << juce::String(ccName(b1)).paddedRight(' ', 13)
-              << " " << juce::String(b1).paddedLeft(' ', 3)
-              << " = " << juce::String(b2).paddedLeft(' ', 3);
-        }
-        else if (status == 0xd0)
-        {
-            s << "Pressure  " << juce::String(b1).paddedLeft(' ', 3);
-        }
-        else if (status == 0xe0)
-        {
-            const int bend = b1 + (b2 << 7);
-            const double cents = ((double) bend - 8192.0) / 8192.0
-                               * (double) bendRange * 100.0;
-            s << "PitchBend " << juce::String(bend).paddedLeft(' ', 5)
-              << "  " << (cents >= 0.0 ? "+" : "")
-              << juce::String(cents, 1) << " ct";
-        }
-        else
-        {
-            s << "Raw";
-        }
-
-        s << "   [";
-        s << juce::String::toHexString(b0).paddedLeft('0', 2);
-        if (size > 1) s << " " << juce::String::toHexString(b1).paddedLeft('0', 2);
-        if (size > 2) s << " " << juce::String::toHexString(b2).paddedLeft('0', 2);
-        s << "]\n";
-    }
-
-    return s;
-}
-
-juce::String AudienceProcessor::getIncomingMidiDebugText (int maxEvents) const
-{
-    auto noteName = [] (int midi)
-    {
-        static const char* names[] = { "C", "C#", "D", "D#", "E", "F", "F#",
-                                       "G", "G#", "A", "A#", "B" };
-        return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
-    };
-
-    auto ccName = [] (int cc)
-    {
-        switch (cc)
-        {
-            case 11:  return "Expression";
-            case 64:  return "Sustain";
-            case 74:  return "Timbre";
-            case 120: return "All Sound Off";
-            case 123: return "All Notes Off";
-            default:  return "CC";
-        }
-    };
-
-    juce::String s;
-    s << "incoming MIDI\n";
-    s << "input mode  : " << getExternalMidiPitchModeName() << "\n";
-    s << "active keys : " << getActiveExternalMidiKeys()
-      << "   last ch " << getLastExternalMidiChannel()
-      << " note " << getLastExternalMidiNote() << "\n";
-    if (rawParamInt(rawParams.midiOutputType) == 2)
-    {
-        // B8: the guarded member range follows the active MPE zone (Lower 2..16,
-        // Upper 1..15), matching the channels processIncomingMidiKeyboard ignores.
-        const auto zone = zoneChannels(rawParamInt(rawParams.mpeZone, 0));
-        const int first = juce::jlimit(1, 16, zone.memberFirst);
-        const int last = juce::jlimit(first, 16, zone.memberLast);
-        s << "guard       : ignoring local MPE member input ch "
-          << first << "-" << last << "\n";
-    }
-    s << "----------------------------------------------\n";
-
-    const auto latest = incomingMidiDebugWriteCounter.load(std::memory_order_acquire);
-    const int count = juce::jlimit(0, midiDebugEventQueueSize,
-                                   juce::jmin(maxEvents, (int) latest));
-    if (count <= 0)
-    {
-        s << "(no incoming MIDI captured yet)\n";
-        return s;
-    }
-
-    const uint32_t firstSeq = latest - (uint32_t) count + 1;
-    for (uint32_t seq = firstSeq; seq <= latest; ++seq)
-    {
-        const auto& slot = incomingMidiDebugEvents[(size_t) ((seq - 1) % midiDebugEventQueueSize)];
-        const auto storedSeq = slot.sequence.load(std::memory_order_acquire);
-        if (storedSeq != seq)
-            continue;
-
-        const int sample = slot.sampleOffset.load(std::memory_order_relaxed);
-        const int size = slot.size.load(std::memory_order_relaxed);
-        const int b0 = slot.byte0.load(std::memory_order_relaxed) & 0xff;
-        const int b1 = slot.byte1.load(std::memory_order_relaxed) & 0xff;
-        const int b2 = slot.byte2.load(std::memory_order_relaxed) & 0xff;
-        if (size <= 0)
-            continue;
-
-        const int status = b0 & 0xf0;
-        const int channel = (b0 & 0x0f) + 1;
-        s << juce::String(seq).paddedLeft(' ', 5) << "  +"
-          << juce::String(sample).paddedLeft(' ', 4) << "  ch "
-          << juce::String(channel).paddedLeft(' ', 2) << "  ";
-
-        if (status == 0x90 && b2 > 0)
-        {
-            s << "Note On   " << noteName(b1).paddedRight(' ', 4)
-              << " note " << juce::String(b1).paddedLeft(' ', 3)
-              << " vel " << juce::String(b2).paddedLeft(' ', 3);
-        }
-        else if (status == 0x80 || (status == 0x90 && b2 == 0))
-        {
-            s << "Note Off  " << noteName(b1).paddedRight(' ', 4)
-              << " note " << juce::String(b1).paddedLeft(' ', 3);
-        }
-        else if (status == 0xb0)
-        {
-            s << juce::String(ccName(b1)).paddedRight(' ', 13)
-              << " " << juce::String(b1).paddedLeft(' ', 3)
-              << " = " << juce::String(b2).paddedLeft(' ', 3);
-        }
-        else if (status == 0xd0)
-        {
-            s << "Pressure  " << juce::String(b1).paddedLeft(' ', 3);
-        }
-        else if (status == 0xe0)
-        {
-            const int bend = b1 + (b2 << 7);
-            s << "PitchBend " << juce::String(bend).paddedLeft(' ', 5);
-        }
-        else
-        {
-            s << "Raw";
-        }
-
-        s << "   [";
-        s << juce::String::toHexString(b0).paddedLeft('0', 2);
-        if (size > 1) s << " " << juce::String::toHexString(b1).paddedLeft('0', 2);
-        if (size > 2) s << " " << juce::String::toHexString(b2).paddedLeft('0', 2);
-        s << "]\n";
-    }
-
-    return s;
-}
-
-juce::String AudienceProcessor::getMidiStateDebugText() const
-{
-    auto noteName = [] (int midi)
-    {
-        static const char* names[] = { "C", "C#", "D", "D#", "E", "F", "F#",
-                                       "G", "G#", "A", "A#", "B" };
-        if (midi < 0)
-            return juce::String("-");
-        return juce::String(names[((midi % 12) + 12) % 12]) + juce::String(midi / 12 - 1);
-    };
-
-    juce::String s;
-    s << "debug report\n";
-    s << "--------------------------------------------------\n";
-    s << "external MIDI mode : " << getExternalMidiPitchModeName() << "\n";
-    s << "active input keys  : " << getActiveExternalMidiKeys() << "\n";
-    s << "engine voices      : " << engine.getActiveVoiceCount()
-      << " / " << engine.getVoiceLimit() << "\n";
-    s << "MPE voices         : " << getActiveMpeVoices()
-      << " active / " << getAvailableMpeChannels() << " available\n";
-    s << "MIDI output        : " << getMidiOutputStatus() << "\n";
-    // B7: surface the external-MIDI FIFO overflow counter so a full
-    // host-output queue (dropped outgoing messages) is visible in the report.
-    s << "MIDI out dropped   : "
-      << (int) externalMidiDropped.load(std::memory_order_relaxed) << "\n";
-    s << "\nactive keyboard slots\n";
-
-    int listed = 0;
-    for (int slot = 0; slot < PartialEngine::MAX_KEYBOARD_SLOTS; ++slot)
-    {
-        const int key = keyboardDebugKeys[(size_t) slot].load(std::memory_order_relaxed);
-        if (key < 0)
-            continue;
-
-        const int ch = key / 128 + 1;
-        const int note = key % 128;
-        s << "  slot " << juce::String(slot).paddedLeft(' ', 2)
-          << "  input ch " << juce::String(ch).paddedLeft(' ', 2)
-          << "  " << noteName(note).paddedRight(' ', 4)
-          << " note " << note << "\n";
-        if (++listed >= 24)
-        {
-            s << "  ...\n";
-            break;
-        }
-    }
-    if (listed == 0)
-        s << "  (none)\n";
-
-    s << "\nactive MIDI/MPE output voices\n";
-    listed = 0;
-    for (int voiceIndex = 0; voiceIndex < mpeOut.getVoiceDebugCount(); ++voiceIndex)
-    {
-        const auto voice = mpeOut.getVoiceDebugSnapshot(voiceIndex);
-        if (voice.active == 0)
-            continue;
-
-        const int sourceId = voice.sourceId;
-        const int ch = voice.channel;
-        const int note = voice.note;
-        const int bend = voice.pitchBend;
-        const int age = voice.age;
-        s << "  src " << juce::String(sourceId).paddedLeft(' ', 4)
-          << "  ch " << juce::String(ch).paddedLeft(' ', 2)
-          << "  " << noteName(note).paddedRight(' ', 4)
-          << " note " << juce::String(note).paddedLeft(' ', 3)
-          << "  pb " << juce::String(bend).paddedLeft(' ', 5)
-          << "  age " << age << "\n";
-        if (++listed >= 32)
-        {
-            s << "  ...\n";
-            break;
-        }
-    }
-    if (listed == 0)
-        s << "  (none)\n";
-
-    return s;
-}
-
-juce::String AudienceProcessor::getMidiDebugReportText() const
-{
-    juce::String s;
-    s << getMidiStateDebugText() << "\n";
-    s << getIncomingMidiDebugText(96) << "\n";
-    s << getOutgoingMidiDebugText(96);
-    return s;
 }
 
 juce::StringArray AudienceProcessor::getMidiOutputOptions() const
 {
     juce::StringArray options;
     options.add("Host MIDI Output");
-    options.add("Virtual: SpektraSynth MIDI Out");
-
+    options.add("Virtual: " + getVirtualMidiPortName());
     for (const auto& device : juce::MidiOutput::getAvailableDevices())
         options.add(device.name);
-
     return options;
+}
+
+juce::String AudienceProcessor::getVirtualMidiPortName() const
+{
+    return "Cosmic Microwave " + juce::String(getUdpPort()) + " Out";
+}
+
+juce::String AudienceProcessor::getAtomicElementName (int index) const
+{
+    return juce::String::fromUTF8(AtomicScaleCatalog::elementName(index));
+}
+
+juce::String AudienceProcessor::getAtomicElementSymbol (int index) const
+{
+    return juce::String::fromUTF8(AtomicScaleCatalog::elementSymbol(index));
+}
+
+juce::String AudienceProcessor::getAtomicModeName (int index) const
+{
+    return juce::String::fromUTF8(AtomicScaleCatalog::modeName(index));
+}
+
+int AudienceProcessor::getSelectedAtomicDegreeCount() const noexcept
+{
+    const int element = rawParamInt(rawParams.spectralElement, 1);
+    const int mode = rawParamInt(rawParams.atomicScaleMode, 1);
+    return AtomicScaleCatalog::instance().getDegreeCount(element, mode);
+}
+
+double AudienceProcessor::getSelectedAtomicReferenceWavelengthNm() const noexcept
+{
+    const int element = rawParamInt(rawParams.spectralElement, 1);
+    const int mode = rawParamInt(rawParams.atomicScaleMode, 1);
+    return AtomicScaleCatalog::instance().getReferenceWavelengthNm(element, mode);
 }
 
 juce::String AudienceProcessor::getMidiOutputStatus() const
@@ -1371,142 +874,258 @@ juce::String AudienceProcessor::getMidiOutputStatus() const
 juce::String AudienceProcessor::getMidiOutputDescription() const
 {
     if (midiOutputOptionIndex.load(std::memory_order_relaxed) == 0)
-        return juce::String("Host MIDI Output")
-             + (wrapperType == wrapperType_VST3 ? " | route from this plugin track in Ableton" : " | plugin MIDI bus");
+        return "Host MIDI Output | use the port output for channel-separated Ableton routing";
+    return midiOutputStatus + " | host MIDI output also remains available";
+}
 
-    return midiOutputStatus + " | host MIDI output remains available";
+int AudienceProcessor::getResolvedMidiOutputOptionIndex()
+{
+    int routeKind = 0;
+    juce::String deviceIdentifier;
+    {
+        const juce::ScopedLock lock(pendingStateLock);
+        routeKind = midiOutputRouteKind;
+        deviceIdentifier = midiOutputDeviceIdentifier;
+    }
+
+    if (routeKind == 0)
+    {
+        midiOutputOptionIndex.store(0, std::memory_order_relaxed);
+        return 0;
+    }
+    if (routeKind == 1)
+    {
+        midiOutputOptionIndex.store(1, std::memory_order_relaxed);
+        return 1;
+    }
+
+    if (routeKind == 2 && deviceIdentifier.isNotEmpty())
+    {
+        const auto devices = juce::MidiOutput::getAvailableDevices();
+        for (int i = 0; i < devices.size(); ++i)
+            if (devices[i].identifier == deviceIdentifier)
+            {
+                midiOutputOptionIndex.store(i + 2, std::memory_order_relaxed);
+                return i + 2;
+            }
+    }
+
+    // Do not let a stale numeric device index highlight an unrelated endpoint.
+    return -1;
 }
 
 void AudienceProcessor::setMidiOutputOptionIndex (int index)
 {
-    drainExternalMidiOutputQueue();
-    sendImmediateAllNotesOffToExternal();
+    midiOutputRouteRevision.fetch_add(1, std::memory_order_release);
+    juce::HighResolutionTimer::stopTimer();
+    ScopedProcessorSuspension processingGuard(*this);
+    discardExternalMidiOutputQueue();
+    sendImmediateAllNotesOffToExternal(true);
+    externalMidiFifo.reset();
+    externalMidiPanicPending.store(false, std::memory_order_release);
+    externalMidiProducerQuarantined.store(false, std::memory_order_release);
+    externalTransportResetPending.store(false, std::memory_order_release);
     midiOutput.reset();
     midiOutputOptionIndex.store(juce::jmax(0, index), std::memory_order_relaxed);
+    midiOutputRouteChangedPending.store(true, std::memory_order_release);
 
-    if (midiOutputOptionIndex.load(std::memory_order_relaxed) == 0)
+    if (index <= 0)
     {
+        midiOutputOptionIndex.store(0, std::memory_order_relaxed);
         midiOutputStatus = "Host MIDI Output";
+        const juce::ScopedLock lock(pendingStateLock);
+        midiOutputRouteKind = 0;
+        midiOutputDeviceIdentifier.clear();
         return;
     }
 
-    if (midiOutputOptionIndex.load(std::memory_order_relaxed) == 1)
+    if (index == 1)
     {
-        const juce::String portName = instanceId <= 1
-            ? "SpektraSynth MIDI Out"
-            : "SpektraSynth MIDI Out " + juce::String(instanceId);
-
+        const auto portName = getVirtualMidiPortName();
         midiOutput = juce::MidiOutput::createNewDevice(portName);
         if (midiOutput != nullptr)
         {
             midiOutputStatus = "Virtual port: " + portName;
+            const juce::ScopedLock lock(pendingStateLock);
+            midiOutputRouteKind = 1;
+            midiOutputDeviceIdentifier.clear();
+            juce::HighResolutionTimer::startTimer(2);
         }
         else
         {
             midiOutputStatus = "Virtual MIDI port unavailable";
             midiOutputOptionIndex.store(0, std::memory_order_relaxed);
+            const juce::ScopedLock lock(pendingStateLock);
+            midiOutputRouteKind = 0;
+            midiOutputDeviceIdentifier.clear();
         }
         return;
     }
 
     const auto devices = juce::MidiOutput::getAvailableDevices();
-    const int deviceIndex = midiOutputOptionIndex.load(std::memory_order_relaxed) - 2;
+    const int deviceIndex = index - 2;
     if (deviceIndex >= 0 && deviceIndex < devices.size())
     {
         midiOutput = juce::MidiOutput::openDevice(devices[deviceIndex].identifier);
         if (midiOutput != nullptr)
         {
             midiOutputStatus = "MIDI Output: " + devices[deviceIndex].name;
+            const juce::ScopedLock lock(pendingStateLock);
+            midiOutputRouteKind = 2;
+            midiOutputDeviceIdentifier = devices[deviceIndex].identifier;
+            juce::HighResolutionTimer::startTimer(2);
         }
         else
         {
             midiOutputStatus = "Failed to open MIDI output";
             midiOutputOptionIndex.store(0, std::memory_order_relaxed);
+            const juce::ScopedLock lock(pendingStateLock);
+            midiOutputRouteKind = 0;
+            midiOutputDeviceIdentifier.clear();
         }
     }
     else
     {
         midiOutputStatus = "MIDI output device not found";
         midiOutputOptionIndex.store(0, std::memory_order_relaxed);
+        const juce::ScopedLock lock(pendingStateLock);
+        midiOutputRouteKind = 0;
+        midiOutputDeviceIdentifier.clear();
     }
 }
 
-void AudienceProcessor::sendImmediateAllNotesOffToExternal()
+void AudienceProcessor::restoreMidiOutputRoute (int routeKind,
+                                                 const juce::String& deviceIdentifier,
+                                                 int legacyOptionIndex)
+{
+    if (routeKind < 0)
+    {
+        setMidiOutputOptionIndex(legacyOptionIndex);
+        return;
+    }
+
+    if (routeKind == 0)
+    {
+        setMidiOutputOptionIndex(0);
+        return;
+    }
+
+    if (routeKind == 1)
+    {
+        setMidiOutputOptionIndex(1);
+        return;
+    }
+
+    if (routeKind == 2 && deviceIdentifier.isNotEmpty())
+    {
+        const auto devices = juce::MidiOutput::getAvailableDevices();
+        for (int i = 0; i < devices.size(); ++i)
+        {
+            if (devices[i].identifier == deviceIdentifier)
+            {
+                setMidiOutputOptionIndex(i + 2);
+                return;
+            }
+        }
+    }
+
+    setMidiOutputOptionIndex(0);
+    midiOutputStatus = "Saved MIDI output is unavailable; using Host MIDI Output";
+}
+
+void AudienceProcessor::sendImmediateAllNotesOffToExternal (bool processingAlreadySuspended)
 {
     if (midiOutput == nullptr || midiOutputOptionIndex.load(std::memory_order_relaxed) == 0)
         return;
 
-    // This runs on the message thread but reads (getActiveNoteOffs) and then
-    // mutates (reset) the non-atomic MPE voice state that the audio thread also
-    // touches in mpeOut.render(). Halt the audio thread for the whole read+mutate
-    // window so the two threads never touch that state concurrently - same pattern
-    // as setSampleDirectory wrapping engine.loadSampleLibrary. None of the callers
-    // (setMidiOutputOptionIndex, panic, closeMidiOutput, the destructor, the
-    // setStateInformation timer path) are themselves inside a suspendProcessing
-    // block, so this does not nest / resume the audio thread prematurely.
-    suspendProcessing(true);
+    const bool shouldResume = ! processingAlreadySuspended && ! isSuspended();
+    if (shouldResume)
+        suspendProcessing(true);
 
-    for (const auto& noteOff : mpeOut.getActiveNoteOffs())
-        midiOutput->sendMessageNow(juce::MidiMessage::noteOff(noteOff.channel, noteOff.note));
-
-    for (int ch = 1; ch <= 16; ++ch)
+    // A fixed channel sweep is the immediate panic primitive. Enumerating every
+    // semantic source/finger voice can enqueue thousands of duplicate NoteOffs
+    // ahead of the actual CC120/123 messages on a slow physical MIDI link.
+    for (int channel = 1; channel <= 16; ++channel)
     {
-        midiOutput->sendMessageNow(juce::MidiMessage::channelPressureChange(ch, 0));
-        midiOutput->sendMessageNow(juce::MidiMessage::pitchWheel(ch, 8192));
-        midiOutput->sendMessageNow(juce::MidiMessage::allNotesOff(ch));
-        midiOutput->sendMessageNow(juce::MidiMessage::allSoundOff(ch));
+        midiOutput->sendMessageNow(juce::MidiMessage::channelPressureChange(channel, 0));
+        midiOutput->sendMessageNow(juce::MidiMessage::pitchWheel(channel, 8192));
+        midiOutput->sendMessageNow(juce::MidiMessage::allNotesOff(channel));
+        midiOutput->sendMessageNow(juce::MidiMessage::allSoundOff(channel));
     }
-
     mpeOut.reset();
 
-    suspendProcessing(false);
+    if (shouldResume)
+        suspendProcessing(false);
 }
 
 void AudienceProcessor::closeMidiOutput()
 {
+    midiOutputRouteRevision.fetch_add(1, std::memory_order_release);
+    juce::HighResolutionTimer::stopTimer();
     sendImmediateAllNotesOffToExternal();
     midiOutput.reset();
     midiOutputOptionIndex.store(0, std::memory_order_relaxed);
     midiOutputStatus = "Host MIDI Output";
-}
-
-void AudienceProcessor::setSampleDirectory (const juce::File& dir)
-{
-    sampleDir = dir;
-    suspendProcessing(true);
-    engine.loadSampleLibrary(dir);
-    suspendProcessing(false);
-    librariesStatus = engine.getLibrary().getStatus();
+    const juce::ScopedLock lock(pendingStateLock);
+    midiOutputRouteKind = 0;
+    midiOutputDeviceIdentifier.clear();
 }
 
 void AudienceProcessor::setUdpPort (int port)
 {
-    udpPort = port;
-    osc.start(port);
-    // B25: take the UI-visible status straight from OscBridge::oscStatus() so the
-    // shared-UDP-port "PORT FULL" condition (when the 16-client cap is hit and this
-    // instance receives no OSC) becomes visible in the DebugPanel, instead of the
-    // old text which only distinguished bound vs. bind-failed. The bridge string
-    // already covers Listening / FAILED-to-bind / PORT FULL; connection logic is
-    // unchanged.
+    const int safePort = juce::jlimit(1, 65535, port);
+    const int previousPort = getUdpPort();
+    if (safePort == previousPort && osc.isReceiving())
+    {
+        oscStatus = osc.oscStatus();
+        return;
+    }
+
+    const bool reopenVirtualPort = midiOutputOptionIndex.load(std::memory_order_relaxed) == 1;
+    const bool needsReset = osc.isRunning() || safePort != previousPort;
+    osc.stop();
+    if (needsReset)
+        panic();
+    udpPort.store(safePort, std::memory_order_relaxed);
+    osc.start(safePort);
     oscStatus = osc.oscStatus();
+
+    if (reopenVirtualPort)
+        setMidiOutputOptionIndex(1);
 }
 
 void AudienceProcessor::panic()
 {
+    juce::HighResolutionTimer::stopTimer();
+    ScopedProcessorSuspension processingGuard(*this);
     simulator.clearSilently();
-    releaseAllMidiKeyboardNotes();
-    engine.requestClearAllSeats();
-    sendImmediateAllNotesOffToExternal();
+    releaseAllIncomingMidiNotes();
+    audienceModel.clear();
+    // Drop packets produced before the panic while the audio producer is
+    // quiescent. Otherwise an old NoteOn could be drained after the immediate
+    // all-off sweep and recreate a stuck external note.
+    externalMidiFifo.reset();
+    externalMidiPanicPending.store(false, std::memory_order_release);
+    externalMidiProducerQuarantined.store(false, std::memory_order_release);
+    externalTransportResetPending.store(false, std::memory_order_release);
+    sendImmediateAllNotesOffToExternal(true);
+    if (midiOutput != nullptr && midiOutputOptionIndex.load(std::memory_order_relaxed) > 0)
+        juce::HighResolutionTimer::startTimer(2);
 }
 
-void AudienceProcessor::getStateInformation (juce::MemoryBlock& dest)
+void AudienceProcessor::getStateInformation (juce::MemoryBlock& destination)
 {
     auto state = apvts.copyState();
-    state.setProperty("udpPort", udpPort, nullptr);
-    state.setProperty("currentLibrary", currentLibraryName, nullptr);
+    state.setProperty("udpPort", getUdpPort(), nullptr);
     state.setProperty("midiOutputOption", midiOutputOptionIndex.load(std::memory_order_relaxed), nullptr);
-    if (auto xml = state.createXml()) copyXmlToBinary(*xml, dest);
+    {
+        const juce::ScopedLock lock(pendingStateLock);
+        state.setProperty("midiOutputRouteKind", midiOutputRouteKind, nullptr);
+        state.setProperty("midiOutputDeviceIdentifier", midiOutputDeviceIdentifier, nullptr);
+    }
+    state.setProperty("cosmicMicrowaveSchema", CosmicStateMigration::currentSchema, nullptr);
+    if (auto xml = state.createXml())
+        copyXmlToBinary(*xml, destination);
 }
 
 void AudienceProcessor::setStateInformation (const void* data, int size)
@@ -1514,19 +1133,91 @@ void AudienceProcessor::setStateInformation (const void* data, int size)
     if (auto xml = getXmlFromBinary(data, size))
     {
         auto state = juce::ValueTree::fromXml(*xml);
-        if (state.isValid())
-        {
-            apvts.replaceState(state);
+        if (! state.isValid())
+            return;
 
-            // Defer socket bind / MIDI device open / sample-library disk I/O to the
-            // message-thread timer. The host may call this on a background thread or
-            // before prepareToPlay, where doing that work inline can deadlock or race.
-            pendingUdpPort          = (int) state.getProperty("udpPort", 6060);
-            pendingMidiOutputOption = (int) state.getProperty("midiOutputOption", 0);
-            pendingLibraryName      = state.getProperty("currentLibrary").toString();
-            pendingStateApply.store(true, std::memory_order_release);
-        }
+        CosmicStateMigration::migrate(state);
+
+        const juce::ScopedLock lock(pendingStateLock);
+        apvts.replaceState(state);
+        pendingUdpPort = (int) state.getProperty("udpPort", 6060);
+        pendingMidiOutputOption = (int) state.getProperty("midiOutputOption", 0);
+        pendingMidiOutputRouteKind = (int) state.getProperty("midiOutputRouteKind", -1);
+        pendingMidiOutputDeviceIdentifier = state.getProperty("midiOutputDeviceIdentifier").toString();
+        pendingStateApply.store(true, std::memory_order_release);
     }
+}
+
+juce::String AudienceProcessor::getOutgoingMidiDebugText (int maxEvents) const
+{
+    juce::String text;
+    text << "outgoing MIDI\n";
+    text << "destination : " << getMidiOutputStatus() << "\n";
+    text << "notes sent  : " << getMidiNotesSent() << "\n";
+    text << "active MPE  : " << getActiveMpeVoices() << "\n";
+    const auto latest = mpeOut.getOutgoingDebugLatest();
+    const int count = juce::jlimit(0, MpeMidiOutput::kDebugEventQueueSize,
+                                   juce::jmin(maxEvents, (int) latest));
+    for (uint32_t sequence = latest - (uint32_t) count + 1; count > 0 && sequence <= latest; ++sequence)
+    {
+        MpeMidiOutput::OutgoingDebugEvent event;
+        if (! mpeOut.readOutgoingDebugSlot(sequence, event))
+            continue;
+        text << juce::String(sequence).paddedLeft(' ', 5) << "  ["
+             << juce::String::toHexString(event.b0 & 0xff).paddedLeft('0', 2);
+        if (event.size > 1) text << " " << juce::String::toHexString(event.b1 & 0xff).paddedLeft('0', 2);
+        if (event.size > 2) text << " " << juce::String::toHexString(event.b2 & 0xff).paddedLeft('0', 2);
+        text << "]\n";
+    }
+    return text;
+}
+
+juce::String AudienceProcessor::getIncomingMidiDebugText (int maxEvents) const
+{
+    juce::String text;
+    text << "incoming MIDI / thru\n";
+    text << "active keys : " << getActiveExternalMidiKeys() << "\n";
+#if COSMIC_MIDI_DIAGNOSTICS
+    const auto latest = incomingMidiDebugWriteCounter.load(std::memory_order_acquire);
+    const int count = juce::jlimit(0, midiDebugEventQueueSize,
+                                   juce::jmin(maxEvents, (int) latest));
+    for (uint32_t sequence = latest - (uint32_t) count + 1; count > 0 && sequence <= latest; ++sequence)
+    {
+        const auto& event = incomingMidiDebugEvents[(size_t) ((sequence - 1) % midiDebugEventQueueSize)];
+        if (event.sequence.load(std::memory_order_acquire) != sequence)
+            continue;
+        const int eventSize = event.size.load(std::memory_order_relaxed);
+        text << juce::String(sequence).paddedLeft(' ', 5) << "  ["
+             << juce::String::toHexString(event.byte0.load(std::memory_order_relaxed) & 0xff).paddedLeft('0', 2);
+        if (eventSize > 1) text << " " << juce::String::toHexString(event.byte1.load(std::memory_order_relaxed) & 0xff).paddedLeft('0', 2);
+        if (eventSize > 2) text << " " << juce::String::toHexString(event.byte2.load(std::memory_order_relaxed) & 0xff).paddedLeft('0', 2);
+        text << "]\n";
+    }
+#else
+    juce::ignoreUnused(maxEvents);
+    text << "packet diagnostics disabled in this build\n";
+#endif
+    return text;
+}
+
+juce::String AudienceProcessor::getMidiStateDebugText() const
+{
+    juce::String text;
+    text << "Cosmic Microwave MIDI router\n";
+    text << "OSC            : " << osc.oscStatus() << "\n";
+    text << "UDP            : " << getUdpPort() << "\n";
+    text << "active sources : " << audienceModel.getActiveSourceCount() << "\n";
+    text << "active fingers : " << audienceModel.getActiveFingerCount() << "\n";
+    text << "MIDI output    : " << getMidiOutputStatus() << "\n";
+    text << "dropped output : " << (int) externalMidiDropped.load(std::memory_order_relaxed) << "\n";
+    return text;
+}
+
+juce::String AudienceProcessor::getMidiDebugReportText() const
+{
+    return getMidiStateDebugText() + "\n"
+         + getIncomingMidiDebugText(96) + "\n"
+         + getOutgoingMidiDebugText(96);
 }
 
 juce::AudioProcessorEditor* AudienceProcessor::createEditor()

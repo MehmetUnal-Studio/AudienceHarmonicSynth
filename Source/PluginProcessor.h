@@ -1,44 +1,25 @@
 #pragma once
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <memory>
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_audio_processors/juce_audio_processors.h>
-#include "PartialEngine.h"
-#include "MidiPitch.h"
+#include "AtomicScaleCatalog.h"
+#include "AtomicScaleMap.h"
+#include "MidiAudienceModel.h"
+#include "MidiPitchMap.h"
 #include "MpeMidiOutput.h"
 #include "OscBridge.h"
+#include "OscFingerRouter.h"
 #include "Simulator.h"
 
-class DualSeatRouter : public SeatEventSink
-{
-public:
-    explicit DualSeatRouter (PartialEngine& audio)
-        : audioEngine(audio)
-    {}
-
-    void setX (int row, int col, float xNorm) override
-    {
-        audioEngine.setX(row, col, xNorm);
-    }
-
-    void setY (int row, int col, float yNorm) override
-    {
-        audioEngine.setY(row, col, yNorm);
-    }
-
-    void setOn (int row, int col, bool on) override
-    {
-        audioEngine.setOn(row, col, on);
-    }
-
-private:
-    PartialEngine& audioEngine;
-};
-
+// Cosmic Microwave is intentionally a silent instrument shell: keeping the
+// existing stereo instrument contract preserves Ableton placement and VST3
+// session identity, while all runtime output is MIDI.
 class AudienceProcessor : public juce::AudioProcessor,
-                          private juce::Timer
+                          private juce::Timer,
+                          private juce::HighResolutionTimer
 {
 public:
     AudienceProcessor();
@@ -53,7 +34,7 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return JucePlugin_Name; }
-    bool acceptsMidi()  const override
+    bool acceptsMidi() const override
     {
        #if JUCE_ANDROID
         return false;
@@ -74,80 +55,112 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
-    // exposed to the editor
+    // Message-thread/editor surface.
     juce::AudioProcessorValueTreeState apvts;
-    PartialEngine engine;
-    DualSeatRouter seatRouter;
-    OscBridge     osc;
-    Simulator     simulator;
+    OscFingerRouter fingerRouter;
+    MidiAudienceModel audienceModel;
+    OscBridge osc;
+    Simulator simulator;
 
-    int  udpPort = 6060;
+    int getUdpPort() const noexcept { return udpPort.load(std::memory_order_relaxed); }
     void setUdpPort (int port);
     juce::String oscStatus;
-    void setMuted (bool shouldMute) noexcept { muted.store(shouldMute); }
-    bool isMuted() const noexcept            { return muted.load(); }
     void panic();
+
     int getMidiNotesSent() const noexcept    { return mpeOut.getMidiNotesSent(); }
     int getActiveMpeVoices() const noexcept  { return mpeOut.getActiveMpeVoices(); }
     int getAvailableMpeChannels() const noexcept { return mpeOut.getAvailableMpeChannels(); }
     int getActiveExternalMidiKeys() const noexcept { return activeExternalMidiKeys.load(std::memory_order_relaxed); }
     int getLastExternalMidiNote() const noexcept { return lastExternalMidiNote.load(std::memory_order_relaxed); }
     int getLastExternalMidiChannel() const noexcept { return lastExternalMidiChannel.load(std::memory_order_relaxed); }
-    juce::String getExternalMidiPitchModeName() const;
+    juce::String getExternalMidiPitchModeName() const { return "MIDI Thru"; }
     juce::String getOutgoingMidiDebugText (int maxEvents = 96) const;
     juce::String getIncomingMidiDebugText (int maxEvents = 96) const;
     juce::String getMidiStateDebugText() const;
     juce::String getMidiDebugReportText() const;
+
     juce::StringArray getMidiOutputOptions() const;
     juce::String getMidiOutputStatus() const;
     juce::String getMidiOutputDescription() const;
+    juce::String getVirtualMidiPortName() const;
+    juce::String getAtomicElementName (int index) const;
+    juce::String getAtomicElementSymbol (int index) const;
+    juce::String getAtomicModeName (int index) const;
+    int getSelectedAtomicDegreeCount() const noexcept;
+    double getSelectedAtomicReferenceWavelengthNm() const noexcept;
     int getMidiOutputOptionIndex() const noexcept { return midiOutputOptionIndex.load(std::memory_order_relaxed); }
+    int getResolvedMidiOutputOptionIndex();
+    uint32_t getMidiOutputRouteRevision() const noexcept { return midiOutputRouteRevision.load(std::memory_order_acquire); }
     void setMidiOutputOptionIndex (int index);
-
-    juce::File   sampleDir;          // currently-loaded library folder
-    juce::File   libraryRoot;        // parent: Samples/
-    juce::String librariesStatus;
-    juce::String currentLibraryName;
-
-    juce::StringArray getAvailableLibraries() const;
-    void              setSampleDirectory (const juce::File& dir);
-    void              setCurrentLibrary  (const juce::String& libraryName);
-    void              rescanLibraryRoot();
 
 private:
     void timerCallback() override;
+    void hiResTimerCallback() override;
     juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void cacheParameterPointers();
-    void pullParams();
-    void processIncomingMidiKeyboard (const juce::MidiBuffer&);
-    void releaseAllMidiKeyboardNotes();
-    void renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples);
+    void updatePitchMap();
+    bool processIncomingMidi (const juce::MidiBuffer&);
+    void releaseAllIncomingMidiNotes() noexcept;
+    void renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples, bool outputEnabled);
     MpeMidiOutput::MpeConfig buildMpeConfig() const;
     void recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
-    void queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages) noexcept;
+    void queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages,
+                                    double blockStartTimeMs,
+                                    int numSamples) noexcept;
     void drainExternalMidiOutputQueue();
-    void sendImmediateAllNotesOffToExternal();
+    void discardExternalMidiOutputQueue() noexcept;
+    void sendExternalResetSweep();
+    void sendImmediateAllNotesOffToExternal (bool processingAlreadySuspended = false);
     void closeMidiOutput();
+    void restoreMidiOutputRoute (int routeKind,
+                                 const juce::String& deviceIdentifier,
+                                 int legacyOptionIndex);
 
-    static constexpr int realtimeScratchBlockSize = 32768;
     static constexpr size_t realtimeMidiBufferReserveBytes = 262144;
-    static constexpr int externalMidiQueueSize = 8192;
-    juce::AudioBuffer<float> monoScratch;
+    static constexpr size_t realtimeMidiInputBudgetBytes = 131072;
+    static constexpr int realtimeMidiInputEventLimit = 256;
+    static constexpr int midiLifecycleEventBudget = 64;
+    // The audio path emits at most 64 OSC/retrigger lifecycles plus 256 MIDI-thru
+    // events per block. Leave several blocks of headroom for timestamped output
+    // while the dedicated sender catches up; overflow still has ordered panic
+    // recovery and held-finger rehydration.
+    static constexpr int externalMidiQueueSize = 16384;
+    juce::MidiBuffer midiInputScratch;
     juce::MidiBuffer midiRenderScratch;
     bool midiRenderScratchLoanedToHost = false;
-    std::array<PartialEngine::MidiSourceEvent, 512> midiSourceScratch {};
-    std::array<MpeMidiOutput::NoteEvent, 512> midiNoteEventScratch {};
+    std::array<OscFingerRouter::Event, midiLifecycleEventBudget> fingerEventScratch {};
+    std::array<MpeMidiOutput::NoteEvent, midiLifecycleEventBudget> midiNoteEventScratch {};
+
+    struct FingerMidiState
+    {
+        bool active = false;
+        float x = 0.5f;
+        float y = 0.5f;
+        int pitchKey = -1;
+        double frequencyHz = 261.6255653005986;
+    };
+    std::array<FingerMidiState, OscFingerRouter::MAX_VOICES> fingerMidiStates {};
+    MidiPitchMap pitchMap;
+    AtomicScaleMap atomicPitchMap;
+    bool retriggerFingerMidi = false;
+    int fingerRetriggerCursor = 0;
 
     struct PackedMidiEvent
     {
         juce::uint8 size = 0;
         juce::uint8 data[3] {};
+        double dueTimeMs = 0.0;
     };
 
     juce::AbstractFifo externalMidiFifo { externalMidiQueueSize };
     std::array<PackedMidiEvent, externalMidiQueueSize> externalMidiEvents {};
     std::atomic<uint32_t> externalMidiDropped { 0 };
+    std::atomic<bool> externalMidiPanicPending { false };
+    std::atomic<bool> externalMidiProducerQuarantined { false };
+    std::atomic<bool> externalTransportResetPending { false };
+    std::atomic<bool> midiOutputRouteChangedPending { false };
 
+#if COSMIC_MIDI_DIAGNOSTICS
     struct MidiDebugSlot
     {
         std::atomic<uint32_t> sequence { 0 };
@@ -161,107 +174,67 @@ private:
     static constexpr int midiDebugEventQueueSize = 256;
     std::array<MidiDebugSlot, midiDebugEventQueueSize> incomingMidiDebugEvents {};
     std::atomic<uint32_t> incomingMidiDebugWriteCounter { 0 };
+#endif
 
     std::unique_ptr<juce::MidiOutput> midiOutput;
     std::atomic<int> midiOutputOptionIndex { 0 };
+    std::atomic<uint32_t> midiOutputRouteRevision { 0 };
     juce::String midiOutputStatus { "Host MIDI Output" };
-    double currentSampleRate = 44100.0;
-    int instanceId = 1;
+    int midiOutputRouteKind = 0; // 0 host, 1 virtual, 2 physical
+    juce::String midiOutputDeviceIdentifier;
 
-    // setStateInformation may run on a background thread (or before prepareToPlay),
-    // so it stages the device/network/library work here and the message-thread
-    // timer applies it. The release/acquire on the flag publishes the fields below.
+    juce::CriticalSection pendingStateLock;
     std::atomic<bool> pendingStateApply { false };
-    int          pendingUdpPort = 6060;
-    int          pendingMidiOutputOption = 0;
-    juce::String pendingLibraryName;
+    std::atomic<int> udpPort { 6060 };
+    int pendingUdpPort = 6060;
+    int pendingMidiOutputOption = 0;
+    int pendingMidiOutputRouteKind = -1;
+    juce::String pendingMidiOutputDeviceIdentifier;
 
-    // Owns the MIDI-output state + emission logic (extracted from this class).
     MpeMidiOutput mpeOut;
-
-    // Per-frame change-detection trackers kept in the processor: they compare the
-    // current APVTS-derived MIDI config against the previous block to decide when
-    // to re-send the MPE setup / issue a safety all-notes-off.
-    int lastAudioMidiOutputMode = 0;
-    int lastMidiOutputType = 0;
+    double currentSampleRate = 44100.0;
+    int lastMidiOutputType = 1;
+    int lastNormalMidiRoutingMode = 1;
+    int lastNormalMidiChannel = 0;
     int lastMpeBendRange = 2;
-    // B8: zone-derived MPE channel trackers. Defaults match the Lower zone
-    // (master 1, members 2..16) so the first block with the default zone detects
-    // no spurious change. A Lower<->Upper switch changes master/first/last and is
-    // caught by midiConfigChanged.
     int lastMpeMaster = 1;
     int lastMpeMemberFirst = 2;
     int lastMpeMemberLast = 16;
     int lastMpeSetupEnabled = 1;
+    int lastMpePitchMode = 0;
 
-    std::atomic<bool> muted { false };
-    int lastScaleRoot = -1;
+    int lastScaleRootPitchClass = -1;
+    int lastScaleRootOctave = -1;
     int lastScaleMode = -1;
     int lastScaleOctaves = -1;
-    int lastEngineSource = -1;
-    int lastSamplePlaybackMode = -1;
-    int lastSpectralElement = -1;
+    int lastPitchSystem = -1;
+    int lastAtomicElement = -1;
     int lastAtomicScaleMode = -1;
+
     static constexpr int midiInputChannels = 16;
     static constexpr int midiInputNotes = 128;
     static constexpr int midiInputKeyCount = midiInputChannels * midiInputNotes;
-    std::array<int, midiInputKeyCount> midiKeyToKeyboardSlot {};
-    std::array<int, PartialEngine::MAX_KEYBOARD_SLOTS> keyboardSlotToMidiKey {};
-    std::array<std::atomic<int>, PartialEngine::MAX_KEYBOARD_SLOTS> keyboardDebugKeys {};
+    std::array<bool, midiInputKeyCount> incomingMidiKeys {};
     std::atomic<int> lastExternalMidiNote { -1 };
     std::atomic<int> lastExternalMidiChannel { -1 };
     std::atomic<int> activeExternalMidiKeys { 0 };
-    std::atomic<int> externalMidiPitchModeSnapshot { 0 };
 
     struct RawParams
     {
-        std::atomic<float>* pitch = nullptr;
-        std::atomic<float>* layerMix = nullptr;
-        std::atomic<float>* attack = nullptr;
-        std::atomic<float>* release = nullptr;
-        std::atomic<float>* brightness = nullptr;
-        std::atomic<float>* movement = nullptr;
-        std::atomic<float>* reverb = nullptr;
-        std::atomic<float>* delay = nullptr;
-        std::atomic<float>* master = nullptr;
-        std::atomic<float>* energy = nullptr;
-        std::atomic<float>* motionMacro = nullptr;
-        std::atomic<float>* toneMacro = nullptr;
-        std::atomic<float>* spaceMacro = nullptr;
-        std::atomic<float>* signatureMode = nullptr;
-        std::atomic<float>* grainSize = nullptr;
-        std::atomic<float>* grainDensity = nullptr;
-        std::atomic<float>* pitchSpread = nullptr;
-        std::atomic<float>* positionJitter = nullptr;
-        std::atomic<float>* stereoSpread = nullptr;
-        std::atomic<float>* reverseGrains = nullptr;
-        std::atomic<float>* freeze = nullptr;
-        std::atomic<float>* grainShape = nullptr;
-        std::atomic<float>* wetDry = nullptr;
-        std::atomic<float>* tapeDrive = nullptr;
-        std::atomic<float>* polyphonyMode = nullptr;
         std::atomic<float>* scaleRoot = nullptr;
         std::atomic<float>* scaleRootOctave = nullptr;
         std::atomic<float>* scaleMode = nullptr;
         std::atomic<float>* scaleOctaves = nullptr;
-        std::atomic<float>* engineSource = nullptr;
-        std::atomic<float>* samplePlaybackMode = nullptr;
+        std::atomic<float>* pitchSystem = nullptr;
         std::atomic<float>* spectralElement = nullptr;
-        std::atomic<float>* spectralPartialCount = nullptr;
-        std::atomic<float>* spectralPartialSolo = nullptr;
-        std::atomic<float>* spectralStretch = nullptr;
         std::atomic<float>* atomicScaleMode = nullptr;
-        std::atomic<float>* audioMidiOutputMode = nullptr;
         std::atomic<float>* midiOutputType = nullptr;
+        std::atomic<float>* normalMidiRoutingMode = nullptr;
         std::atomic<float>* normalMidiChannel = nullptr;
         std::atomic<float>* mpeZone = nullptr;
-        std::atomic<float>* mpeMasterChannel = nullptr;
-        std::atomic<float>* mpeMemberFirstChannel = nullptr;
-        std::atomic<float>* mpeMemberLastChannel = nullptr;
         std::atomic<float>* mpePitchBendRange = nullptr;
         std::atomic<float>* mpeSendSetupMessages = nullptr;
         std::atomic<float>* mpePitchMode = nullptr;
-        std::atomic<float>* externalMidiPitchMode = nullptr;
     } rawParams;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceProcessor)

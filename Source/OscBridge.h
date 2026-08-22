@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <limits>
 #include <memory>
 #include <juce_core/juce_core.h>
 #include <juce_osc/juce_osc.h>
@@ -9,12 +11,13 @@
     OscBridge
 
     Owns a juce::OSCReceiver bound to a UDP port. Parses incoming
-    /cs/<row>/<col>/finger<n>/{on|line|v} messages and pokes the
+    /cs/<row>/<source>/finger<n>/{on|off|u|v|line} messages and pokes the
     seat target's atomic/event targets.
 
     Listener uses JUCE's realtime OSC receiver callback so standalone tests
     and hosts do not need a message-pump dependency. The callback is not the
-    audio thread; keep fan-out lock-free and parsing allocation-light.
+    audio thread; fan-out is allocation-light and client removal is serialised
+    with callbacks so stop()/destruction cannot race an in-flight delivery.
 */
 class OscBridge
 {
@@ -32,7 +35,25 @@ public:
     void stop();
 
     bool isRunning()    const noexcept { return running; }
+    bool isReceiving()  const noexcept { return receiving; }
     int  getCurrentPort() const noexcept { return currentPort; }
+
+    uint32_t getValidMessageCount() const noexcept
+    {
+        return validMessageCount.load(std::memory_order_relaxed);
+    }
+
+    uint32_t getObservedZoneMask() const noexcept
+    {
+        return observedZoneMask.load(std::memory_order_relaxed);
+    }
+
+    uint32_t getLastValidMessageAgeMs() const noexcept
+    {
+        const auto last = lastValidMessageMs.load(std::memory_order_acquire);
+        return last == 0 ? std::numeric_limits<uint32_t>::max()
+                         : juce::Time::getMillisecondCounter() - last;
+    }
 
     // Human-readable status for the UI / debug panel. Mirrors the bool
     // returned by start(), and additionally surfaces the "port full"
@@ -47,5 +68,9 @@ private:
     std::shared_ptr<SharedPort> sharedPort;
     int  currentPort = 0;
     bool running     = false;
+    bool receiving   = false;
     juce::String statusString;
+    std::atomic<uint32_t> validMessageCount { 0 };
+    std::atomic<uint32_t> observedZoneMask { 0 };
+    std::atomic<uint32_t> lastValidMessageMs { 0 };
 };

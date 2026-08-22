@@ -1,42 +1,44 @@
-# SpektraSynth — User Manual
+# Cosmic Microwave - User Manual
 
-> *A spectral instrument that turns elemental emission lines into playable scales,
-> tunings, and timbres.*
+> *Zone OSC in. Source-locked Normal MIDI or expressive MPE out.*
 
-SpektraSynth is an audience-driven instrument: a crowd of phones (or a built-in
-simulator, or a MIDI keyboard) plays a venue of seats, and **atomic spectra are
-translated into playable musical scales and timbral fingerprints**. It renders
-internal audio (samples, granular clouds, or an element spectral synth) and/or emits
-standard or MPE MIDI — with per-note pitch bend so the microtonal translation
-survives into other instruments.
+Cosmic Microwave (formerly SpektraSynth) is an audience-driven OSC-to-MIDI router.
+Each instance receives one already-separated UDP zone stream, tracks source IDs and
+independent fingers, maps normalized X/Y controls through Tonal or Atomic Scale pitch
+maps and expression, and sends MIDI to Ableton, a virtual endpoint, or a system MIDI
+device.
 
-A note on framing, used consistently throughout this manual: SpektraSynth
-**translates** atomic spectra. It does not claim to be "the real sound of atoms" —
-it maps real emission-line data (wavelengths and intensities) into pitch ratios,
-scale degrees, and partial amplitudes you can perform with.
+Version 2.1 does not generate sound. It remains a silent stereo instrument shell for
+Ableton placement and old-session compatibility; the product's behaviour and editor
+are MIDI-only. Put sound-producing instruments after it or on receiving MIDI tracks.
 
 ## Chapters
 
 | # | Chapter | What it covers |
 |---|---|---|
-| 1 | [Getting Started](01-getting-started.md) | What it is, the four products, requirements, install paths, build-from-source quickstart, first sound in 5 steps. |
-| 2 | [UI Guide](02-ui-guide.md) | Every section of the editor: top bar, library rail, audience map, SCALE KEYBOARD, the two engines, the four macros, scale/output controls, TEXTURE/VOICES tabs, Performance & Debug views, element-colour theming. |
-| 3 | [MPE Setup](03-mpe-setup.md) | **Read this to get microtones into other synths.** Output modes, the virtual port, zones (Lower/Upper), why the bend-range default is 2 st, the receiver checklist, channel allocation, and the known Ableton single-stream routing limitation with verified workarounds. |
-| 4 | [OSC & the Audience](04-osc-audience.md) | The 26×100 seat model, the `/cs/<row>/<col>/finger<n>/<param>` wire format, UDP port configuration and the 16-client "PORT FULL" cap, the simulator, network tips. |
-| 5 | [Tuning Files](05-tuning-files.md) | The companion **Atomic CORE WhiteKeys** `.tun` library for Omnisphere: 29 element tunings (H…Zn), the white-key-first mapping, the CORE recipe, installation, and Scala as the interchange ecosystem. |
-| 6 | [Troubleshooting & FAQ](06-troubleshooting-faq.md) | No sound, MIDI not received, microtones collapsing to 12-TET, global-feeling pressure, CPU tips, sample naming and load budget, OSC quick checks, FAQ. |
+| 1 | [Getting Started](01-getting-started.md) | Requirements, install/build, product variants, and the first routed MIDI test. |
+| 2 | [UI Guide](02-ui-guide.md) | Header metrics, OSC input, Source Matrix, Tonal/Atomic pitch mapping, Normal/MPE routing, destinations, simulator, and Panic. |
+| 3 | [MPE Setup](03-mpe-setup.md) | Normal MIDI source routing, MPE zones, expression messages, receiver setup, channel allocation, and Ableton choices. |
+| 4 | [OSC & the Audience](04-osc-audience.md) | One separated zone per UDP port, the `/cs/<zone>/<source>/finger<n>/<param>` contract, scaling, channel ownership, and network checks. |
+| 5 | [Pitch Systems & External Tuning](05-tuning-files.md) | Seven tonal maps, 29 element-derived Atomic maps, X-to-pitch selection, Normal/MPE tuning, and receiver-side tuning. |
+| 6 | [Troubleshooting & FAQ](06-troubleshooting-faq.md) | Silent-shell expectations, missing MIDI, OSC/port problems, channel routing, MPE expression, stuck notes, and upgrade questions. |
 
 ## Quick orientation
 
-- **Just want sound?** Chapter 1, "First sound in 5 steps" — standalone app,
-  **+ Add** in the SIMULATOR row, done.
-- **Driving another synth microtonally?** Chapter 3 is the critical path: MPE MIDI,
-  ZONE Lower, BEND 2 st, and match those on the receiver.
-- **Connecting a real audience?** Chapter 4 — OSC to UDP 6060.
-- **Something's wrong?** Chapter 6, then the **Debug** view's **Copy Report**.
+- **First setup?** Start with Chapter 1, then use **+ Source** in the simulator while
+  watching a MIDI monitor or receiving instrument.
+- **Splitting a zone across Ableton tracks?** Use Normal MIDI, **Per source 1-16**,
+  and the instance's port-named virtual endpoint. Chapters 2 and 4 show the layout.
+- **Need per-finger expression?** Use MPE and match the receiver's zone and bend range;
+  see Chapter 3.
+- **Want element-derived pitch?** New sessions start at **Atomic / He / Extended**.
+  Chapter 5 explains all density modes and the Normal-MIDI-versus-MPE pitch result.
+- **Connecting the audience server?** Chapter 4 documents the exact OSC address and
+  normalized value contract.
+- **No result?** Chapter 6 starts with the shortest routing checklist.
 
 ---
 
-*This manual documents the SpektraSynth flagship plugin (VST3 + Standalone) and its
-companions. It is written in English and intended as the base for future
-localizations.*
+*This manual documents the Cosmic Microwave 2.1 flagship VST3 and Standalone products.
+Other MIDI-oriented targets in the repository have their own, more specialized UI and
+parameter sets.*

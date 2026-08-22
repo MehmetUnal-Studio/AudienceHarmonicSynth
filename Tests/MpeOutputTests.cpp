@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -87,8 +88,6 @@ namespace
         c.normalMidiChannel = 0;
         c.sendSetupMessages = true;
         c.pitchMode = 0;
-        c.motionMacro = 0.5f;
-        c.energy = 0.5f;
         return c;
     }
 
@@ -106,8 +105,6 @@ namespace
         c.normalMidiChannel = 0;
         c.sendSetupMessages = true;
         c.pitchMode = 0;
-        c.motionMacro = 0.5f;
-        c.energy = 0.5f;
         return c;
     }
 
@@ -132,12 +129,56 @@ namespace
         return e;
     }
 
+    MpeMidiOutput::NoteEvent participantNoteOn (int sourceId, int participantId,
+                                                 double freqHz, float vel = 0.8f,
+                                                 float x = 0.5f, float y = 0.5f)
+    {
+        auto e = noteOn(sourceId, freqHz, vel, x, y);
+        e.participantId = participantId;
+        return e;
+    }
+
+    MpeMidiOutput::NoteEvent expression (int sourceId, double freqHz,
+                                          float x, float y)
+    {
+        MpeMidiOutput::NoteEvent e;
+        e.type = MpeMidiOutput::NoteEvent::Expression;
+        e.sourceId = sourceId;
+        e.frequencyHz = freqHz;
+        e.x = x;
+        e.y = y;
+        return e;
+    }
+
+    MpeMidiOutput::MpeConfig participantNormalConfig()
+    {
+        MpeMidiOutput::MpeConfig c;
+        c.outputType = 1;
+        c.normalMidiChannel = 6;
+        c.normalRoutingMode = 1;
+        return c;
+    }
+
+    template <typename Pred>
+    int countMatching (const std::vector<Msg>& msgs, Pred pred)
+    {
+        int count = 0;
+        for (const auto& msg : msgs)
+            if (pred(msg))
+                ++count;
+        return count;
+    }
+
     // A4 = 440 Hz lands exactly on note 69 (centered bend); convenient base note.
     constexpr double kA4 = 440.0;
 }
 
 int main()
 {
+    expect(MpeMidiOutput::velocityFromUnit(std::numeric_limits<float>::quiet_NaN()) == 1
+               && MpeMidiOutput::pressureFromUnit(std::numeric_limits<float>::infinity()) == 0,
+           "non-finite expression values fall back to valid MIDI data bytes");
+
     // ---- Test 1: MPE setup messages on first note ----
     {
         MpeMidiOutput mpe;
@@ -391,8 +432,11 @@ int main()
         config.pitchBendRangeChoice = 3;
 
         juce::MidiBuffer buffer;
-        const auto ev = noteOn(0, kA4);
-        mpe.render(config, &ev, 1, buffer, 64);
+        const MpeMidiOutput::NoteEvent events[] {
+            noteOn(0, kA4),
+            noteOn(1, 523.2511306011972),
+        };
+        mpe.render(config, events, 2, buffer, 64);
         const auto msgs = decode(buffer);
 
         const int noteOnIdx = indexOf(msgs, [] (const Msg& m)
@@ -409,6 +453,12 @@ int main()
         const bool anyBend = indexOf(msgs, [] (const Msg& m)
             { return m.status == kBend; }) >= 0;
         expect(! anyBend, "normal MIDI emits no pitch-wheel at note-on");
+
+        juce::MidiBuffer releaseBuffer;
+        const auto release = noteOff(0);
+        mpe.render(config, &release, 1, releaseBuffer, 64);
+        expect(mpe.getActiveMpeVoices() == 0 && mpe.getAvailableMpeChannels() == 15,
+               "normal MIDI voices never pollute MPE member-channel counters");
     }
 
     // ---- Test 8: AllNotesOff / panic resets channels (CC123/CC120) + state ----
@@ -451,20 +501,14 @@ int main()
                "AllNotesOff restores the full member-channel pool");
     }
 
-    // ---- Test 9: High sourceId capacity regression (seat + keyboard range) ----
-    // Seat NoteOn events carry sourceId = row*100 + col (0..2599); keyboard slots
-    // use sourceId 2600..2663 (max valid index 2663). kMaxMidiSources MUST be
-    // 2664 so every one of these is accepted. The old buggy capacity (68) silently
-    // dropped any source with sourceId >= 68 via the `sourceId >= midiOutVoices.size()`
-    // guards, so all three of these would have produced NO output.
+    // ---- Test 9: Full OSC source/finger voice capacity regression ----
+    // Voice IDs are sourceId*10+finger, so source 255/finger9 is index 2559.
+    // The entire 256x10 space must remain routable.
     {
-        // Guard the constant directly so a silent shrink fails loudly here too.
-        expect(MpeMidiOutput::kMaxMidiSources == 2664,
-               "kMaxMidiSources == 2664 (PartialEngine::MAX_SEATS 2600 + MAX_KEYBOARD_SLOTS 64)");
+        expect(MpeMidiOutput::kMaxMidiSources == 2560,
+               "kMaxMidiSources covers 256 OSC sources with 10 fingers each");
 
-        // 100 = seat (row 1, col 0); 2599 = last seat (row 25, col 99);
-        // 2663 = last keyboard slot = MAX_SEATS + 63 = highest valid index.
-        const int highSources[] { 100, 2599, 2663 };
+        const int highSources[] { 100, 1289, 2559 };
 
         for (int sourceId : highSources)
         {
@@ -576,6 +620,28 @@ int main()
         expect(hasBendCenter, "Upper zone: note-off recenters pitch wheel to 8192 on the member channel");
         expect(mpe.getActiveMpeVoices() == 0,
                "Upper zone: voice released after note-off");
+    }
+
+    // A fresh voice state defaults its stored channel to 1, which is a valid
+    // Upper-zone member. Allocation must nevertheless consult the ownership
+    // table rather than treating every new voice as already assigned to ch1.
+    {
+        MpeMidiOutput mpe;
+        const auto config = mpeConfigUpper(3);
+        juce::MidiBuffer buffer;
+        const MpeMidiOutput::NoteEvent events[] {
+            noteOn(0, 220.0),
+            noteOn(1, 277.18),
+            noteOn(2, 329.63),
+        };
+        mpe.render(config, events, 3, buffer, 64);
+
+        const auto v0 = mpe.getVoiceDebugSnapshot(0);
+        const auto v1 = mpe.getVoiceDebugSnapshot(1);
+        const auto v2 = mpe.getVoiceDebugSnapshot(2);
+        expect(v0.active && v1.active && v2.active
+                   && v0.channel == 1 && v1.channel == 2 && v2.channel == 3,
+               "Upper zone: three fresh sources allocate distinct ch1/ch2/ch3 members");
     }
 
     // ---- Test 11: MPE channel-reuse microtonal re-press (ROUND-ROBIN) ----
@@ -1031,6 +1097,206 @@ int main()
 
         expect(ch == 1,
                "RR range-change: first allocation after a real range change wraps to the new memberFirst (ch1)");
+    }
+
+    // ---- Test 15: participant id -> normal MIDI channel mapping ----
+    {
+        expect(MpeMidiOutput::normalChannelForParticipant(1) == 1,
+               "participant routing: participant 1 maps to MIDI channel 1");
+        expect(MpeMidiOutput::normalChannelForParticipant(16) == 16,
+               "participant routing: participant 16 maps to MIDI channel 16");
+        expect(MpeMidiOutput::normalChannelForParticipant(17) == 1,
+               "participant routing: participant 17 wraps to MIDI channel 1");
+        expect(MpeMidiOutput::normalChannelForParticipant(32) == 16,
+               "participant routing: participant 32 wraps to MIDI channel 16");
+        expect(MpeMidiOutput::normalChannelForParticipant(0) == 16,
+               "participant routing: id 0 is handled deterministically without leaving 1..16");
+        expect(MpeMidiOutput::normalChannelForParticipant(0, 0) == 1,
+               "participant routing: sourceIdBase selects the first id of channel 1");
+    }
+
+    // ---- Test 16: channel/note reference counting across wrapped participants ----
+    {
+        MpeMidiOutput mpe;
+        const auto config = participantNormalConfig();
+
+        // Participant 1 and 17 both map to channel 1. They intentionally use
+        // different voice source IDs but resolve to the same note.
+        juce::MidiBuffer onBuffer;
+        const MpeMidiOutput::NoteEvent ons[] {
+            participantNoteOn(40, 1, kA4, 0.7f, 0.2f, 0.3f),
+            participantNoteOn(41, 17, kA4, 0.9f, 0.8f, 0.7f),
+        };
+        mpe.render(config, ons, 2, onBuffer, 64);
+        const auto onMsgs = decode(onBuffer);
+
+        const int physicalOns = countMatching(onMsgs, [] (const Msg& m)
+            { return m.status == kNoteOn && m.channel == 1 && m.d1 == 69 && m.d2 > 0; });
+        expect(physicalOns == 1,
+               "participant routing: two semantic owners of ch1/note69 emit one physical NoteOn");
+
+        const auto voice40 = mpe.getVoiceDebugSnapshot(40);
+        const auto voice41 = mpe.getVoiceDebugSnapshot(41);
+        expect(voice40.active && voice40.channel == 1
+               && voice41.active && voice41.channel == 1,
+               "participant routing: participant 1 and 17 voice states both retain channel 1");
+
+        // NoteOff carries only sourceId. The stored voice channel must therefore
+        // keep release routing stable, and the first owner must not end the note.
+        juce::MidiBuffer firstOffBuffer;
+        const auto firstOff = noteOff(40);
+        mpe.render(config, &firstOff, 1, firstOffBuffer, 64);
+        const auto firstOffMsgs = decode(firstOffBuffer);
+        expect(countMatching(firstOffMsgs, [] (const Msg& m)
+            { return m.status == kNoteOff; }) == 0,
+               "participant routing: first owner release emits no physical NoteOff");
+        expect(countMatching(firstOffMsgs, [] (const Msg& m)
+            { return m.status == kPressure; }) == 0,
+               "normal routing: an owner release never emits channel-pressure zero");
+
+        juce::MidiBuffer lastOffBuffer;
+        const auto lastOff = noteOff(41);
+        mpe.render(config, &lastOff, 1, lastOffBuffer, 64);
+        const auto lastOffMsgs = decode(lastOffBuffer);
+        expect(countMatching(lastOffMsgs, [] (const Msg& m)
+            { return m.status == kNoteOff && m.channel == 1 && m.d1 == 69; }) == 1,
+               "participant routing: last owner release emits one physical NoteOff on stored channel 1");
+        expect(countMatching(lastOffMsgs, [] (const Msg& m)
+            { return m.status == kPressure; }) == 0,
+               "normal routing: last owner NoteOff does not zero channel pressure");
+    }
+
+    // ---- Test 17: fingers remain independent while sharing participant channel ----
+    {
+        MpeMidiOutput mpe;
+        const auto config = participantNormalConfig();
+        constexpr int sourceFinger0 = 50;
+        constexpr int sourceFinger1 = 51;
+        constexpr int participant = 2;
+        const double e5 = kA4 * std::pow(2.0, 7.0 / 12.0);
+
+        juce::MidiBuffer onBuffer;
+        const MpeMidiOutput::NoteEvent ons[] {
+            participantNoteOn(sourceFinger0, participant, kA4, 0.8f, 0.1f, 0.2f),
+            participantNoteOn(sourceFinger1, participant, e5, 0.8f, 0.9f, 0.8f),
+        };
+        mpe.render(config, ons, 2, onBuffer, 64);
+        const auto onMsgs = decode(onBuffer);
+
+        expect(countMatching(onMsgs, [] (const Msg& m)
+            { return m.status == kNoteOn && m.channel == 2 && m.d2 > 0; }) == 2,
+               "participant routing: two fingers emit independent notes on their participant's channel 2");
+        expect(mpe.getVoiceDebugSnapshot(sourceFinger0).channel == 2
+               && mpe.getVoiceDebugSnapshot(sourceFinger1).channel == 2,
+               "participant routing: separate finger source IDs retain the same participant channel");
+
+        // Finger1 was the most recent writer on ch2. Replaying finger0's own
+        // values must emit CC74/CC11 even though they match finger0's per-source
+        // cache, because the channel-wide value was changed by finger1.
+        juce::MidiBuffer expressionBuffer;
+        const auto restoreFinger0 = expression(sourceFinger0, kA4, 0.1f, 0.2f);
+        mpe.render(config, &restoreFinger0, 1, expressionBuffer, 64);
+        const auto expressionMsgs = decode(expressionBuffer);
+        expect(countMatching(expressionMsgs, [] (const Msg& m)
+            { return m.status == kCC && m.channel == 2 && m.d1 == 74; }) == 1,
+               "normal shared channel: CC74 cache tracks the last physical channel value");
+        expect(countMatching(expressionMsgs, [] (const Msg& m)
+            { return m.status == kCC && m.channel == 2 && m.d1 == 11; }) == 1,
+               "normal shared channel: CC11 cache tracks the last physical channel value");
+
+        juce::MidiBuffer offBuffer;
+        const MpeMidiOutput::NoteEvent offs[] {
+            noteOff(sourceFinger0),
+            noteOff(sourceFinger1),
+        };
+        mpe.render(config, offs, 2, offBuffer, 64);
+        const auto offMsgs = decode(offBuffer);
+        expect(countMatching(offMsgs, [] (const Msg& m)
+            { return m.status == kNoteOff && m.channel == 2; }) == 2,
+               "participant routing: each distinct finger note releases on stored channel 2");
+        expect(countMatching(offMsgs, [] (const Msg& m)
+            { return m.status == kPressure; }) == 0,
+               "normal routing: multi-finger releases emit no channel pressure messages");
+    }
+
+    // ---- Test 18: reset clears normal channel/note ownership ----
+    {
+        MpeMidiOutput mpe;
+        const auto config = participantNormalConfig();
+
+        juce::MidiBuffer firstBuffer;
+        const auto first = participantNoteOn(60, 1, kA4);
+        mpe.render(config, &first, 1, firstBuffer, 64);
+        mpe.reset();
+
+        juce::MidiBuffer afterResetBuffer;
+        const auto afterReset = participantNoteOn(61, 17, kA4);
+        mpe.render(config, &afterReset, 1, afterResetBuffer, 64);
+        const auto afterResetMsgs = decode(afterResetBuffer);
+        expect(countMatching(afterResetMsgs, [] (const Msg& m)
+            { return m.status == kNoteOn && m.channel == 1 && m.d1 == 69 && m.d2 > 0; }) == 1,
+               "normal routing: reset clears channel/note refcounts so the next owner emits NoteOn");
+    }
+
+    // ---- Test 19: MPE Glide bends within range and retriggers beyond it ----
+    {
+        MpeMidiOutput mpe;
+        auto config = mpeConfig(2, 16, 0); // +/-2 semitones
+        config.pitchMode = 1;
+        config.sendSetupMessages = false;
+
+        juce::MidiBuffer firstBuffer;
+        const auto first = noteOn(0, kA4);
+        mpe.render(config, &first, 1, firstBuffer, 64);
+        const int originalChannel = mpe.getVoiceDebugSnapshot(0).channel;
+
+        juce::MidiBuffer glideBuffer;
+        const auto wholeStep = noteOn(0, kA4 * std::pow(2.0, 2.0 / 12.0));
+        mpe.render(config, &wholeStep, 1, glideBuffer, 64);
+        const auto glideMessages = decode(glideBuffer);
+        expect(countMatching(glideMessages, [] (const Msg& m)
+                   { return m.status == kNoteOn || m.status == kNoteOff; }) == 0,
+               "MPE Glide keeps the active note lifecycle inside the bend range");
+        expect(indexOf(glideMessages, [originalChannel] (const Msg& m)
+                   { return m.status == kBend && m.channel == originalChannel
+                         && pitchWheelValue(m) > 16000; }) >= 0,
+               "MPE Glide emits the in-range two-semitone pitch bend on the owned channel");
+        expect(mpe.getVoiceDebugSnapshot(0).note == 69,
+               "MPE Glide retains its original base note while bending");
+
+        juce::MidiBuffer retriggerBuffer;
+        const auto beyondRange = noteOn(0, kA4 * std::pow(2.0, 4.0 / 12.0));
+        mpe.render(config, &beyondRange, 1, retriggerBuffer, 64);
+        const auto retriggerMessages = decode(retriggerBuffer);
+        expect(countMatching(retriggerMessages, [] (const Msg& m)
+                   { return m.status == kNoteOff && m.d1 == 69; }) == 1
+               && countMatching(retriggerMessages, [] (const Msg& m)
+                   { return m.status == kNoteOn && m.d1 == 73 && m.d2 > 0; }) == 1,
+               "MPE Glide safely retriggers when the target exceeds the configured bend range");
+    }
+
+    // ---- Test 20: a full Normal ledger still has a fixed-size safety reset ----
+    {
+        MpeMidiOutput mpe;
+        const auto config = participantNormalConfig();
+        std::array<MpeMidiOutput::NoteEvent, 64> batch {};
+        for (int base = 0; base < MpeMidiOutput::kMaxMidiSources; base += (int) batch.size())
+        {
+            const int count = juce::jmin((int) batch.size(), MpeMidiOutput::kMaxMidiSources - base);
+            for (int i = 0; i < count; ++i)
+                batch[(size_t) i] = participantNoteOn(base + i, (base + i) / 10, kA4);
+            juce::MidiBuffer ignored;
+            mpe.render(config, batch.data(), count, ignored, 64);
+        }
+
+        juce::MidiBuffer resetBuffer;
+        mpe.emitSafetyReset(resetBuffer, 0);
+        const auto resetMessages = decode(resetBuffer);
+        expect(resetMessages.size() == 64,
+               "full 2560-voice Normal ledger emits a fixed 64-message safety sweep");
+        expect(countMatching(resetMessages, [] (const Msg& message)
+                   { return message.status == kCC && (message.d1 == 120 || message.d1 == 123); }) == 32,
+               "bounded safety sweep carries All Notes Off and All Sound Off on all channels");
     }
 
     std::cout << "\nSummary: " << (g_failed == 0 ? "ok" : "failed") << "\n";

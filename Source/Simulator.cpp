@@ -1,6 +1,10 @@
 #include "Simulator.h"
 
-Simulator::Simulator (SeatEventSink& t) : target(t) {}
+Simulator::Simulator (SeatEventSink& t, int sourceCapacity)
+    : target(t),
+      maxSourceCount(juce::jlimit(1, SeatEventSink::MAX_OSC_SOURCES, sourceCapacity))
+{
+}
 
 Simulator::~Simulator()
 {
@@ -9,15 +13,21 @@ Simulator::~Simulator()
 
 void Simulator::addRandomSeat()
 {
-    // pick a (row, col) not already taken
-    for (int attempt = 0; attempt < 64; ++attempt)
+    if ((int) simSeats.size() >= maxSourceCount)
+        return;
+
+    // Pick a source ID that is unique within this simulated instance. Search
+    // deterministically from a random start so high-density tests can always
+    // reach the full configured capacity instead of giving up after retries.
+    const int firstCandidate = rng.nextInt(maxSourceCount);
+    for (int offset = 0; offset < maxSourceCount; ++offset)
     {
         const int row = rng.nextInt(SeatEventSink::MAX_ROWS);
-        const int col = rng.nextInt(SeatEventSink::MAX_COLS);
+        const int col = (firstCandidate + offset) % maxSourceCount;
 
         bool taken = false;
         for (const auto& s : simSeats)
-            if (s.row == row && s.col == col) { taken = true; break; }
+            if (s.col == col) { taken = true; break; }
 
         if (taken) continue;
 

@@ -3,11 +3,34 @@
 #include <cmath>
 #include <limits>
 
-// kMaxMidiSources must equal PartialEngine::MAX_SEATS (2600) +
-// PartialEngine::MAX_KEYBOARD_SLOTS (64) = 2664. This TU is deliberately kept
-// free of PartialEngine.h (so the lightweight test target stays decoupled), so
-// the AUTHORITATIVE compile-time guard against the real PartialEngine constants
-// lives in PluginProcessor.cpp, which includes both headers.
+namespace
+{
+    struct RelativePitchBend
+    {
+        int value = 8192;
+        bool reachable = false;
+    };
+
+    RelativePitchBend pitchBendFromBaseNote (double targetFrequencyHz,
+                                             int baseNote,
+                                             int bendRangeSemitones) noexcept
+    {
+        if (! std::isfinite(targetFrequencyHz) || targetFrequencyHz <= 0.0)
+            return {};
+
+        const int safeBase = juce::jlimit(0, 127, baseNote);
+        const int safeRange = juce::jmax(1, bendRangeSemitones);
+        const double targetMidi = 69.0 + 12.0 * std::log2(targetFrequencyHz / 440.0);
+        const double delta = targetMidi - (double) safeBase;
+        if (! std::isfinite(delta) || std::abs(delta) > (double) safeRange + 1.0e-9)
+            return {};
+
+        const double normalised = juce::jlimit(-1.0, 1.0, delta / (double) safeRange);
+        return { juce::jlimit(0, 16383,
+                              8192 + (int) std::round(normalised * 8192.0)),
+                 true };
+    }
+}
 
 int MpeMidiOutput::bendRangeFromChoice (int choice) noexcept
 {
@@ -17,12 +40,25 @@ int MpeMidiOutput::bendRangeFromChoice (int choice) noexcept
 
 int MpeMidiOutput::velocityFromUnit (float value) noexcept
 {
+    if (! std::isfinite(value))
+        value = 0.0f;
     return juce::jlimit(1, 127, (int) std::round(juce::jlimit(0.0f, 1.0f, value) * 127.0f));
 }
 
 int MpeMidiOutput::pressureFromUnit (float value) noexcept
 {
+    if (! std::isfinite(value))
+        value = 0.0f;
     return juce::jlimit(0, 127, (int) std::round(juce::jlimit(0.0f, 1.0f, value) * 127.0f));
+}
+
+int MpeMidiOutput::normalChannelForParticipant (int participantId, int sourceIdBase) noexcept
+{
+    // Do the subtraction in 64 bits so even sentinel/extreme int values cannot
+    // overflow before the modulo is normalised into [0, 15].
+    const auto offset = (int64_t) participantId - (int64_t) sourceIdBase;
+    const auto wrapped = ((offset % 16) + 16) % 16;
+    return (int) wrapped + 1;
 }
 
 void MpeMidiOutput::setMemberRange (int first, int last) noexcept
@@ -44,7 +80,10 @@ void MpeMidiOutput::setMemberRange (int first, int last) noexcept
     // previous range is still safe: allocateMpeChannelForSource normalises any
     // cursor value via the modulo over the current span.
     if (rangeChanged)
+    {
         roundRobinCursor = memberLast;
+        refreshMpeChannelCounts();
+    }
 }
 
 void MpeMidiOutput::reset() noexcept
@@ -52,6 +91,7 @@ void MpeMidiOutput::reset() noexcept
     for (auto& state : midiOutVoices)
         state = {};
 
+#if COSMIC_MIDI_DIAGNOSTICS
     for (auto& state : midiVoiceDebug)
     {
         state.active.store(0, std::memory_order_relaxed);
@@ -61,8 +101,12 @@ void MpeMidiOutput::reset() noexcept
         state.pitchBend.store(8192, std::memory_order_relaxed);
         state.age.store(0, std::memory_order_relaxed);
     }
+#endif
 
     mpeChannelOwner.fill(-1);
+    normalNoteRefCounts.fill(0);
+    normalChannelTimbre.fill(-1);
+    normalChannelExpression.fill(-1);
     // Re-arm the round-robin cursor so a freshly reset pool allocates memberFirst
     // first again (matches the header initialiser and the AllNotesOff/panic path).
     roundRobinCursor = memberLast;
@@ -137,15 +181,10 @@ void MpeMidiOutput::sendAllMidiNotesOff (juce::MidiBuffer& midiMessages, int sam
 
 void MpeMidiOutput::sendMidiResetMessages (juce::MidiBuffer& midiMessages, int sampleOffset)
 {
-    for (const auto& state : midiOutVoices)
-    {
-        if (! state.active || state.note < 0)
-            continue;
-
-        const int ch = juce::jlimit(1, 16, state.channel);
-        midiMessages.addEvent(juce::MidiMessage::noteOff(ch, state.note), sampleOffset);
-    }
-
+    // A fixed 16-channel sweep is both semantically stronger and realtime-safe.
+    // Enumerating all 2,560 semantic voices produced thousands of duplicate
+    // NoteOffs in shared-channel Normal mode and could exceed an audio deadline.
+    // CC123 + CC120 release every physical note regardless of ledger density.
     sendAllMidiNotesOff(midiMessages, sampleOffset);
 }
 
@@ -155,9 +194,14 @@ void MpeMidiOutput::releaseMpeChannelForSource (int sourceId) noexcept
         if (mpeChannelOwner[(size_t) ch] == sourceId)
             mpeChannelOwner[(size_t) ch] = -1;
 
+    refreshMpeChannelCounts();
+}
+
+void MpeMidiOutput::refreshMpeChannelCounts() noexcept
+{
     int active = 0;
-    for (const auto& state : midiOutVoices)
-        if (state.active && state.channel >= memberFirst && state.channel <= memberLast)
+    for (int ch = memberFirst; ch <= memberLast; ++ch)
+        if (mpeChannelOwner[(size_t) ch] >= 0)
             ++active;
 
     activeMpeVoices.store(active, std::memory_order_relaxed);
@@ -176,11 +220,35 @@ void MpeMidiOutput::sendNoteOffForSource (const MpeConfig& config, int sourceId,
         return;
 
     const int ch = juce::jlimit(1, 16, state.channel);
-    midiMessages.addEvent(juce::MidiMessage::noteOff(ch, state.note), sampleOffset);
-    midiMessages.addEvent(juce::MidiMessage::channelPressureChange(ch, 0), sampleOffset);
-
     if (config.outputType == 2)
+    {
+        // MPE member channels are per-note, so their note-off also resets the
+        // per-channel pressure and bend exactly as before.
+        midiMessages.addEvent(juce::MidiMessage::noteOff(ch, state.note), sampleOffset);
+        midiMessages.addEvent(juce::MidiMessage::channelPressureChange(ch, 0), sampleOffset);
         midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, 8192), sampleOffset);
+    }
+    else
+    {
+        // Multiple finger voices can intentionally share the same normal MIDI
+        // channel and note. Keep the physical note held until the last semantic
+        // owner releases it; channel pressure must not be zeroed because that
+        // would affect every other voice sharing the channel.
+        auto& refs = normalNoteRefCounts[(size_t) ((ch - 1) * 128 + state.note)];
+        if (refs > 0)
+        {
+            --refs;
+            if (refs == 0)
+                midiMessages.addEvent(juce::MidiMessage::noteOff(ch, state.note), sampleOffset);
+        }
+        else
+        {
+            // Defensive recovery for state created before a routing-mode/config
+            // transition: releasing the known active voice is safer than leaving
+            // a stuck note when the accounting table has no matching owner.
+            midiMessages.addEvent(juce::MidiMessage::noteOff(ch, state.note), sampleOffset);
+        }
+    }
 
     // Release the MPE member channel unconditionally. If the output type was
     // switched away from MPE while this note was held, gating the release on
@@ -189,6 +257,7 @@ void MpeMidiOutput::sendNoteOffForSource (const MpeConfig& config, int sourceId,
     releaseMpeChannelForSource(sourceId);
 
     state = {};
+#if COSMIC_MIDI_DIAGNOSTICS
     auto& debug = midiVoiceDebug[(size_t) sourceId];
     debug.active.store(0, std::memory_order_relaxed);
     debug.sourceId.store(sourceId, std::memory_order_relaxed);
@@ -196,6 +265,7 @@ void MpeMidiOutput::sendNoteOffForSource (const MpeConfig& config, int sourceId,
     debug.note.store(-1, std::memory_order_relaxed);
     debug.pitchBend.store(8192, std::memory_order_relaxed);
     debug.age.store(0, std::memory_order_relaxed);
+#endif
 }
 
 int MpeMidiOutput::allocateMpeChannelForSource (const MpeConfig& config, int sourceId,
@@ -204,7 +274,9 @@ int MpeMidiOutput::allocateMpeChannelForSource (const MpeConfig& config, int sou
     if (sourceId >= 0 && sourceId < (int) midiOutVoices.size())
     {
         const auto& state = midiOutVoices[(size_t) sourceId];
-        if (state.active && state.channel >= memberFirst && state.channel <= memberLast)
+        if (state.active
+            && state.channel >= memberFirst && state.channel <= memberLast
+            && mpeChannelOwner[(size_t) state.channel] == sourceId)
             return state.channel;
     }
 
@@ -238,16 +310,22 @@ int MpeMidiOutput::allocateMpeChannelForSource (const MpeConfig& config, int sou
     }
 
     int oldestSource = -1;
-    uint32_t oldestAge = std::numeric_limits<uint32_t>::max();
-    for (const auto& state : midiOutVoices)
+    uint64_t oldestAge = std::numeric_limits<uint64_t>::max();
+    // A full MPE zone owns at most 15 channels. Scan those owners directly
+    // instead of all 2,560 source/finger slots on every stolen note.
+    for (int ch = memberFirst; ch <= memberLast; ++ch)
     {
-        if (! state.active || state.channel < memberFirst || state.channel > memberLast)
+        const int owner = mpeChannelOwner[(size_t) ch];
+        if (owner < 0 || owner >= (int) midiOutVoices.size())
             continue;
 
+        const auto& state = midiOutVoices[(size_t) owner];
+        if (! state.active || state.channel != ch)
+            continue;
         if (state.age < oldestAge)
         {
             oldestAge = state.age;
-            oldestSource = state.sourceId;
+            oldestSource = owner;
         }
     }
 
@@ -275,21 +353,27 @@ void MpeMidiOutput::sendExpressionForSource (const MpeConfig& config, int source
     const int type = config.outputType;
     const int ch = juce::jlimit(1, 16, state.channel);
     const int pressure = pressureFromUnit(event.y);
-    const int timbre = pressureFromUnit(juce::jlimit(0.0f, 1.0f,
-        event.x * 0.68f + config.motionMacro * 0.32f));
-    const int expression = pressureFromUnit(juce::jlimit(0.0f, 1.0f,
-        event.y * 0.70f + config.energy * 0.30f));
+    // Cosmic Microwave is a direct OSC -> MIDI router. There is no longer an
+    // audio-engine macro layer biasing expression: U maps to CC74 and V maps
+    // to CC11 exactly.
+    const int timbre = pressureFromUnit(event.x);
+    const int expression = pressureFromUnit(event.y);
 
     if (type == 2)
     {
         const int bendRange = bendRangeFromChoice(config.pitchBendRangeChoice);
-        const auto pitch = convertFrequencyToMidiPitch(event.frequencyHz, bendRange);
-        if (force || std::abs(pitch.pitchBend14Bit - state.pitchBend) > 1)
+        const auto nearestPitch = convertFrequencyToMidiPitch(event.frequencyHz, bendRange);
+        const auto glidePitch = pitchBendFromBaseNote(event.frequencyHz, state.note, bendRange);
+        const int targetBend = config.pitchMode == 1 && glidePitch.reachable
+                             ? glidePitch.value : nearestPitch.pitchBend14Bit;
+        if (force || std::abs(targetBend - state.pitchBend) > 1)
         {
-            midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, pitch.pitchBend14Bit), sampleOffset);
-            state.pitchBend = pitch.pitchBend14Bit;
-            state.frequencyHz = pitch.targetFrequencyHz;
+            midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, targetBend), sampleOffset);
+            state.pitchBend = targetBend;
+            state.frequencyHz = event.frequencyHz;
+#if COSMIC_MIDI_DIAGNOSTICS
             midiVoiceDebug[(size_t) sourceId].pitchBend.store(state.pitchBend, std::memory_order_relaxed);
+#endif
         }
 
         if (force || std::abs(pressure - state.pressure) > 1)
@@ -299,16 +383,39 @@ void MpeMidiOutput::sendExpressionForSource (const MpeConfig& config, int source
         }
     }
 
-    if (force || std::abs(timbre - state.timbre) > 1)
+    const auto shouldSendTimbre = [&]
+    {
+        if (type == 2)
+            return force || std::abs(timbre - state.timbre) > 1;
+
+        // Normal participant routing lets several source voices share a channel.
+        // A per-source cache can therefore be stale relative to the last value
+        // actually sent on that channel, so normal mode uses channel-wide caches.
+        return force || std::abs(timbre - normalChannelTimbre[(size_t) (ch - 1)]) > 1;
+    };
+
+    if (shouldSendTimbre())
     {
         midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 74, timbre), sampleOffset);
         state.timbre = timbre;
+        if (type != 2)
+            normalChannelTimbre[(size_t) (ch - 1)] = timbre;
     }
 
-    if (force || std::abs(expression - state.expression) > 1)
+    const auto shouldSendExpression = [&]
+    {
+        if (type == 2)
+            return force || std::abs(expression - state.expression) > 1;
+
+        return force || std::abs(expression - normalChannelExpression[(size_t) (ch - 1)]) > 1;
+    };
+
+    if (shouldSendExpression())
     {
         midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 11, expression), sampleOffset);
         state.expression = expression;
+        if (type != 2)
+            normalChannelExpression[(size_t) (ch - 1)] = expression;
     }
 }
 
@@ -354,10 +461,8 @@ void MpeMidiOutput::handleMidiSourceEvent (const MpeConfig& config, const NoteEv
         return;
     }
 
-    if (outputType == 2
-        && config.pitchMode == 1
-        && state.active
-        && state.note == pitch.noteNumber)
+    if (outputType == 2 && config.pitchMode == 1 && state.active
+        && pitchBendFromBaseNote(event.frequencyHz, state.note, bendRange).reachable)
     {
         sendExpressionForSource(config, sourceId, event, midiMessages, sampleOffset, true);
         return;
@@ -380,10 +485,8 @@ void MpeMidiOutput::handleMidiSourceEvent (const MpeConfig& config, const NoteEv
         mpeChannelOwner[(size_t) ch] = sourceId;
 
         midiMessages.addEvent(juce::MidiMessage::pitchWheel(ch, pitch.pitchBend14Bit), sampleOffset);
-        const int timbre = pressureFromUnit(juce::jlimit(0.0f, 1.0f,
-            event.x * 0.68f + config.motionMacro * 0.32f));
-        const int expression = pressureFromUnit(juce::jlimit(0.0f, 1.0f,
-            event.y * 0.70f + config.energy * 0.30f));
+        const int timbre = pressureFromUnit(event.x);
+        const int expression = pressureFromUnit(event.y);
         const int pressure = pressureFromUnit(event.y);
         midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 74, timbre), sampleOffset);
         midiMessages.addEvent(juce::MidiMessage::controllerEvent(ch, 11, expression), sampleOffset);
@@ -392,35 +495,44 @@ void MpeMidiOutput::handleMidiSourceEvent (const MpeConfig& config, const NoteEv
         state.pressure = pressure;
         state.timbre = timbre;
         state.expression = expression;
+#if COSMIC_MIDI_DIAGNOSTICS
         auto& debug = midiVoiceDebug[(size_t) sourceId];
         debug.sourceId.store(sourceId, std::memory_order_relaxed);
         debug.channel.store(ch, std::memory_order_relaxed);
         debug.note.store(state.note, std::memory_order_relaxed);
         debug.pitchBend.store(state.pitchBend, std::memory_order_relaxed);
-        debug.age.store((int) state.age, std::memory_order_relaxed);
+        debug.age.store(state.age, std::memory_order_relaxed);
         debug.active.store(1, std::memory_order_release);
-        int active = 0;
-        for (const auto& voiceState : midiOutVoices)
-            if (voiceState.active && voiceState.channel >= memberFirst && voiceState.channel <= memberLast)
-                ++active;
-        activeMpeVoices.store(active, std::memory_order_relaxed);
-        availableMpeChannels.store(juce::jmax(0, memberLast - memberFirst + 1 - active),
-                                   std::memory_order_relaxed);
+#endif
+        refreshMpeChannelCounts();
     }
     else
     {
-        const int ch = juce::jlimit(1, 16, config.normalMidiChannel + 1);
+        const bool routeByParticipant = config.normalRoutingMode == 1
+                                     && event.participantId >= 0;
+        const int ch = routeByParticipant
+                     ? normalChannelForParticipant(event.participantId)
+                     : juce::jlimit(1, 16, config.normalMidiChannel + 1);
         state.channel = ch;
         state.pitchBend = 8192;
-        midiMessages.addEvent(juce::MidiMessage::noteOn(ch, state.note, (juce::uint8) velocity), sampleOffset);
+        auto& refs = normalNoteRefCounts[(size_t) ((ch - 1) * 128 + state.note)];
+        if (refs == 0)
+            midiMessages.addEvent(juce::MidiMessage::noteOn(ch, state.note, (juce::uint8) velocity), sampleOffset);
+
+        // The fixed source capacity bounds simultaneous semantic owners well
+        // below uint16_t's maximum, but retain a release-safe saturation guard.
+        if (refs < std::numeric_limits<uint16_t>::max())
+            ++refs;
         sendExpressionForSource(config, sourceId, event, midiMessages, sampleOffset, true);
+#if COSMIC_MIDI_DIAGNOSTICS
         auto& debug = midiVoiceDebug[(size_t) sourceId];
         debug.sourceId.store(sourceId, std::memory_order_relaxed);
         debug.channel.store(ch, std::memory_order_relaxed);
         debug.note.store(state.note, std::memory_order_relaxed);
         debug.pitchBend.store(state.pitchBend, std::memory_order_relaxed);
-        debug.age.store((int) state.age, std::memory_order_relaxed);
+        debug.age.store(state.age, std::memory_order_relaxed);
         debug.active.store(1, std::memory_order_release);
+#endif
     }
 
     midiNotesSent.fetch_add(1, std::memory_order_relaxed);
@@ -435,8 +547,9 @@ void MpeMidiOutput::render (const MpeConfig& config,
     // the channel-allocation range matches the processor byte-for-byte. B8: the
     // lower clamp is relaxed from 2 to 1 so the zone-derived Upper range (members
     // 1..15) is honoured; Lower (2..16) is unaffected.
-    memberFirst = juce::jlimit(1, 16, config.memberFirst);
-    memberLast = juce::jlimit(memberFirst, 16, config.memberLast);
+    const int configuredFirst = juce::jlimit(1, 16, config.memberFirst);
+    const int configuredLast = juce::jlimit(configuredFirst, 16, config.memberLast);
+    setMemberRange(configuredFirst, configuredLast);
 
     const int outputType = config.outputType;
     if (outputType == 2)
@@ -449,13 +562,13 @@ void MpeMidiOutput::render (const MpeConfig& config,
 
 void MpeMidiOutput::recordOutgoingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept
 {
+#if COSMIC_MIDI_DIAGNOSTICS
     if (midiMessages.isEmpty())
         return;
 
     for (const auto metadata : midiMessages)
     {
-        const auto message = metadata.getMessage();
-        const int rawSize = message.getRawDataSize();
+        const int rawSize = metadata.numBytes;
         if (rawSize <= 0 || rawSize > 3)
             continue;
 
@@ -465,16 +578,20 @@ void MpeMidiOutput::recordOutgoingMidiDebugEvents (const juce::MidiBuffer& midiM
         slot.sampleOffset.store(metadata.samplePosition, std::memory_order_relaxed);
         slot.size.store(rawSize, std::memory_order_relaxed);
 
-        const auto* raw = message.getRawData();
+        const auto* raw = metadata.data;
         slot.byte0.store(rawSize > 0 ? raw[0] : 0, std::memory_order_relaxed);
         slot.byte1.store(rawSize > 1 ? raw[1] : 0, std::memory_order_relaxed);
         slot.byte2.store(rawSize > 2 ? raw[2] : 0, std::memory_order_relaxed);
         slot.sequence.store(seq, std::memory_order_release);
     }
+#else
+    juce::ignoreUnused(midiMessages);
+#endif
 }
 
 bool MpeMidiOutput::readOutgoingDebugSlot (uint32_t seq, OutgoingDebugEvent& out) const noexcept
 {
+#if COSMIC_MIDI_DIAGNOSTICS
     const auto& slot = midiDebugEvents[(size_t) ((seq - 1) % kDebugEventQueueSize)];
     const auto storedSeq = slot.sequence.load(std::memory_order_acquire);
     if (storedSeq != seq)
@@ -486,11 +603,16 @@ bool MpeMidiOutput::readOutgoingDebugSlot (uint32_t seq, OutgoingDebugEvent& out
     out.b1 = slot.byte1.load(std::memory_order_relaxed);
     out.b2 = slot.byte2.load(std::memory_order_relaxed);
     return true;
+#else
+    juce::ignoreUnused(seq, out);
+    return false;
+#endif
 }
 
 MpeMidiOutput::VoiceDebugSnapshot MpeMidiOutput::getVoiceDebugSnapshot (int index) const noexcept
 {
     VoiceDebugSnapshot out;
+#if COSMIC_MIDI_DIAGNOSTICS
     if (index < 0 || index >= (int) midiVoiceDebug.size())
         return out;
 
@@ -501,18 +623,8 @@ MpeMidiOutput::VoiceDebugSnapshot MpeMidiOutput::getVoiceDebugSnapshot (int inde
     out.note = voice.note.load(std::memory_order_relaxed);
     out.pitchBend = voice.pitchBend.load(std::memory_order_relaxed);
     out.age = voice.age.load(std::memory_order_relaxed);
+#else
+    juce::ignoreUnused(index);
+#endif
     return out;
-}
-
-std::vector<MpeMidiOutput::ActiveNoteOff> MpeMidiOutput::getActiveNoteOffs() const
-{
-    std::vector<ActiveNoteOff> result;
-    for (const auto& state : midiOutVoices)
-    {
-        if (! state.active || state.note < 0)
-            continue;
-
-        result.push_back({ juce::jlimit(1, 16, state.channel), state.note });
-    }
-    return result;
 }

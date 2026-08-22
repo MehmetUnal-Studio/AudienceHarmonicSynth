@@ -1,265 +1,222 @@
-# 02 — UI Guide
+# 02 - UI Guide
 
-This chapter walks the SpektraSynth editor section by section, using the labels you
-actually see on screen. Almost every control has a tooltip — hover it for about a
-second to read a one-line description in place.
+Cosmic Microwave is an OSC-to-MIDI router. The editor is focused on five jobs:
+selecting the UDP input, confirming source identity, mapping horizontal movement to
+notes, choosing Normal MIDI or MPE, and selecting a MIDI destination.
 
-Layout overview (top to bottom):
+The product does not generate sound. It remains a silent stereo instrument shell so
+Ableton can keep the same device placement and session identity, but its behaviour and
+all visible controls are MIDI-only.
+
+## Layout
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│ Top bar: brand · status pills · Performance · Debug · Mute · Panic   │
-├─────────────┬────────────────────────────────────────────────────────┤
-│ LIBRARY     │ AUDIENCE MAP  (or MIDI CONSOLE in Debug view)          │
-│ rail        ├────────────────────────────────────────────────────────┤
-│ Samples /   │ SCALE KEYBOARD                                         │
-│ Elements    ├────────────────────────────────────────────────────────┤
-│             │ Macro panel: ENGINE/SOUND MODE · ENERGY MOTION TONE    │
-│             │ SPACE · ROOT/OCT/SCALE/RANGE · POLY/Freeze             │
-│             │ output row: OUTPUT MODE … MIDI OUT … ZONE … Rescan     │
-│             ├────────────────────────────────────────────────────────┤
-│             │ TEXTURE | VOICES   (tabbed module)                     │
-│             ├────────────────────────────────────────────────────────┤
-│             │ NETWORK · SIMULATOR · PARTICIPANTS / ACTIVE VOICES     │
-└─────────────┴────────────────────────────────────────────────────────┘
++--------------------------------------------------------------------------+
+| COSMIC MICROWAVE   MIDI ONLY   SOURCES | FINGERS | NOTES | MPE VOICES    |
++----------------------+------------------------+--------------------------+
+| OSC INPUT            | SOURCE ROUTING         | SIMULATOR                |
++----------------------+------------------------+--------------------------+
+|                                                       | PITCH MAPPING    |
+| SOURCE MATRIX                                        +------------------+
+| 256 source IDs grouped into 16 MIDI-channel columns  | MIDI ROUTING     |
+|                                                       +------------------+
+|                                                       | MIDI OUTPUT      |
++-------------------------------------------------------+------------------+
 ```
 
-## Top bar
+The editor opens at `1120 x 640`, is resizable, and keeps the activity map large while
+the routing controls stay together in the right column.
 
-Left to right:
+## Header
 
-- **Brand mark** — "SpektraSynth / Audience Spectral Engine".
-- **Status pills** (informational, they appear as window width allows):
-  - **LIVE / OFF** — whether the OSC listener is running.
-  - **MODE** — `SAMPLE` or `ELEMENT` (current engine source).
-  - **PLAY** — current sample playback mode (shown in Sample mode only).
-  - **SEATS** — registered audience seats.
-  - **VOICES** — active synth voices.
-  - **LIB** — samples loaded in the active library.
-  - **DOM** — the dominant sample/voice name.
-  - **UDP** — the OSC port (green) or `busy` (red) if it could not be bound.
-- **Performance** toggle — opens the large stage-readable overlay (below).
-- **Debug** toggle — replaces the audience map with the MIDI console (below).
-- **Mute** toggle — mutes plugin output without touching current seats.
-- **Panic** — immediately clears all live/simulated seats and stops voices, delay,
-  and reverb; also resets the MIDI/MPE output state.
+The header identifies the device as **COSMIC MICROWAVE**, labels its role as
+**OSC / MIDI ROUTING INSTRUMENT**, and shows a **MIDI ONLY** badge. Four live metrics
+appear on the right:
 
-## Library rail (left)
+- **SOURCES** - OSC or simulator source IDs with at least one active finger.
+- **FINGERS** - the total number of active fingers across those sources.
+- **NOTES** - note-on messages emitted since the current MIDI state was reset.
+- **MPE VOICES** - member channels currently occupied in MPE mode. This is MIDI
+  channel allocation, not an internal sound-engine count.
 
-Header **LIBRARY**, with two tabs:
+## OSC INPUT
 
-- **Samples** — your sample libraries (subfolders of `Samples/`). Click a library to
-  load it; this also switches **ENGINE** to *Sample Library*. A search box
-  ("Search libraries…") filters the list and **Rescan** re-scans the folder. Cached
-  sample counts and the active library status are shown, plus an **ACTIVE PATCH**
-  banner at the bottom.
-- **Elements** — the 29 translated element spectra (Hydrogen … Zinc). Click an element
-  to select it; this also switches **ENGINE** to *Element Spectral Synth*. The search
-  box ("Search elements…") filters by name.
+Enter the UDP listen port for this instance and click **Apply**, or press Return.
+Valid ports are `1` through `65535`; the default is `6060`. Escape abandons an edit
+and restores the active port.
 
-## Audience map (centre)
+The status line distinguishes these states:
 
-The **AUDIENCE MAP** visualizes the venue: 26 rows (A–Z) × 100 columns (0–99). Active
-seats appear as glowing dots — horizontal position tracks pitch (labels read
-**LOW PITCH / STAGE**, **MID**, **HIGH PITCH / STAGE**), dot size/intensity tracks the
-seat's Y value. Beneath the map a spectral strip shows the active scale: for element
-scales it draws the translated emission lines on a wavelength ruler (nm), a frequency
-axis (Hz), the **DOM**inant note, and — when there is room — a circular
-**WAVELENGTH WHEEL** (380–750 nm) that lights up with the lines that are sounding.
+- **Listening ... waiting for data** - the socket is ready but has not received a
+  valid message.
+- **Receiving** - valid OSC traffic arrived recently.
+- **Listening ... last message ... ago** - the socket is still ready and shows the
+  age of the most recent valid message.
+- A red error - the port could not be used or the shared receiver has no free client
+  slot.
 
-**Empty state:** when no seats are registered and nothing is sounding, the map shows
-a dim centred hint — **“Waiting for audience”** — with the live listener status under
-it (*“Listening for OSC on UDP 6060”*, *“OSC port 6060 unavailable”*, or *“OSC bridge
-offline”*). It disappears the moment a seat or voice appears, so a live audience never
-sees it.
+The address reminder beneath the status is:
 
-## SCALE KEYBOARD row
+```text
+/cs/{zone}/{source}/finger{n}/{on|off|u|v}
+```
 
-A one-octave-style strip of keys, one per scale step of the current scale (musical or
-spectral). Header shows **SCALE KEYBOARD**, the current scale name, and how much of it
-the computer keyboard covers (e.g. *“computer keys cover first 36 / 74”*).
+Each instance listens to one UDP port. The upstream server should therefore send one
+already-separated zone to each instance. The zone is still read from each OSC address;
+it is not inferred from the port number.
 
-- **Mouse:** click or drag across keys to play steps directly (drag glides from step to
-  step). These keyboard notes do *not* register as audience seats.
-- **Computer keys:** `1–0`, `Q–P`, `A–L`, `Z–M` map to steps 1–36. The editor must have
-  keyboard focus (click anywhere in it first).
-- **Labels:** each key shows its nearest note name on top and its computer key at the
-  bottom.
-- **Spectral strength bars:** in element scales, each key carries a small bar whose
-  height tracks the emission-line strength of that degree — stronger lines, brighter
-  bars.
-- **Active-step glow:** steps that are currently *sounding in the engine* (from
-  audience, simulator, MIDI, or keyboard) get an unmistakable halo — an accent outline
-  plus a white core outline and an underline, all scaling with the live voice
-  amplitude. This is how you see which microtonal degrees are ringing at a glance.
+## SOURCE ROUTING
 
-External MIDI keyboards play through this same strip; see **MIDI IN** below.
+This card is a read-only summary of the current MIDI mode. It does not assign channels
+packet by packet.
 
-## Macro panel
+In **Normal MIDI / Per source 1-16**, the card shows the stable mapping:
 
-### ENGINE and SOUND MODE (left block)
+```text
+1 -> Ch 1   2 -> Ch 2   ...   16 -> Ch 16   17 -> Ch 1
+```
 
-- **ENGINE** — *Sample Library* or *Element Spectral Synth*. This is the master source
-  switch:
-  - **Sample Library** — voices play samples from the active library. The
-    **SAMPLE PLAYBACK** combo (VOICES tab) selects **Sample Player** (direct,
-    pitch-shifted sample playback) or **Granular** (the grain-cloud engine). Sample
-    libraries default to direct playback; granular is an explicit choice.
-  - **Element Spectral Synth** — voices are additive oscillator banks built from the
-    selected element's raw emission lines. The longest positive-intensity wavelength
-    maps to the played root; every other line becomes a partial at ratio
-    `λ_ref / λ_i` with its catalogue intensity as amplitude. No sample library is
-    needed in this mode.
-- **SOUND MODE** — the engine personality: **Choir Cloud**, **Glass Harmonics**,
-  **Sub Swarm**, **Spectral Rain**, or **Frozen Hall**.
+Source `0` is accepted and wraps to Channel 16. Every finger and every `on`, `off`,
+`u`, and `v` message belonging to a source uses that source's channel.
 
-### The four macros
+The summary changes when **Single channel**, **MPE MIDI**, or **Off** is selected. Its
+bottom line reports the zone letters observed in valid OSC addresses and the current
+source/finger totals. If more than one zone appears, check the upstream port split;
+the plugin observes zone data but does not filter traffic by zone.
 
-The highlighted group of knobs is meant for live performance:
+## SIMULATOR
 
-- **ENERGY** — raises level, saturation, density, and trigger responsiveness.
-- **MOTION** — adds organic movement; in Granular mode it increases grain spread.
-- **TONE** — opens the voice filter and reverb brightness.
-- **SPACE** — expands reverb and cross-delay.
+The simulator exercises the same source-to-MIDI path without network traffic:
 
-(ENERGY and MOTION also blend into the outgoing MPE expression — see
-[03 — MPE Setup](03-mpe-setup.md).)
+- **+ Source** - add one simulated source.
+- **+ 25** - add 25 simulated sources.
+- **Remove** - release one simulated source.
+- **Clear** - release and remove all simulated sources.
+- **Random movement** - continuously change the simulated horizontal and vertical
+  values.
 
-### Scale zone
+Simulator sources use the same `0..255` source pool and the same channel rules as OSC
+sources. **Clear** affects simulator sources; use **PANIC** for a global release.
 
-- **ROOT** — root note, C through B.
-- **OCT** — root octave (0–6). For element spectra the spectral *intervals* are
-  preserved while the whole scale moves to this root.
-- **SCALE** — what X movement quantizes to. Seven musical maps (**Major**,
-  **Natural Minor**, **Pentatonic**, **Dorian**, **Lydian**, **Harmonic Minor**,
-  **Whole Tone**) followed by 29 **… Spectrum** entries (*Hydrogen Spectrum* …
-  *Zinc Spectrum*) — the translated atomic scales. In Element engine mode the SCALE
-  combo is hidden; the selected **ELEMENT** defines the scale.
-- **RANGE** — how many octaves the X axis covers (1–6, default 4).
+## SOURCE MATRIX
 
-### Output zone (right block)
+The central map displays all 256 source IDs in 16 columns. Each column represents one
+Normal MIDI channel, and each column contains the 16 IDs assigned to it. For example,
+the Channel 1 column contains `1, 17, 33, ...`, while source `0` occupies the final
+cell of the Channel 16 column.
 
-- **POLY** — voice budget: **Normal** 256, **High** 512, **Ultra** 1024 voices.
-  Unison folds down automatically (3 → 2 → 1 voices per trigger) as the crowd grows.
-- **Freeze** — holds active grain clouds and freezes the reverb tail.
-- **OUTPUT ARMED / OUTPUT MUTED** — live output status readout, plus the current
-  voice **LIMIT** and adaptive unison count (e.g. `U3`).
+Inactive cells are dim. An active source lights its cell and shows a white point whose
+position follows the source's most recent X/Y values. The point grows slightly when
+more fingers are active. The map is a monitor; selecting a cell does not change
+routing.
 
-### MIDI output row
+## PITCH MAPPING
 
-A boxed row along the bottom of the macro panel (details in
-[03 — MPE Setup](03-mpe-setup.md)):
+The **PITCH MAPPING** card controls how normalized horizontal position is
+mapped. The compact selector in the card header chooses **Tonal** or **Atomic**. Both
+systems share:
 
-- **OUTPUT MODE** — *Audio Only*, *MIDI Only*, or *Audio + MIDI*.
-- **MIDI OUT** — *Off*, *Normal MIDI*, or *MPE MIDI*.
-- **MIDI IN** — how *incoming* MIDI notes are interpreted: **Direct** (plain MIDI
-  pitch), **Scale** (quantize to the current scale), or **Trigger** (keys index the
-  visible scale-keyboard steps — ideal for compact atomic scales).
-- **MIDI OUTPUT** — destination: the host MIDI bus, the virtual port
-  *SpektraSynth MIDI Out*, or any system MIDI device.
-- **CH** — the single channel used by Normal MIDI.
-- **BEND** — MPE pitch-bend range: 2 / 12 / 24 / 48 st (default **2 st**).
-- **MPE PITCH** — *Retrig* or *Glide*.
-- **ZONE** — MPE zone: *Lower* (master ch 1, members 2–16) or *Upper* (master ch 16,
-  members 1–15).
-- **Setup** — sends the MPE zone + bend-range RPN setup messages when needed.
-- **Rescan** — re-scans system MIDI output devices.
-- A status line shows the active destination, and an activity readout counts notes
-  (`MIDI n`) and, in MPE mode, active voices vs free member channels (`MPE a/f`).
+- **ROOT** - `C` through `B`.
+- **OCTAVE** - root octave `0` through `6`.
+- **RANGE** - `1` through `6` octaves.
 
-Controls that do not apply to the current mode are dimmed and disabled rather than
-hidden (e.g. **CH** is only active for Normal MIDI; **BEND/MPE PITCH/ZONE/Setup** only
-for MPE). The **BEND**, **MPE PITCH**, **ZONE**, **Setup** and **Rescan** controls
-need horizontal space — if you don't see them, widen the plugin window.
+With **Tonal** selected, **SCALE** offers **Major**, **Natural Minor**,
+**Pentatonic**, **Dorian**, **Lydian**, **Harmonic Minor**, and **Whole Tone**. These
+are standard 12-TET maps.
 
-## TEXTURE / VOICES tabs
+With **Atomic** selected, two fields replace Scale:
 
-The bottom module is tabbed; click **TEXTURE** or **VOICES**. The panel subtitle shows
-context — in Element mode, the element name and its root wavelength in nm.
+- **ELEMENT** - one of 29 stored element spectra from Hydrogen (`H`) through Zinc
+  (`Zn`).
+- **DENSITY** - **Core**, **Extended**, **Microtonal**, **Scientific**, or
+  **Raw 128**. Their maximum degree counts per octave are respectively 7, 12, 24,
+  48, and 128; an element can contain fewer usable degrees than the cap.
 
-**TEXTURE** — global mix and space:
+New sessions default to **Atomic / Helium / Extended**, root C2, across four octaves.
+The Pitch System control's tooltip reports the selected element, actual degree count,
+and reference wavelength.
 
-- **PITCH** (global transpose, ±12 st), **LAYER MIX**, **WET/DRY**, **REVERB**,
-  **DELAY**, **TAPE** (tape-style saturation before the limiter), **MASTER**, and
-  **STRETCH** (see below).
+An input at X=`0` selects the first available scale step and X=`1` selects the last.
+Intermediate values divide the configured pitch table into equal step regions. If a
+high root and a long range reach MIDI's upper representable edge, the table stops
+safely rather than pinning additional steps to note 127.
 
-**VOICES** — per-voice shaping, grain engine, and the spectral controls:
+For Atomic maps, Normal MIDI sends the nearest semitone. MPE uses the exact
+element-derived frequency target, represented by the nearest base note and per-note
+pitch bend. Match the receiving instrument's MPE bend range.
 
-- **ATTACK**, **RELEASE**, **BRIGHTNESS**, **MOVEMENT**.
-- Granular controls (active only when SAMPLE PLAYBACK = Granular; dimmed otherwise):
-  **SIZE**, **DENSITY**, **PITCH SPREAD**, **POSITION**, **STEREO**, **ENV** (grain
-  window: Hann / Triangle / Soft Gate / Pulse), **Reverse**.
-- Engine-dependent column:
-  - Sample mode: **SAMPLE PLAYBACK** (*Sample Player* / *Granular*).
-  - Element mode: **ELEMENT** (the 29-element list) and **Solo**.
-- **ATOM SCALE** — how the element's raw lines are clustered into a *playable* scale
-  (the timbre always keeps the full raw spectrum):
+Changing any pitch-map control safely releases and retriggers held OSC fingers at
+their new mapped notes.
 
-  | Mode | Max degrees | Min separation | Use |
-  |---|---:|---:|---|
-  | Core | 7 | 80 ct | sparse melodic performance |
-  | Extended *(default)* | 12 | 40 ct | playable atomic scale |
-  | Microtonal | 24 | 20 ct | denser microtonal playing |
-  | Scientific | 48 | 10 ct | high-detail inspection |
-  | Raw | unlimited | 0 ct | one degree per raw line |
+## MIDI ROUTING
 
-- **PARTIAL** (Element Partial, 1–512) with the **Solo** toggle:
-  - **Solo off (default):** the knob **limits how many partials are audible** — the
-    additive engine renders at most this many of the element's raw lines per voice
-    (default: all, up to 512). Turn it down to thin the timbre or to save CPU; levels
-    are compensated as the count drops.
-  - **Solo on:** auditioning mode — the knob selects **one raw spectral line** and
-    plays only that line, at full equal loudness regardless of its catalogue
-    intensity. Use it to inspect individual frequencies of the fingerprint.
-- **STRETCH** (on the TEXTURE tab) — stretches or compresses the element's frequency
-  ratios around the root wavelength (±0.35 exponent): a subtle in/harmonicity control
-  for the translated spectrum.
+### OUTPUT
 
-## NETWORK / SIMULATOR ribbon
+- **Off** - keep receiving and displaying OSC, but emit no MIDI.
+- **Normal MIDI** - send conventional channel MIDI.
+- **MPE MIDI** - allocate a member channel per active finger and send per-note
+  expression.
 
-- **NETWORK** — the UDP port field plus **Apply** (restarts the OSC listener on the
-  new port), and a green dot while listening. See
-  [04 — OSC & the Audience](04-osc-audience.md).
-- **SIMULATOR** — a fake audience for testing without any network traffic:
-  **+ Add** (one participant on a free seat), **+25 Crowd**, **Remove**,
-  **Random Movement** (continuously drifts every active participant), and
-  **Clear All** (same as Panic: clears all seats and stops voices/FX).
-- **PARTICIPANTS** and **ACTIVE VOICES** counters (e.g. `0042/256`).
+Incoming MIDI from the host is passed through while output is enabled.
 
-## Performance view
+### Normal MIDI controls
 
-The **Performance** toggle (top bar) overlays a large, stage-readable display intended
-for live use: the active library/patch name in big type; an engine / sound mode /
-scale / range / polyphony summary line; a full-width **AUDIENCE MAP A–Z / 0–99**; a
-live **SPECTRUM** band strip; and five metric cards — **ACTIVE SEATS**,
-**ACTIVE VOICES**, **ELEMENT** (or **PLAYBACK** in Sample mode), **SCALE / ZONE**, and
-**DOMINANT**. A red **MUTED** badge appears if output is muted. Performance view takes
-precedence over Debug view while enabled.
+- **Per source 1-16** - source identity selects Channels 1-16 with the stable wrap
+  shown above. This is the intended audience-routing mode.
+- **Single channel** - send every source through the selected **FIXED CHANNEL**.
 
-## Debug view
+Each finger is still an independent note owner. If several fingers land on the same
+channel and note, reference counting keeps that note held until the last owner releases
+it.
 
-The **Debug** toggle swaps the audience map for the **MIDI CONSOLE** — the diagnostics
-panel:
+### MPE controls
 
-- **outgoing MIDI / MPE** — a live console of every outgoing MIDI message (host /
-  virtual port / MPE stream), with a **Copy** button that puts the full outgoing
-  event ring (decoded, byte-level) on the clipboard.
-- **scale + status** and **root octave** readouts — the resolved scale table and
-  tuning state.
-- **debug report** — incoming MIDI, keyboard slots, and active MPE voices (source,
-  channel, note, pitch bend, age), with a **Copy Report** button that copies the
-  complete state + incoming + outgoing report for bug reports.
+- **ZONE** - **Lower** uses master Channel 1 and members 2-16; **Upper** uses master
+  Channel 16 and members 1-15.
+- **BEND RANGE** - `+/-2`, `+/-12`, `+/-24`, or `+/-48` semitones. Match this on the
+  receiving instrument.
+- **PITCH MOTION** - **Retrigger** starts a new MIDI note when a mapped pitch changes;
+  **Glide** can update pitch bend while the target remains within the same base note.
+- **Send MPE setup** - send the MPE zone message and member-channel pitch-bend-range
+  RPN messages when setup is required.
 
-Use Debug view whenever you need to verify exactly which bytes SpektraSynth is sending
-— it is the fastest way to settle "is it the plugin or the receiver?" questions.
+MPE has 15 member channels. When all are occupied, the oldest active MPE note is
+released before its member channel is reused.
 
-## Element-colour theming
+## MIDI OUTPUT
 
-When the Element Spectral Synth is active, the UI keys itself to the element's
-identity: the root emission wavelength is converted to its visible-spectrum colour
-(380–750 nm; wavelengths outside the visible band fall back to a neutral grey), and
-that hue tints the module subtitle, the performance-overlay seat dots, the spectrum
-strip, and the **ELEMENT** metric card. Scale-keyboard keys and spectral strips are
-additionally colour-ramped by pitch, so low-to-high reads as a spectral gradient.
-Pick Helium, then Neon, then Iron — the instrument visibly changes identity with the
-translated spectrum.
+The **DESTINATION** menu contains:
+
+- **Host MIDI Output** - the plugin's MIDI output bus in the DAW.
+- **Virtual: Cosmic Microwave <port> Out** - a port-stable system endpoint, for
+  example `Cosmic Microwave 6060 Out`.
+- Available system or hardware MIDI outputs.
+
+**Rescan** refreshes the destination list. The two lines below it report the selected
+route and whether it opened successfully. Selecting a virtual or hardware destination
+does not disable the host MIDI bus; the same stream remains available to the host.
+
+For Ableton channel separation, the virtual endpoint is recommended. Receiving tracks
+can select `Cosmic Microwave 6060 Out` and then choose Channel 1, Channel 2, and so on.
+The endpoint name follows the instance's UDP port, so the Zone A and Zone B instances
+remain easy to identify after reopening a session.
+
+### PANIC
+
+**PANIC** is the global safety control. It clears the active source state and sends
+note-off, channel-pressure reset, centered pitch bend, All Notes Off, and All Sound
+Off messages as appropriate across the host and selected external route. Use it after
+a sender disconnect, a routing change, or any suspected missing `off` packet.
+
+## Recommended one-zone workflow
+
+1. Place one Cosmic Microwave instance for each already-separated zone.
+2. Set the instance's UDP port, for example `6060` for Zone A and `6061` for Zone B.
+3. Choose **Normal MIDI -> Per source 1-16** for channel-separated routing, or choose
+   **MPE MIDI** for per-note expression.
+4. Select the port-named virtual destination for the clearest Ableton routing.
+5. Confirm the observed zone, source count, activity map, destination status, and then
+   test **PANIC** before the audience connects.
+
+See [04 - OSC & the Audience](04-osc-audience.md) for the wire format and
+[03 - MPE Setup](03-mpe-setup.md) for receiver configuration.

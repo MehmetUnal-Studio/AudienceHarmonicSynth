@@ -1,9 +1,13 @@
 #include "../Source/OscBridge.h"
+#include "../Source/OscWireFormat.h"
 #include "../Source/SeatEventSink.h"
 
+#include <array>
 #include <atomic>
+#include <cmath>
 #include <iostream>
-#include <utility>
+#include <limits>
+#include <memory>
 
 namespace
 {
@@ -33,8 +37,27 @@ namespace
             onCount.fetch_add(1);
         }
 
+        void setFingerX (int row, int sourceId, int finger, float xNorm) override
+        {
+            lastFinger.store(finger);
+            setX(row, sourceId, xNorm);
+        }
+
+        void setFingerY (int row, int sourceId, int finger, float yNorm) override
+        {
+            lastFinger.store(finger);
+            setY(row, sourceId, yNorm);
+        }
+
+        void setFingerOn (int row, int sourceId, int finger, bool on) override
+        {
+            lastFinger.store(finger);
+            setOn(row, sourceId, on);
+        }
+
         std::atomic<int> lastRow { -1 };
         std::atomic<int> lastCol { -1 };
+        std::atomic<int> lastFinger { -1 };
         std::atomic<int> xCount { 0 };
         std::atomic<int> yCount { 0 };
         std::atomic<int> onCount { 0 };
@@ -49,11 +72,75 @@ namespace
         if (! ok)
             ++failed;
     }
+
+    bool waitForCount (const std::atomic<int>& count, int target)
+    {
+        for (int i = 0; i < 200; ++i)
+        {
+            if (count.load() >= target)
+                return true;
+            juce::Thread::sleep(5);
+        }
+        return count.load() >= target;
+    }
+
+    bool waitForValidMessageCount (const OscBridge& bridge, uint32_t target)
+    {
+        for (int i = 0; i < 200; ++i)
+        {
+            if (bridge.getValidMessageCount() >= target)
+                return true;
+            juce::Thread::sleep(5);
+        }
+        return bridge.getValidMessageCount() >= target;
+    }
+
+    bool nearlyEqual (float a, float b) noexcept
+    {
+        return std::abs(a - b) < 1.0e-5f;
+    }
 }
 
 int main()
 {
     int failed = 0;
+
+    // Address parsing preserves source and finger identity. The audio grid is
+    // still 100 columns wide, while OSC accepts participant ids 0..255.
+    {
+        const auto parsed = osc_wire::parseAddress(
+            "/cs/A/255/finger9/u", SeatEventSink::MAX_OSC_SOURCES);
+        expect(parsed.valid && parsed.row == 0 && parsed.col == 255
+                   && parsed.finger == 9
+                   && osc_wire::classifyParam(parsed.param) == osc_wire::Param::U,
+               "source 255, finger9 and /u parse successfully", failed);
+
+        expect(! osc_wire::parseAddress(
+                    "/cs/A/256/finger0/u", SeatEventSink::MAX_OSC_SOURCES).valid,
+               "source 256 is outside the OSC participant range", failed);
+
+        expect(osc_wire::parseAddress(
+                   "/cs/Z/0/finger0/on", SeatEventSink::MAX_OSC_SOURCES).valid,
+               "finger0 is valid", failed);
+        expect(osc_wire::parseAddress(
+                   "/cs/Z/0/finger9/off", SeatEventSink::MAX_OSC_SOURCES).valid,
+               "finger9 is valid", failed);
+
+        constexpr const char* invalidFingers[] = {
+            "/cs/A/1/finger/u",
+            "/cs/A/1/finger10/u",
+            "/cs/A/1/finger01/u",
+            "/cs/A/1/fingerx/u",
+            "/cs/A/1/Finger1/u",
+            "/cs/A/1/thumb1/u"
+        };
+        bool allRejected = true;
+        for (const auto* address : invalidFingers)
+            allRejected = allRejected
+                && ! osc_wire::parseAddress(address, SeatEventSink::MAX_OSC_SOURCES).valid;
+        expect(allRejected, "only exact finger0..finger9 segments are accepted", failed);
+    }
+
     CountingSink sinkA, sinkB;
     OscBridge bridgeA(sinkA), bridgeB(sinkB);
 
@@ -68,8 +155,9 @@ int main()
         }
     }
 
-    expect(started && bridgeA.isRunning() && bridgeB.isRunning(),
-           "two OscBridge instances can share one UDP port inside the host process", failed);
+    expect(started && bridgeA.isRunning() && bridgeB.isRunning()
+               && bridgeA.isReceiving() && bridgeB.isReceiving(),
+           "two shared-port OscBridge instances are running and receiving", failed);
 
     juce::OSCSender sender;
     const bool connected = sender.connect("127.0.0.1", port);
@@ -77,251 +165,247 @@ int main()
 
     if (connected)
     {
+        const int aOn = sinkA.onCount.load();
+        const int aX = sinkA.xCount.load();
+        const int aY = sinkA.yCount.load();
+        const int bOn = sinkB.onCount.load();
+        const int bX = sinkB.xCount.load();
+        const int bY = sinkB.yCount.load();
+        const uint32_t aValid = bridgeA.getValidMessageCount();
+        const uint32_t bValid = bridgeB.getValidMessageCount();
+
         sender.send("/cs/A/0/finger1/on", 1);
-        sender.send("/cs/A/0/finger1/line", 64.0f);
+        sender.send("/cs/A/0/finger1/u", 0.25f);
         sender.send("/cs/A/0/finger1/v", 0.5f);
 
-        for (int i = 0; i < 100; ++i)
+        const bool fannedOut = waitForCount(sinkA.onCount, aOn + 1)
+            && waitForCount(sinkA.xCount, aX + 1)
+            && waitForCount(sinkA.yCount, aY + 1)
+            && waitForCount(sinkB.onCount, bOn + 1)
+            && waitForCount(sinkB.xCount, bX + 1)
+            && waitForCount(sinkB.yCount, bY + 1);
+        const bool telemetryFannedOut = waitForValidMessageCount(bridgeA, aValid + 3)
+            && waitForValidMessageCount(bridgeB, bValid + 3);
+
+        expect(fannedOut && telemetryFannedOut
+                   && sinkA.active.load() && sinkB.active.load()
+                   && sinkA.lastRow.load() == 0 && sinkB.lastRow.load() == 0
+                   && sinkA.lastCol.load() == 0 && sinkB.lastCol.load() == 0
+                   && sinkA.lastFinger.load() == 1 && sinkB.lastFinger.load() == 1,
+               "shared UDP packets and valid-message telemetry fan out to both clients", failed);
+
+        expect((bridgeA.getObservedZoneMask() & 1u) != 0
+                   && (bridgeB.getObservedZoneMask() & 1u) != 0,
+               "valid zone A messages set the zone-A telemetry bit on both clients", failed);
+
+        // A known-good packet sent after a packet under test acts as an ordered
+        // localhost UDP barrier. It lets the drop tests remain deterministic.
+        auto sendXBarrier = [&]()
         {
-            if (sinkA.onCount.load() > 0 && sinkB.onCount.load() > 0
-                && sinkA.xCount.load() > 0 && sinkB.xCount.load() > 0
-                && sinkA.yCount.load() > 0 && sinkB.yCount.load() > 0)
-                break;
-
-            juce::Thread::sleep(10);
-        }
-
-        expect(sinkA.active.load() && sinkB.active.load()
-            && sinkA.lastRow.load() == 0 && sinkB.lastRow.load() == 0
-            && sinkA.lastCol.load() == 0 && sinkB.lastCol.load() == 0,
-            "shared UDP packet is fanned out to both plugin sinks", failed);
-    }
-
-    // ---------------------------------------------------------------------
-    // B27: OSC wire-format edge cases.
-    //
-    // These lock the *actual* routing behaviour of OscWireFormat::parseAddress
-    // + OscBridge::oscMessageReceived (read off the source, not assumed):
-    //   - The address grammar is "/cs/<row>/<col>/finger<n>/<param>".
-    //   - <row> is a single A..Z letter (case-insensitive); any trailing chars
-    //     in that segment are ignored. Outside A..Z -> dropped.
-    //   - <col> is decimal digits, must be in [0, SeatEventSink::MAX_COLS) and
-    //     be followed by '/'. col >= MAX_COLS -> dropped.
-    //   - finger<n> is OPAQUE: its bytes are skipped entirely, so finger1 and
-    //     finger2 collapse to the same seat.
-    //   - A bad prefix or a missing trailing param segment -> dropped.
-    //   - For a zero-argument message, ONLY ".../off" fires (setOn(row,col,false));
-    //     a zero-arg on/v/line is a no-op (see the msg.size()==0 branch).
-    //
-    // Observation model (matches the harness above): the sink only records
-    // setX (from "line"), setY (from "v") and setOn (from "on"/"off"). UDP from
-    // localhost is delivered in order, so to prove a message was *dropped* we
-    // send it, then send a known-good "barrier" message to a distinct seat and
-    // wait for that barrier to land. If the barrier's effect is the ONLY change
-    // observed, the message under test produced no sink call.
-    if (connected)
-    {
-        // The barrier targets a valid-but-distinct seat: row Z (=25), col 99
-        // (< MAX_COLS). Each barrier is a single "line" message => one setX.
-        constexpr int kBarrierRow = 25;   // 'Z'
-        constexpr int kBarrierCol = 99;   // < MAX_COLS (100)
-
-        // Wait (bounded) until xCount reaches target; returns reached-or-not.
-        auto waitForX = [&] (int target) -> bool
-        {
-            for (int i = 0; i < 200; ++i)
-            {
-                if (sinkA.xCount.load() >= target)
-                    return true;
-                juce::Thread::sleep(5);
-            }
-            return sinkA.xCount.load() >= target;
+            const int target = sinkA.xCount.load() + 1;
+            sender.send("/cs/Z/99/finger0/line", 0.0f);
+            return waitForCount(sinkA.xCount, target);
         };
 
-        // Fire `addressUnderTest` (optionally with an int arg), then a barrier
-        // "/cs/Z/99/finger1/line" and block until the barrier's setX lands.
-        // Asserts the barrier itself routed to (kBarrierRow,kBarrierCol). The
-        // caller then inspects the count deltas to decide drop vs. delivery.
-        auto sendThenBarrier = [&] (auto&&... sendArgs)
-        {
-            sender.send(std::forward<decltype(sendArgs)>(sendArgs)...);
-            const int targetX = sinkA.xCount.load() + 1;
-            sender.send("/cs/Z/99/finger1/line", 0.0f);
-            const bool landed = waitForX(targetX);
-            return landed;
-        };
-
-        // --- col >= MAX_COLS is dropped (no sink call) -------------------
+        // /u is already normalised and the complete participant range routes.
         {
             const int x0 = sinkA.xCount.load();
-            const int y0 = sinkA.yCount.load();
-            const int o0 = sinkA.onCount.load();
-            // col 100 == MAX_COLS, out of [0,100) -> parseAddress bails.
-            const bool barrierLanded = sendThenBarrier("/cs/A/100/finger1/line", 64.0f);
-            // Only the barrier's single setX should have happened; on/v untouched,
-            // and the last seat seen must be the barrier (not col 100).
-            const bool dropped = barrierLanded
-                && sinkA.xCount.load() == x0 + 1
-                && sinkA.yCount.load() == y0
-                && sinkA.onCount.load() == o0
-                && sinkA.lastRow.load() == kBarrierRow
-                && sinkA.lastCol.load() == kBarrierCol;
-            expect(dropped, "col >= MAX_COLS (100) is dropped: no sink call", failed);
+            const uint32_t aBefore = bridgeA.getValidMessageCount();
+            const uint32_t bBefore = bridgeB.getValidMessageCount();
+            sender.send("/cs/B/255/finger9/u", 0.25f);
+            const bool landed = waitForCount(sinkA.xCount, x0 + 1)
+                && waitForValidMessageCount(bridgeA, aBefore + 1)
+                && waitForValidMessageCount(bridgeB, bBefore + 1);
+            constexpr uint32_t zonesAB = (1u << 0) | (1u << 1);
+            const bool telemetryOk = (bridgeA.getObservedZoneMask() & zonesAB) == zonesAB
+                && (bridgeB.getObservedZoneMask() & zonesAB) == zonesAB
+                && bridgeA.getLastValidMessageAgeMs() < 5000
+                && bridgeB.getLastValidMessageAgeMs() < 5000;
+            expect(landed && telemetryOk
+                       && sinkA.lastRow.load() == 1 && sinkA.lastCol.load() == 255
+                       && sinkA.lastFinger.load() == 9
+                       && nearlyEqual(sinkA.lastX.load(), 0.25f),
+                   "/u routes source 255/finger9 and records zones A/B with a recent age", failed);
         }
 
-        // --- col within range still routes (control for the bound) -------
+        // The second, valid packet is an ordered localhost barrier. Exactly one
+        // telemetry increment proves the malformed packet before it was ignored.
+        {
+            const uint32_t aBefore = bridgeA.getValidMessageCount();
+            const uint32_t bBefore = bridgeB.getValidMessageCount();
+            sender.send("/not-cs/A/1/finger0/u", 0.5f);
+            sender.send("/cs/A/1/finger0/u", 0.5f);
+            const bool barrierLanded = waitForValidMessageCount(bridgeA, aBefore + 1)
+                && waitForValidMessageCount(bridgeB, bBefore + 1);
+            expect(barrierLanded
+                       && bridgeA.getValidMessageCount() == aBefore + 1
+                       && bridgeB.getValidMessageCount() == bBefore + 1,
+                   "invalid OSC addresses do not increment valid-message telemetry", failed);
+        }
+
+        // Source 256 is rejected, while a following valid barrier is delivered.
         {
             const int x0 = sinkA.xCount.load();
-            sender.send("/cs/A/99/finger1/line", 127.0f); // col 99 < MAX_COLS
-            const bool landed = waitForX(x0 + 1);
-            expect(landed && sinkA.lastRow.load() == 0 && sinkA.lastCol.load() == 99,
-                   "col == MAX_COLS-1 (99) is accepted and routes to that seat", failed);
+            sender.send("/cs/A/256/finger0/u", 0.5f);
+            const bool barrierLanded = sendXBarrier();
+            expect(barrierLanded && sinkA.xCount.load() == x0 + 1
+                       && sinkA.lastRow.load() == 25 && sinkA.lastCol.load() == 99,
+                   "source 256 is dropped without a sink call", failed);
         }
 
-        // --- zero-arg ".../off" still triggers a note-off ----------------
+        // Fingers sharing a participant no longer collapse in the bridge.
         {
-            // Prime the seat to "on" so a subsequent off is observable.
-            sender.send("/cs/A/5/finger1/on", 1);
-            const int onAfterPrime = sinkA.onCount.load() + 1;
-            for (int i = 0; i < 200 && sinkA.onCount.load() < onAfterPrime; ++i)
-                juce::Thread::sleep(5);
-
-            const int o0 = sinkA.onCount.load();
-            // Zero-argument /off: juce::OSCSender::send with no value sends an
-            // empty-argument message -> msg.size()==0 -> Param::Off branch.
-            sender.send("/cs/A/5/finger1/off");
-            for (int i = 0; i < 200 && sinkA.onCount.load() < o0 + 1; ++i)
-                juce::Thread::sleep(5);
-
-            const bool offFired = sinkA.onCount.load() == o0 + 1
-                && sinkA.active.load() == false
-                && sinkA.lastRow.load() == 0
-                && sinkA.lastCol.load() == 5;
-            expect(offFired, "zero-arg '/cs/<row>/<col>/finger<n>/off' triggers a note-off", failed);
-        }
-
-        // --- finger1 vs finger2 collapse to the same seat ----------------
-        {
-            // The finger<n> segment is opaque; only row/col/param matter. Drive
-            // the same seat through two different finger ids and confirm both
-            // land on (row 1, col 7).
-            sender.send("/cs/B/7/finger1/line", 0.0f);
             int target = sinkA.xCount.load() + 1;
-            const bool f1 = waitForX(target);
-            const int rowF1 = sinkA.lastRow.load();
-            const int colF1 = sinkA.lastCol.load();
+            sender.send("/cs/C/7/finger1/u", 0.1f);
+            const bool firstLanded = waitForCount(sinkA.xCount, target);
+            const int firstFinger = sinkA.lastFinger.load();
 
-            sender.send("/cs/B/7/finger2/line", 127.0f);
             target = sinkA.xCount.load() + 1;
-            const bool f2 = waitForX(target);
-            const int rowF2 = sinkA.lastRow.load();
-            const int colF2 = sinkA.lastCol.load();
-
-            expect(f1 && f2
-                   && rowF1 == 1 && colF1 == 7
-                   && rowF2 == 1 && colF2 == 7,
-                   "finger1 and finger2 collapse to the same seat (finger<n> is opaque)", failed);
+            sender.send("/cs/C/7/finger2/u", 0.2f);
+            const bool secondLanded = waitForCount(sinkA.xCount, target);
+            expect(firstLanded && secondLanded && firstFinger == 1
+                       && sinkA.lastFinger.load() == 2
+                       && sinkA.lastRow.load() == 2 && sinkA.lastCol.load() == 7,
+                   "finger1 and finger2 remain distinct for one participant", failed);
         }
 
-        // --- invalid row (non-letter / outside A..Z) is dropped ----------
+        // Legacy /line remains 0..127, while /u and /v clamp direct values.
         {
-            const int x0 = sinkA.xCount.load();
-            const int y0 = sinkA.yCount.load();
-            const int o0 = sinkA.onCount.load();
-            // '1' is not in A..Z -> parseAddress bails at the row check.
-            const bool barrierLanded = sendThenBarrier("/cs/1/3/finger1/line", 64.0f);
-            const bool dropped = barrierLanded
-                && sinkA.xCount.load() == x0 + 1   // only the barrier
-                && sinkA.yCount.load() == y0
-                && sinkA.onCount.load() == o0
-                && sinkA.lastRow.load() == kBarrierRow
-                && sinkA.lastCol.load() == kBarrierCol;
-            expect(dropped, "invalid row (non-letter '1') is dropped: no sink call", failed);
+            int target = sinkA.xCount.load() + 1;
+            sender.send("/cs/D/3/finger4/line", 64.0f);
+            const bool lineLanded = waitForCount(sinkA.xCount, target);
+            const bool lineScaled = nearlyEqual(sinkA.lastX.load(), 64.0f / 127.0f);
+
+            target = sinkA.xCount.load() + 1;
+            sender.send("/cs/D/3/finger4/u", 1.5f);
+            const bool uLanded = waitForCount(sinkA.xCount, target);
+
+            const int yTarget = sinkA.yCount.load() + 1;
+            sender.send("/cs/D/3/finger4/v", -0.5f);
+            const bool vLanded = waitForCount(sinkA.yCount, yTarget);
+
+            expect(lineLanded && lineScaled && uLanded && vLanded
+                       && nearlyEqual(sinkA.lastX.load(), 1.0f)
+                       && nearlyEqual(sinkA.lastY.load(), 0.0f),
+                   "/line scales 0..127 and /u,/v clamp finite values to 0..1", failed);
         }
 
-        // --- malformed prefix is dropped ---------------------------------
+        // Numeric int32/float32 values are accepted for on/off. In particular,
+        // a non-zero fractional float is true rather than being truncated.
         {
-            const int x0 = sinkA.xCount.load();
-            const int y0 = sinkA.yCount.load();
-            const int o0 = sinkA.onCount.load();
-            // Wrong prefix: "/xx/..." fails the '/cs/' check.
-            const bool barrierLanded = sendThenBarrier("/xx/A/3/finger1/line", 64.0f);
-            const bool dropped = barrierLanded
-                && sinkA.xCount.load() == x0 + 1
-                && sinkA.yCount.load() == y0
-                && sinkA.onCount.load() == o0
-                && sinkA.lastRow.load() == kBarrierRow
-                && sinkA.lastCol.load() == kBarrierCol;
-            expect(dropped, "malformed prefix '/xx/...' is dropped: no sink call", failed);
-        }
-
-        // --- missing param segment is dropped ----------------------------
-        {
-            const int x0 = sinkA.xCount.load();
-            const int y0 = sinkA.yCount.load();
-            const int o0 = sinkA.onCount.load();
-            // No trailing '/<param>' after finger<n>: parseAddress requires the
-            // finger segment to be followed by '/', so this never reaches a sink.
-            const bool barrierLanded = sendThenBarrier("/cs/A/3/finger1", 64.0f);
-            const bool dropped = barrierLanded
-                && sinkA.xCount.load() == x0 + 1
-                && sinkA.yCount.load() == y0
-                && sinkA.onCount.load() == o0
-                && sinkA.lastRow.load() == kBarrierRow
-                && sinkA.lastCol.load() == kBarrierCol;
-            expect(dropped, "missing trailing param segment is dropped: no sink call", failed);
-        }
-
-        // --- unknown trailing param is dropped (Param::None no-op) -------
-        {
-            const int x0 = sinkA.xCount.load();
-            const int y0 = sinkA.yCount.load();
-            const int o0 = sinkA.onCount.load();
-            // A well-formed address with an unrecognised param ("bogus") parses
-            // (valid==true) but classifyParam -> None, so no sink call fires.
-            const bool barrierLanded = sendThenBarrier("/cs/A/3/finger1/bogus", 64.0f);
-            const bool dropped = barrierLanded
-                && sinkA.xCount.load() == x0 + 1
-                && sinkA.yCount.load() == y0
-                && sinkA.onCount.load() == o0
-                && sinkA.lastRow.load() == kBarrierRow
-                && sinkA.lastCol.load() == kBarrierCol;
-            expect(dropped, "unknown trailing param ('bogus') is dropped: no sink call", failed);
-        }
-
-        // --- case-insensitive prefix + row letter are accepted -----------
-        {
-            // '/cs/' is matched case-insensitively on c/s, and the row letter is
-            // upper-cased before the A..Z check; '/CS/c/...' must route to row 2.
-            const int x0 = sinkA.xCount.load();
-            sender.send("/CS/c/8/finger1/line", 0.0f);
-            const bool landed = waitForX(x0 + 1);
-            expect(landed && sinkA.lastRow.load() == 2 && sinkA.lastCol.load() == 8,
-                   "case-insensitive prefix and lowercase row letter route correctly", failed);
-        }
-
-        // --- 'on' with explicit 0 arg routes to a note-off ---------------
-        {
-            // Prime on, then send on with value 0 -> firstAsInt()==0 -> setOn(false).
-            sender.send("/cs/D/2/finger1/on", 1);
             int target = sinkA.onCount.load() + 1;
-            for (int i = 0; i < 200 && sinkA.onCount.load() < target; ++i)
-                juce::Thread::sleep(5);
-            const bool wasOn = sinkA.active.load();
+            sender.send("/cs/E/4/finger5/on", 0.5f);
+            const bool floatOn = waitForCount(sinkA.onCount, target) && sinkA.active.load();
 
-            sender.send("/cs/D/2/finger1/on", 0);
             target = sinkA.onCount.load() + 1;
-            for (int i = 0; i < 200 && sinkA.onCount.load() < target; ++i)
-                juce::Thread::sleep(5);
+            sender.send("/cs/E/4/finger5/off", 123);
+            const bool numericOff = waitForCount(sinkA.onCount, target) && ! sinkA.active.load();
 
-            expect(wasOn && sinkA.active.load() == false
-                   && sinkA.lastRow.load() == 3 && sinkA.lastCol.load() == 2,
-                   "'on' with arg 0 routes to a note-off on the same seat", failed);
+            target = sinkA.onCount.load() + 1;
+            sender.send("/cs/E/4/finger5/on", 1);
+            const bool primed = waitForCount(sinkA.onCount, target) && sinkA.active.load();
+
+            target = sinkA.onCount.load() + 1;
+            sender.send("/cs/E/4/finger5/off");
+            const bool emptyOff = waitForCount(sinkA.onCount, target) && ! sinkA.active.load();
+
+            expect(floatOn && numericOff && primed && emptyOff,
+                   "on accepts numeric int/float and off accepts numeric or no argument", failed);
+        }
+
+        // Non-numeric and non-finite values must not mutate any sink state.
+        {
+            const int x0 = sinkA.xCount.load();
+            sender.send("/cs/F/5/finger6/u", juce::String("bad"));
+            const bool barrierLanded = sendXBarrier();
+            expect(barrierLanded && sinkA.xCount.load() == x0 + 1,
+                   "non-numeric /u is dropped", failed);
+        }
+
+        {
+            const int x0 = sinkA.xCount.load();
+            sender.send("/cs/F/5/finger6/u", std::numeric_limits<float>::quiet_NaN());
+            const bool barrierLanded = sendXBarrier();
+            expect(barrierLanded && sinkA.xCount.load() == x0 + 1,
+                   "NaN /u is dropped", failed);
+        }
+
+        {
+            const int y0 = sinkA.yCount.load();
+            sender.send("/cs/F/5/finger6/v", std::numeric_limits<float>::infinity());
+            const bool barrierLanded = sendXBarrier();
+            expect(barrierLanded && sinkA.yCount.load() == y0,
+                   "infinite /v is dropped", failed);
+        }
+
+        {
+            const int on0 = sinkA.onCount.load();
+            sender.send("/cs/F/5/finger6/on", juce::String("yes"));
+            const bool barrierLanded = sendXBarrier();
+            expect(barrierLanded && sinkA.onCount.load() == on0,
+                   "non-numeric /on is dropped", failed);
+        }
+
+        {
+            const int on0 = sinkA.onCount.load();
+            sender.send("/cs/F/5/finger6/off", juce::String("ignored"));
+            const bool barrierLanded = sendXBarrier();
+            expect(barrierLanded && sinkA.onCount.load() == on0,
+                   "non-numeric /off is dropped", failed);
         }
     }
 
     bridgeA.stop();
     bridgeB.stop();
+
+    // A bound shared port can host MAX_SHARED_CLIENTS registered receivers.
+    // One additional instance still owns a running shared-port handle, but it
+    // must report that it is not receiving and surface the PORT FULL condition.
+    {
+        constexpr size_t bridgeCount = (size_t) OscBridge::MAX_SHARED_CLIENTS + 1;
+        std::array<CountingSink, bridgeCount> sinks;
+        std::array<std::unique_ptr<OscBridge>, bridgeCount> bridges;
+        for (size_t i = 0; i < bridgeCount; ++i)
+            bridges[i] = std::make_unique<OscBridge>(sinks[i]);
+
+        int overflowPort = 62120;
+        bool overflowStarted = false;
+        for (; overflowPort < 62220; ++overflowPort)
+        {
+            if (! bridges[0]->start(overflowPort))
+                continue;
+
+            overflowStarted = true;
+            for (size_t i = 1; i < bridgeCount; ++i)
+                overflowStarted = bridges[i]->start(overflowPort) && overflowStarted;
+            break;
+        }
+
+        bool registeredClientsReceiving = overflowStarted;
+        for (size_t i = 0; i < bridgeCount - 1; ++i)
+            registeredClientsReceiving = registeredClientsReceiving
+                && bridges[i]->isRunning() && bridges[i]->isReceiving();
+
+        const auto& overflowClient = *bridges.back();
+        expect(registeredClientsReceiving,
+               "the shared port registers and receives on all available client slots", failed);
+        expect(overflowStarted && overflowClient.isRunning()
+                   && ! overflowClient.isReceiving()
+                   && overflowClient.oscStatus().contains("PORT FULL"),
+               "the client beyond MAX_SHARED_CLIENTS is running but not receiving and reports PORT FULL", failed);
+
+        // Once a registered instance leaves, a previously-full instance can
+        // retry the same port and claim the released slot. This mirrors the UI
+        // Apply action after a PORT FULL warning.
+        bridges[0]->stop();
+        const bool recovered = bridges.back()->start(overflowPort);
+        expect(recovered && bridges.back()->isRunning() && bridges.back()->isReceiving()
+                   && bridges.back()->oscStatus().contains("Listening"),
+               "a PORT FULL client can retry the same UDP port after a slot is released", failed);
+
+        for (auto& bridge : bridges)
+            bridge->stop();
+    }
 
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";
     return failed == 0 ? 0 : 1;

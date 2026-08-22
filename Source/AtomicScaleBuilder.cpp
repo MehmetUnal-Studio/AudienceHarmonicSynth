@@ -30,6 +30,9 @@ namespace
 
 double AtomicScaleBuilder::normalizeWavelengthNm (double wavelength, WavelengthUnit unit) noexcept
 {
+    if (! std::isfinite(wavelength) || wavelength <= 0.0)
+        return 0.0;
+
     if (unit == WavelengthUnit::Angstrom)
         return wavelength * 0.1;
 
@@ -43,6 +46,9 @@ double AtomicScaleBuilder::normalizeWavelengthNm (double wavelength, WavelengthU
 
 double AtomicScaleBuilder::normalizedCents (double cents) noexcept
 {
+    if (! std::isfinite(cents))
+        return 0.0;
+
     double c = std::fmod(cents, kOctaveCents);
     if (c < 0.0)
         c += kOctaveCents;
@@ -55,6 +61,9 @@ double AtomicScaleBuilder::normalizedCents (double cents) noexcept
 
 double AtomicScaleBuilder::circularDistanceCents (double a, double b) noexcept
 {
+    if (! std::isfinite(a) || ! std::isfinite(b))
+        return std::numeric_limits<double>::infinity();
+
     const double d = std::abs(normalizedCents(a - b));
     return std::min(d, kOctaveCents - d);
 }
@@ -99,7 +108,8 @@ AtomicScaleBuilder::Result AtomicScaleBuilder::buildPlayableAtomicScale (
 {
     Result result;
     result.elementName = options.elementName;
-    result.rootHz = options.rootHz > 0.0 ? options.rootHz : 130.8128;
+    result.rootHz = std::isfinite(options.rootHz) && options.rootHz > 0.0
+                  ? options.rootHz : 130.8128;
 
     std::vector<RawLine> raw;
     raw.reserve(lines.size());
@@ -182,7 +192,8 @@ AtomicScaleBuilder::Result AtomicScaleBuilder::buildPlayableAtomicScale (
         const int maxDegrees = options.maxScaleDegrees > 0
             ? options.maxScaleDegrees
             : defaultMaxScaleDegrees(options.scaleMode);
-        const double minSep = options.minSeparationCents >= 0.0
+        const double minSep = std::isfinite(options.minSeparationCents)
+                           && options.minSeparationCents >= 0.0
             ? options.minSeparationCents
             : defaultMinSeparationCents(options.scaleMode);
 
@@ -347,7 +358,8 @@ AtomicScaleBuilder::Result AtomicScaleBuilder::buildPlayableAtomicScale (
 
         if (options.scaleMode != ScaleMode::Raw)
         {
-            const double minSep = options.minSeparationCents >= 0.0
+            const double minSep = std::isfinite(options.minSeparationCents)
+                               && options.minSeparationCents >= 0.0
                 ? options.minSeparationCents
                 : defaultMinSeparationCents(options.scaleMode);
 

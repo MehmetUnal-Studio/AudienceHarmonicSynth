@@ -238,8 +238,12 @@ void AuroraComponent::paint (juce::Graphics& g)
 
     auto area = getLocalBounds().reduced(10, 8);
     auto header = area.removeFromTop(24);
+    // Keep the audience map readable in the editor's normal and minimum
+    // heights. The separate Scale Keyboard already carries the note labels, so
+    // this spectral strip can collapse into a concise overview when space is
+    // tight instead of consuming the entire Aurora panel.
     const int scaleStripH = H < 260.0f
-                          ? juce::jlimit(90, 144, (int) std::round(H * 0.46f))
+                          ? juce::jlimit(54, 110, (int) std::round(H * 0.36f))
                           : juce::jlimit(150, 244, (int) std::round(H * 0.52f));
     auto scaleStrip = area.removeFromBottom(scaleStripH);
     area.removeFromBottom(8);
@@ -376,8 +380,9 @@ void AuroraComponent::paint (juce::Graphics& g)
             wavelengthWheel = wheelSlot.withTrimmedRight(12).reduced(1);
         }
 
+        const bool compactSpectralAxis = spectralScale && scaleStripH < 96;
         auto ruler = strip.removeFromTop(18);
-        auto noteAxis = strip.removeFromBottom(spectralScale ? 58 : 18);
+        auto noteAxis = strip.removeFromBottom(spectralScale && ! compactSpectralAxis ? 58 : 18);
         auto lines = strip.reduced(0, 4);
 
         juce::ColourGradient floorGlow(juce::Colours::transparentBlack,
@@ -665,38 +670,41 @@ void AuroraComponent::paint (juce::Graphics& g)
             g.setFont(juce::Font(juce::FontOptions(juce::Font::getDefaultMonospacedFontName(), 8.0f, juce::Font::plain)));
             g.drawText("AUDIO FREQ", scaleStrip.getX() + 8, noteAxis.getY() + 3, 72, 10, juce::Justification::left);
 
-            std::vector<juce::Rectangle<int>> usedLabels;
-            const int labelStride = n > 96 ? juce::jmax(1, (n + 95) / 96) : 1;
-            const int lanes = juce::jlimit(2, 4, (noteAxis.getHeight() - 6) / 13);
-            for (int i = 0; i < n; i += labelStride)
+            if (! compactSpectralAxis)
             {
-                const float x = xForT(tForStep(i));
-                const auto label = formatHz(engine.getScaleFrequencyHz(i));
-                const int labelW = juce::jlimit(52, 72, (int) label.length() * 5 + 12);
-                juce::Rectangle<int> box((int) std::round(x) - labelW / 2,
-                                         noteAxis.getY() + 14 + (i % lanes) * 12,
-                                         labelW, 11);
-
-                for (int pass = 0; pass < lanes; ++pass)
+                std::vector<juce::Rectangle<int>> usedLabels;
+                const int labelStride = n > 96 ? juce::jmax(1, (n + 95) / 96) : 1;
+                const int lanes = juce::jlimit(2, 4, (noteAxis.getHeight() - 6) / 13);
+                for (int i = 0; i < n; i += labelStride)
                 {
-                    bool overlaps = false;
-                    for (const auto& r : usedLabels)
-                        overlaps = overlaps || r.intersects(box);
+                    const float x = xForT(tForStep(i));
+                    const auto label = formatHz(engine.getScaleFrequencyHz(i));
+                    const int labelW = juce::jlimit(52, 72, (int) label.length() * 5 + 12);
+                    juce::Rectangle<int> box((int) std::round(x) - labelW / 2,
+                                             noteAxis.getY() + 14 + (i % lanes) * 12,
+                                             labelW, 11);
 
-                    if (! overlaps)
-                        break;
+                    for (int pass = 0; pass < lanes; ++pass)
+                    {
+                        bool overlaps = false;
+                        for (const auto& r : usedLabels)
+                            overlaps = overlaps || r.intersects(box);
 
-                    box.setY(noteAxis.getY() + 14 + ((i + pass + 1) % lanes) * 12);
+                        if (! overlaps)
+                            break;
+
+                        box.setY(noteAxis.getY() + 14 + ((i + pass + 1) % lanes) * 12);
+                    }
+
+                    usedLabels.push_back(box);
+
+                    g.setColour(juce::Colour(0xff05080c).withAlpha(0.82f));
+                    g.fillRoundedRectangle(box.toFloat(), 3.0f);
+                    g.setColour(juce::Colour(0xff6b717c));
+                    g.drawRoundedRectangle(box.toFloat(), 3.0f, 0.6f);
+                    g.setColour(juce::Colour(0xffdce6f4));
+                    g.drawText(label, box, juce::Justification::centred);
                 }
-
-                usedLabels.push_back(box);
-
-                g.setColour(juce::Colour(0xff05080c).withAlpha(0.82f));
-                g.fillRoundedRectangle(box.toFloat(), 3.0f);
-                g.setColour(juce::Colour(0xff6b717c));
-                g.drawRoundedRectangle(box.toFloat(), 3.0f, 0.6f);
-                g.setColour(juce::Colour(0xffdce6f4));
-                g.drawText(label, box, juce::Justification::centred);
             }
         }
         else

@@ -2,6 +2,7 @@
 #include "OscWireFormat.h"
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <map>
 
@@ -35,6 +36,8 @@ struct OscBridge::SharedPort final
     // slot-claim logic itself is unchanged; we only report the outcome.
     bool addClient (OscBridge& bridge)
     {
+        const juce::ScopedLock lock(clientsLock);
+
         for (auto& client : clients)
             if (client.load(std::memory_order_acquire) == &bridge)
                 return true;
@@ -51,6 +54,11 @@ struct OscBridge::SharedPort final
 
     void removeClient (OscBridge& bridge)
     {
+        // The callback holds the same network-thread lock while dereferencing a
+        // client. Waiting here guarantees that stop()/the OscBridge destructor
+        // cannot return while a callback still owns a raw pointer to the bridge.
+        const juce::ScopedLock lock(clientsLock);
+
         for (auto& client : clients)
         {
             OscBridge* expected = &bridge;
@@ -61,6 +69,8 @@ struct OscBridge::SharedPort final
 private:
     void oscMessageReceived (const juce::OSCMessage& msg) override
     {
+        const juce::ScopedLock lock(clientsLock);
+
         for (auto& entry : clients)
         {
             auto* client = entry.load(std::memory_order_acquire);
@@ -80,6 +90,7 @@ private:
 
     int port = 0;
     juce::OSCReceiver receiver;
+    juce::CriticalSection clientsLock;
     std::array<std::atomic<OscBridge*>, (std::size_t) OscBridge::MAX_SHARED_CLIENTS> clients {};
 };
 
@@ -96,6 +107,9 @@ OscBridge::~OscBridge() { stop(); }
 bool OscBridge::start (int port)
 {
     stop();
+    validMessageCount.store(0, std::memory_order_relaxed);
+    observedZoneMask.store(0, std::memory_order_relaxed);
+    lastValidMessageMs.store(0, std::memory_order_relaxed);
 
     std::shared_ptr<SharedPort> portHandle;
     {
@@ -112,6 +126,7 @@ bool OscBridge::start (int port)
             {
                 sharedPorts.erase(port);
                 running = false;
+                receiving = false;
                 currentPort = 0;
                 statusString = "FAILED to bind UDP " + juce::String(port) + " - port busy?";
                 return false;
@@ -129,6 +144,7 @@ bool OscBridge::start (int port)
     sharedPort = std::move(portHandle);
     currentPort = port;
     running     = true;
+    receiving   = registered;
 
     if (registered)
         statusString = "Listening on UDP " + juce::String(port);
@@ -149,6 +165,7 @@ void OscBridge::stop()
 
         sharedPort.reset();
         running = false;
+        receiving = false;
         currentPort = 0;
         statusString = "Stopped";
     }
@@ -167,58 +184,83 @@ void OscBridge::oscMessageReceived (const juce::OSCMessage& msg)
     const juce::String& addr = msg.getAddressPattern().toString();
     const char* raw = addr.toRawUTF8();
 
-    const auto parsed = osc_wire::parseAddress(raw, SeatEventSink::MAX_COLS);
+    const auto parsed = osc_wire::parseAddress(raw, SeatEventSink::MAX_OSC_SOURCES);
     if (! parsed.valid)
         return;
 
     const int   row   = parsed.row;
     const int   col   = parsed.col;
+    const int   finger = parsed.finger;
     const auto  param = osc_wire::classifyParam(parsed.param);
 
     if (msg.size() == 0)
     {
         // /off with no args
         if (param == osc_wire::Param::Off)
-            target.setOn(row, col, false);
+        {
+            target.setFingerOn(row, col, finger, false);
+            observedZoneMask.fetch_or(1u << (uint32_t) row, std::memory_order_relaxed);
+            validMessageCount.fetch_add(1, std::memory_order_relaxed);
+            lastValidMessageMs.store(juce::Time::getMillisecondCounter(), std::memory_order_release);
+        }
         return;
     }
 
-    auto firstAsFloat = [&]() -> float
+    float firstValue = 0.0f;
+    const auto readFiniteNumeric = [&]() -> bool
     {
-        if (msg[0].isFloat32()) return msg[0].getFloat32();
-        if (msg[0].isInt32())   return (float) msg[0].getInt32();
-        return 0.0f;
-    };
-    auto firstAsInt = [&]() -> int
-    {
-        if (msg[0].isInt32())   return msg[0].getInt32();
-        if (msg[0].isFloat32()) return (int) msg[0].getFloat32();
-        return 0;
+        if (msg[0].isFloat32())
+            firstValue = msg[0].getFloat32();
+        else if (msg[0].isInt32())
+            firstValue = (float) msg[0].getInt32();
+        else
+            return false;
+
+        return std::isfinite(firstValue);
     };
 
+    // Every parameter carrying an argument accepts OSC int32/float32 only.
+    // This also keeps NaN/Inf from entering the routing and MIDI state.
+    if (! readFiniteNumeric())
+        return;
+
+    bool handled = true;
     switch (param)
     {
+        case osc_wire::Param::U:
+        {
+            const float x = juce::jlimit(0.0f, 1.0f, firstValue);
+            target.setFingerX(row, col, finger, x);
+            break;
+        }
         case osc_wire::Param::V:
         {
-            const float y = juce::jlimit(0.0f, 1.0f, firstAsFloat());
-            target.setY(row, col, y);
+            const float y = juce::jlimit(0.0f, 1.0f, firstValue);
+            target.setFingerY(row, col, finger, y);
             break;
         }
         case osc_wire::Param::Line:
         {
-            const float lineVal = firstAsFloat();   // expected 0..127
-            const float xNorm   = juce::jlimit(0.0f, 1.0f, lineVal / 127.0f);
-            target.setX(row, col, xNorm);
+            const float xNorm = juce::jlimit(0.0f, 1.0f, firstValue / 127.0f);
+            target.setFingerX(row, col, finger, xNorm);
             break;
         }
         case osc_wire::Param::On:
-            target.setOn(row, col, firstAsInt() != 0);
+            target.setFingerOn(row, col, finger, firstValue != 0.0f);
             break;
         case osc_wire::Param::Off:
-            target.setOn(row, col, false);
+            target.setFingerOn(row, col, finger, false);
             break;
         case osc_wire::Param::None:
         default:
+            handled = false;
             break;
+    }
+
+    if (handled)
+    {
+        observedZoneMask.fetch_or(1u << (uint32_t) row, std::memory_order_relaxed);
+        validMessageCount.fetch_add(1, std::memory_order_relaxed);
+        lastValidMessageMs.store(juce::Time::getMillisecondCounter(), std::memory_order_release);
     }
 }

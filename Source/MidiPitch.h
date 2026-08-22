@@ -15,7 +15,8 @@ inline MidiPitch convertFrequencyToMidiPitch (double targetFrequencyHz,
                                               int pitchBendRangeSemitones) noexcept
 {
     MidiPitch out;
-    out.targetFrequencyHz = juce::jmax(1.0, targetFrequencyHz);
+    out.targetFrequencyHz = std::isfinite(targetFrequencyHz) && targetFrequencyHz > 0.0
+                          ? targetFrequencyHz : 1.0;
 
     const int bendRange = juce::jmax(1, pitchBendRangeSemitones);
     const double midiFloat = 69.0 + 12.0 * std::log2(out.targetFrequencyHz / 440.0);

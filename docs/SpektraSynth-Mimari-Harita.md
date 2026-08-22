@@ -1,272 +1,501 @@
-## Genel Bakis
+# Cosmic Microwave 2.1 Mimari Harita
 
-**SpektraSynth** (version `1.0.35`, JUCE `8.0.4`), bir kalabaligin telefonlarindan gelen dokunma verisiyle calinan, koltuk-tabanli (seat-based) bir JUCE enstrumanidir. Her katilimci koltuk konumuyla tanimlanir (`row` harfi `A..Z` + `col` numarasi `0..99`), ve onlarin `X/Y/On` dokunma verisi ya dogrudan ornek oynatmayi (Direct Sample Player), granuler oynatmayi (Granular Sample Engine) ya da bir **Element Spectral Synth** sesini tetikler ve sekillendirir. Boylece bir kalabalik kolektif bir harmonik dokuya donusur.
+Bu belge, `AudienceHarmonicSynth` hedefinin güncel 2.1 kaynak sınırına göre yeniden
+yazılmıştır. Eski SpektraSynth mimarisinin ses üretim yolu artık bayrak ürünün çalışma
+zamanına dahil değildir. Hangi dosyanın ürüne dahil olduğunu belirleyen otorite
+`CMakeLists.txt` içindeki `target_sources(AudienceHarmonicSynth ...)` listesidir.
 
-Ayirt edici ozellik, **gercek atomik emisyon spektrumlarinin** (NIST tarzi dalga boyu + yogunluk verisi) mikrotonal olceklere ve additif tinilere donusturulmesidir. `X` ekseni secili bir muzikal olcege VEYA bir elementin spektral cizgilerine quantize edilir; `Y` ise genlige (amplitude) surulur.
+## 1. Genel bakış
 
-Repo, CMake uzerinden **4 urun hedefi** uretir:
+Cosmic Microwave, izleyici sunucusundan OSC/UDP alan ve Normal MIDI veya MPE üreten
+finger-aware bir JUCE ürünüdür.
 
-| Hedef | Plugin Code | Tur | Rol |
-|---|---|---|---|
-| `AudienceHarmonicSynth` | `Ahss` | VST3 + Standalone | Ana spektral synth (MPE'li, **bayrak urun**) |
-| `AudienceHarmonicMidi` | `Ahmd` | VST3 + Standalone | MIDI-effect plugin (non-MPE jenerator) |
-| `AudienceMidiGenerator` | `Amgn` | VST3 | Ableton-odakli MIDI jenerator + scale-lock |
-| `AudienceMidiDevice` | (GUI app) | Standalone | Basit UDP->MIDI kopru uygulamasi |
-
-> **Onemli ayrim:** Sadece `AudienceHarmonicSynth` hedefi `PluginProcessor.cpp` ve `PartialEngine`'i derler. Diger uc hedef `MidiProcessor.cpp`/`MidiEngine.cpp` etrafinda kuruludur. Bu, alt-sistem haritalarinda tekrar tekrar dogrulanan ve gorev cercevesinin karistirdigi kritik bir mimari sinirdir (asagida "Capraz-Kesen Endiseler" altinda detaylandirilmistir).
-
----
-
-## Sistem Mimarisi
-
-| Alt Sistem | Sorumluluk | Anahtar Dosyalar | Bagimliliklar (depends-on) |
-|---|---|---|---|
-| **DSP / Spectral Synthesis Engine** | Koltuk girisini sesli seslere (voice) cevirir; additif osilator banki + ornek oynatma + FX zinciri render eder | `PartialEngine.h/.cpp` (4185 satir) | `AtomicScaleBuilder`, `ElementSpectralData`, `SampleLibrary`, `SeatEventSink`, JUCE |
-| **Microtonal Scale System** | Spektrumdan olcek matematigi: cizgi -> cents -> olcek derecesi + tini partial'lari | `AtomicScaleBuilder.h/.cpp`, `MidiScaleModule.h/.cpp`, `MidiPitch.h` | `ElementSpectralData`, JUCE, `<cmath>` |
-| **MIDI / MPE Engine** | Iki ayri MIDI yolu: MPE (AudienceProcessor) ve non-MPE jenerator (MidiEngine) | `PluginProcessor.cpp` (MPE), `MidiEngine.h/.cpp`, `MidiProcessor.h/.cpp`, `MidiPitch.h` | `PartialEngine`, `SeatEventSink`, `MidiScaleModule`, JUCE |
-| **Plugin Core (Audio Processor / State / Params)** | APVTS (46 param), `pullParams`, `processBlock`, durum kaydetme, MIDI/MPE cikis, harici MIDI port | `PluginProcessor.h/.cpp`, `CMakeLists.txt` | `PartialEngine`, `SeatEventSink`, `OscBridge`, `Simulator`, `MidiPitch` |
-| **UI / Editors / Visualization** | Iki bagimsiz editor + Aurora gorsellestirici, LibraryRail, DebugPanel | `PluginEditor.*`, `AuroraComponent.*`, `LibraryRail.*`, `DebugPanel.*`, `MidiGeneratorEditor.*` | `AudienceProcessor`, `PartialEngine`, `SampleLibrary`, APVTS, JUCE |
-| **Networking, Samples & Seat Model** | OSC/UDP ingress, Simulator, `SeatEventSink` soyutlamasi, ornek yukleme | `SeatEventSink.h`, `OscBridge.*`, `Simulator.*`, `SampleLibrary.*` | JUCE (osc/audio_formats/events/core), `PartialEngine`, `MidiEngine` |
-| **Build / Apps / Test** | CMake, standalone GUI app, Python codegen, ctest harness | `CMakeLists.txt`, `AudienceMidiDeviceApp.cpp`, `Tests/*`, `tools/generate_element_spectral_data.py` | JUCE FetchContent, tum alt sistemler |
-
-### Baglanti Anlatisi
-
-Sistemin kalbi `SeatEventSink` soyut sinifidir (`MAX_ROWS=26`, `MAX_COLS=100`, `MAX_SEATS=2600`). Bu, **fan-in sozlesmesidir**: tum giris kaynaklari (`OscBridge`, `Simulator`, `MidiProcessor`, on-screen klavye, harici MIDI) bu arayuze `setX/setY/setOn(row, col, ...)` cagrilariyla yazar. Tuketici taraf, derleme hedefine gore degisir:
-
-- **Synth tarafinda:** `OscBridge` + `Simulator` -> `DualSeatRouter` (ince adaptor) -> `PartialEngine`. Ana synth'in `MidiEngine`'i **yoktur**; MIDI'si `PartialEngine`'in `MidiSourceEvent` kuyrugundan uretilir ve `AudienceProcessor` tarafindan MPE/Normal MIDI'ye cevrilir.
-- **MIDI hedeflerinde:** ayni `OscBridge`/`Simulator` -> `AudienceMidiProcessor`/`AudienceMidiDeviceModel` -> `MidiEngine` (non-MPE not uretici).
-
-Spektral matematik tek bir yerde toplanmistir (`AtomicScaleBuilder`), ve hem ses motoru (pitch + tini) hem de MPE cikisi ayni `getScalePitch` cozucusunu kullanir — AGENTS.md'nin "audio engine ve MIDI/MPE engine ayni pitch resolver'i paylasmali" kuralina uyar.
-
----
-
-## Veri Akisi
-
-### Giris -> Olcek -> Motor -> Ses
+Temel çalışma modeli:
 
 ```text
-UDP/OSC  /cs/<rowLetter>/<col>/finger<n>/{on|off|line|v}
-  -> OscBridge::SharedPort (OSC realtime thread, audio thread DEGIL)
-       -> fan-out (lock-free atomic array, <=16 client)
-  -> SeatEventSink::setX/setY/setOn   (DualSeatRouter -> PartialEngine)
-       -> per-seat atomics (lastX/lastY/active) + VoiceEvent -> eventFifo (8192, AbstractFifo)
-  --- AUDIO THREAD SINIRI ---
-  -> PartialEngine::render()
-       -> processPendingCommands -> drainEvents -> handleEvent
-            On  -> maybeTrigger(force)  [hysteresis: minTriggerMs * energyMacro]
-            XChange -> maybeTrigger + per-voice filter sweep
-            YChange -> targetAmp recompute
-            Off -> voices releasing
-       -> maybeTrigger:
-            getScalePitch (xToPitch) -> PitchTarget {midi, key, frequencyHz, velocityGain}
-            allocateVoice  x (1..3 adaptif unison)
-       -> renderVoices  (additif osilator banki VEYA Direct/Granular sample player)
-       -> applyReverb -> applyDelay -> wet/dry -> master -> applyTapeSaturation -> applyLimiter
-  -> stereo audio out + 96 auroraBands atomic + per-voice UI atomics
+önceden ayrılmış Zone A -> UDP 6060 -> Cosmic Microwave 1 -> MIDI
+önceden ayrılmış Zone B -> UDP 6061 -> Cosmic Microwave 2 -> MIDI
 ```
 
-### Spektral Olcek Yolu (cache)
+Her instance tek UDP portunu dinler ve kendi bağımsız MIDI kanal alanına sahiptir.
+Plugin port numarasından zone tahmin etmez; zone harfini OSC adresinden gözlemler.
 
-`ElementSpectralData.cpp` (generated, ~20.7k satir) -> `sourceLinesForElement` -> `AtomicScaleBuilder::buildPlayableAtomicScale`. Bu donusum:
+Bayrak ürün davranış olarak yalnızca MIDI üretir. Ableton yerleşimi ve eski VST3 class
+kimliği korunabilsin diye sessiz mono/stereo instrument bus sözleşmesi devam eder.
 
-1. Tum dalga boylarini nm'ye normalize eder, en uzun dalga boyunu **root** (`0 cents`) olarak secer
-2. Her cizgi icin `ratio = lambdaRef/lambda`, `cents = normalizedCents(1200*log2(ratio))` (oktav-katlanmis `0..1200`)
-3. Salience-siralamali greedy secim (min separation + max degree cap)
-4. Cluster -> temsilci secimi (varsayilan **Medoid**)
-5. Cikti: `scaleDegrees` (pitch/UI) + `timbrePartials` (additif banka)
+## 2. Ürün hedefleri
 
-> **Dogrulanmis kritik nokta:** `atomicResultFor` (PartialEngine.cpp:1748) 29 element x 5 ScaleMode = **145 Result** objesini fonksiyon-yerel bir `static const std::array` icinde tutar. Bu cache **`PartialEngine::prepare()` icinde (satir 2056-2058) ses thread'i DISINDA isitilir** — `prepareToPlay` mesaj thread'inde calisir. Iki paralel haritada bu konuda celiski vardi (DSP haritasi "isitiliyor" derken Microtonal haritasi "dogrulanmadi" demisti); kaynak okumasi DSP haritasini dogruladi. Risk **latent**: ayni magic-static ses thread'inden de erisilebilir (`getScalePitch`, `renderVoices`), dolayisiyla dogruluk `prepare()`'in her zaman ilk `render()`'dan once kosmasina baglidir.
+| CMake hedefi | Ürün adı | Format | Rol |
+|---|---|---|---|
+| `AudienceHarmonicSynth` | Cosmic Microwave | VST3 + Standalone | Güncel finger-aware Normal MIDI/MPE bayrak ürün. |
+| `AudienceHarmonicMidi` | Cosmic Microwave MIDI | VST3 + Standalone | Ayrı `MidiEngine` kullanan MIDI-effect. |
+| `AudienceMidiGenerator` | Cosmic Microwave MIDI Generator | VST3 | Scale correction/remap içeren Ableton odaklı MIDI-effect. |
+| `AudienceMidiDevice` | Cosmic Microwave MIDI Device | Standalone | Hafif UDP->MIDI uygulaması. |
 
-### MIDI / MPE / OSC Cikis
+Bayrak ürünün uyumluluk kimliği:
 
-`PartialEngine` her not olayini lock-free `midiEventFifo`'ya `MidiSourceEvent` (NoteOn/NoteOff/Expression/AllNotesOff) olarak yazar. `AudienceProcessor::renderOutgoingMidi` bunu block basina <=512 olay tuketir:
+| Alan | Değer |
+|---|---|
+| Bundle ID | `com.mehmetunal.spektrasynth` |
+| Manufacturer code | `Mhmt` |
+| Plugin code | `Ahss` |
+| CMake target adı | `AudienceHarmonicSynth` |
 
-- **Normal MIDI:** en yakin olcek notasi, tek kanal
-- **MPE:** `allocateMpeChannelForSource` (round-robin + yas-tabanli steal) -> `convertFrequencyToMidiPitch(freq, bendRange)` -> pitchWheel + CC74(timbre) + CC11(expression) + noteOn + channelPressure. `sendMpeSetupIfNeeded` MCM (RPN6) + per-channel bend-range RPN yollar. Expression olaylari sadece `delta>1` ise yeniden yollanir.
+Yardımcı üç ürün `MidiProcessor`/`MidiEngine` hattını kullanır. Bayrak ürünün
+finger/channel garantileri veya UI parametreleri bu hedeflere otomatik olarak
+genellenmemelidir.
 
----
+## 3. Bayrak ürün kaynak sınırı
 
-## Real-time / Thread Modeli
+`AudienceHarmonicSynth` yalnızca şu implementasyon birimlerini derler:
 
-Sistem **uc thread baglami** ile calisir ve gercek-zamanli disiplin AGENTS.md kurallariyla siki sikiya uygulanir.
+```text
+Source/PluginProcessor.cpp
+Source/PluginStateMigration.cpp
+Source/MpeMidiOutput.cpp
+Source/PluginEditor.cpp
+Source/AtomicScaleMap.cpp
+Source/AtomicScaleCatalog.cpp
+Source/MidiAudienceModel.cpp
+Source/MidiPitchMap.cpp
+Source/OscBridge.cpp
+Source/OscFingerRouter.cpp
+Source/Simulator.cpp
+```
 
-| Thread | Ne calisir | Tahsis / kilitleme |
+Ana bağımlılıklar JUCE audio processor/device/basics, GUI, OSC, core, data structures,
+events ve graphics modülleridir. Bayrak hedefin güncel link listesinde ayrı bir DSP
+veya dosya-formatı modülü yoktur.
+
+## 4. Bileşen haritası
+
+| Bileşen | Sorumluluk | Ana dosya |
 |---|---|---|
-| **Audio thread** | `processBlock`, `render`, `renderVoices`, FX, `renderOutgoingMidi`, MPE | **Hicbir kilit yok, tahsis yok.** `ScopedNoDenormals`. Tum scratch bufferlari `prepareToPlay`'de boyutlanir |
-| **Message thread** | `prepare`, `pullParams`'in tetikledigi UI, durum kaydet, `setSampleDirectory`, Simulator (~30Hz), timer drain (60Hz) | Disk I/O `suspendProcessing` ile cevrelenir |
-| **OSC realtime thread** | `SharedPort::oscMessageReceived` (audio DEGIL, message DEGIL) | Alloc-light parse; fan-out lock-free |
+| `AudienceProcessor` | APVTS, process lifecycle, MIDI thru, pitch map, finger durumu, Normal/MPE render, host/harici çıkış, state migration. | `PluginProcessor.*` |
+| `CosmicStateMigration` | Released 1.x ve schema-2 state'leri schema 3'e güvenli taşıma. | `PluginStateMigration.*` |
+| `AudienceEditor` | MIDI-only kontrol ve izleme arayüzü. | `PluginEditor.*` |
+| `OscBridge` | Paylaşımlı UDP listener, OSC parse/validation, değer clamp, zone/traffic telemetrisi. | `OscBridge.*`, `OscWireFormat.h` |
+| `MidiAudienceModel` | 256 source için atomic UI/control snapshot ve aktif finger maskesi. | `MidiAudienceModel.*` |
+| `OscFingerRouter` | Control/OSC thread'lerinden audio thread'e sabit kapasiteli event aktarımı. | `OscFingerRouter.*` |
+| `MidiPitchMap` | Yedi tonal 12-TET tablo ve normalize X lookup. | `MidiPitchMap.*` |
+| `AtomicScaleCatalog` | 29 element x 5 density için immutable, önceden üretilmiş degree katalogu. | `AtomicScaleCatalog.*`, `AtomicScaleCatalogData.h` |
+| `AtomicScaleMap` | En fazla 128 degree/768 pitch-step içeren exact-frequency lookup. | `AtomicScaleMap.*` |
+| `MpeMidiOutput` | Normal/MPE note ownership, CC, RPN/MCM, kanal allocation, ref-count ve safety reset. | `MpeMidiOutput.*` |
+| `Simulator` | UI thread üzerinde sahte source üretimi ve random movement. | `Simulator.*` |
 
-**Sinir gecisi mekanizmalari:**
+## 5. Uçtan uca veri akışı
 
-- **Kontrol -> ses:** iki `juce::AbstractFifo` (`eventFifo` 8192, `midiEventFifo`). Sadece *uretici* taraf `eventWriteLock` (`CriticalSection`) alir — ses thread'i okuyucu olarak asla bloklanmaz.
-- **Per-field atomics:** `SeatState`/`Voice` alanlari `std::atomic`, cogu `std::memory_order_relaxed`.
-- **Harici MIDI:** SPSC `juce::AbstractFifo(8192)`; ses thread'i `juce::MidiOutput`'a asla dokunmaz (sadece 60Hz timer). Tasma `externalMidiDropped` ile sayilir.
-- **UI telemetri:** 96-band `std::atomic<float>` aurora dizisi + sequence-stamped ring bufferlar (release/acquire); GUI ses thread'ini asla bloklamaz.
+```text
+OSC UDP callback                          Simulator / UI thread
+       |                                          |
+       +-----------> MidiAudienceModel <----------+
+                            |
+                    atomic source snapshot
+                            |
+                    OscFingerRouter FIFO
+                            |
+                    AUDIO PROCESS BLOCK
+                            |
+                    FingerMidiState[2560]
+                            |
+                    Pitch System lookup
+                    /                 \
+             MidiPitchMap       AtomicScaleMap
+                            |
+                     MpeMidiOutput
+                      /           \
+             host MidiBuffer    external MIDI FIFO
+                                      |
+                              60 Hz message timer
+                                      |
+                          virtual / hardware output
 
-**Dogrulanmis maliyetler / capanlar:**
+host MIDI input -> değişmeden MIDI thru (Output Off değilse)
+audio buffer     -> sessiz uyumluluk çıkışı
+```
 
-1. **`atomicResultFor` magic-static:** `prepare()` ile isitilir ama ses-thread yolundan da erisilebilir (latent risk, yukarida).
-2. **Per-partial `std::sin` per sample:** `renderVoices` spektral kolu (satir 3677+) her partial icin her ornekte `std::sin` cagirir. Worst-case ~512 partial x 1024 voice — motorun en sicak dongusudur ve en olasi dropout kaynagidir. LFO'lar artimsel rotasyon-matrisi kullanir ama partial'lar kullanmaz.
-3. **Full-array sweepleri:** `renderVoices` her block 1024 `Voice` (~2KB elementPhase[512] ile = ~2MB dizi) uzerinden strider; kontrol op'lari 2600 `SeatState` dolasir.
-4. **512-olay drain capi:** `midiSourceScratch[512]` kaynak uzayini (2664) sessizce sinirlar.
+### Process block sırası
 
----
+`AudienceProcessor::processBlock` ana hatlarıyla:
 
-## Alt Sistemler
+1. Host MIDI input'u önceden reserve edilmiş scratch buffer'a kopyalar.
+2. APVTS raw pointer değerlerinden Tonal `MidiPitchMap` veya Atomic `AtomicScaleMap`
+   konfigürasyonunu günceller.
+3. MIDI protokolü/kanal/zone/route değişimlerini karşılaştırır.
+4. Gerekirse safety reset üretir ve aktif OSC finger'larını yeniden kurmak üzere
+   retrigger işaretler.
+5. Audio buffer'ı sessizler, host MIDI output buffer'ını yeniden kullanıma hazırlar.
+6. Output açıksa host MIDI input'u değişmeden geçirir.
+7. Bir block'ta en fazla 1024 OSC finger event'i drain eder.
+8. Finger state değişimlerini `MpeMidiOutput::NoteEvent` dizisine çevirir.
+9. Normal MIDI veya MPE mesajlarını host buffer'a yazar.
+10. Aynı kısa MIDI mesajlarını seçilmiş harici endpoint için FIFO'ya kopyalar.
 
-### DSP / Spectral Synthesis Engine (`PartialEngine`)
+## 6. Kimlik modeli
 
-- **Anahtar tipler:** `PartialEngine` (SeatEventSink subclass, deger olarak `AudienceProcessor` icinde yasar), `Voice` (POD + UI atomics, `std::array<float,512> elementPhase`), `SeatState` (tum atomic), `PitchTarget` (X->pitch sonucu), `AtomicScaleBuilder::Result` (kopru artifaktı), `ModeProfile/kModes[5]` (imza modlari), `VoiceEvent/MidiSourceEvent`.
-- **Sorumluluk:** Tum durum + render pipeline. `std::array<Voice,1024>`, `std::array<SeatState,2600>`, iki FIFO, `SampleLibrary`, `juce::Reverb`, ~40 atomic param.
-- **Public arayuz:** `prepare/reset`, `render/processControlEvents`, `setX/setY/setOn`, `setKeyboardStep`, `processKeyboardPitchRealtime`, `drainMidiSourceEvents`, `getScaleMidi/getScaleFrequencyHz/getScaleLineWavelengthNm/getAuroraBand/getActiveVoiceCount` ve ~40 public `std::atomic` parametre alani.
-- **Bagimliliklar:** `AtomicScaleBuilder`, `ElementSpectralData`, `SampleLibrary`, `SeatEventSink`, JUCE.
+### 6.1 Zone, source ve finger
 
-### Microtonal Scale System (`AtomicScaleBuilder` + `MidiScaleModule` + `MidiPitch`)
+Canonical adres:
 
-- **Anahtar tipler:** `AtomicScaleBuilder` (tamamen static/stateless utility), `Options` (rootHz varsayilan `130.8128`=C3), `ScaleDegree` (cents/frequencyHz/velocity), `Result`, `ScaleMode` (Melodic 7 / Performable 12 / Microtonal 24 / Scientific 48 / Raw sinirsiz), `TimbrePartial`, `MidiScaleModule` (12-TET quantizer + `ActiveNoteStack[16*128]`), `convertFrequencyToMidiPitch`.
-- **Sorumluluk:** Iki bagimsiz quantization yolu: spektral (`AtomicScaleBuilder` -> PartialEngine) ve 12-TET diatonik (`MidiScaleModule` -> MIDI jenerator tarafı). `MidiPitch.h` mikrotonal frekansi MIDI nota + 14-bit pitch-bend'e koprule.
-- **Public arayuz:** `buildPlayableAtomicScale(...)`, `normalizeWavelengthNm`, `circularDistanceCents`, `MidiScaleModule::mapNoteToScale/setConfig/process`, `convertFrequencyToMidiPitch`.
-- **Bagimliliklar:** `ElementSpectralData` (tip-seviyesi: `vector<SourceLine>`), JUCE, `<cmath>`.
-- **Not (latent tutarsizlik):** `ScaleDegree.frequencyHz` builder'da `Options.rootHz` ile hesaplanir ama `getScalePitch` (satir 2318) bunu YOK SAYAR ve `midiToHz(scaleRootMidi)` ile yeniden hesaplar — `frequencyHz` sentez icin etkin olarak olu, sadece debug dump'larinda kullaniliyor.
+```text
+/cs/<zone>/<source>/finger<n>/<param>
+```
 
-### MIDI / MPE Engine
+| Alan | Aralık |
+|---|---|
+| Zone | `A..Z` |
+| Source ID | `0..255` |
+| Finger | `0..9` |
+| Param | `u`, `v`, `on`, `off`, legacy `line` |
 
-- **Anahtar tipler:** `AudienceProcessor` (gercek MPE motoru, PluginProcessor'da), `MidiOutVoiceState`, `mpeChannelOwner`/`allocateMpeChannelForSource`, `MidiEngine` (AYRI non-MPE jenerator), `MidiChannelMode`, `AudienceMidiProcessor`, `MidiScaleModule`, `PartialEngine::MidiSourceEvent`.
-- **Sorumluluk:** **Iki ayri pipeline.** (1) MPE: `AudienceProcessor` `MidiSourceEvent`'leri drain eder, per-channel allocation + per-note bend + pressure + CC74/CC11 + bend-range RPN + MCM uretir. (2) Non-MPE jenerator: `MidiEngine` X'i 12-TET notaya, Y'yi velocity'ye cevirir, CC1/CC11/CC74/CC91/CC93 yollar; pitch bend/RPN/pressure YOKTUR.
-- **Public arayuz:** `AudienceProcessor::getActiveMpeVoices/getAvailableMpeChannels`, `MidiEngine::renderMidi/setX/setY/setOn`, `convertFrequencyToMidiPitch`.
-- **Dogrulanmis duzeltme:** Gorev cercevesi MPE'yi `MidiEngine`/`MidiProcessor`'a atfetti, ANCAK kaynak MPE mantiginin tamamen `PluginProcessor.cpp` icindeki `AudienceProcessor` (satir ~868-1201) oldugunu gosterdi. `mpeZone` parametresi sadece deklare edilir (satir 255), asla okunmaz — inert (Lower-only).
+Bayrak üründe realtime voice anahtarı:
 
-### Plugin Core (`AudienceProcessor`)
+```text
+voice_id = source_id * 10 + finger
+```
 
-- **Anahtar tipler:** `AudienceProcessor` (juce::AudioProcessor + private Timer), `DualSeatRouter`, `RawParams` (46 cached `std::atomic<float>*`), `MidiOutVoiceState[2664]`, `MidiDebugSlot` (256'lik iki ring), `PackedMidiEvent + externalMidiFifo(8192)`.
-- **Sorumluluk:** APVTS sahibi, her block `pullParams` ile motor atomics'ine kopyalar, ses render, MIDI/MPE cikis, durum serialize, debug snapshot.
-- **Public arayuz:** `processBlock`, `panic/setMuted/setUdpPort`, `getMidiOutputOptions/setMidiOutputOptionIndex`, `getStateInformation/setStateInformation`, `createEditor`.
-- **Bagimliliklar:** `PartialEngine`, `SeatEventSink`, `OscBridge`, `Simulator`, `MidiPitch`, JUCE.
+Toplam 2560 sabit voice-state slotu vardır. Zone bu anahtarın parçası değildir; çünkü
+instance'ın upstream'de tek zone'a ayrılmış olması beklenir.
 
-### UI / Editors / Visualization
+`SeatEventSink` içinde eski yardımcı ürünlerle uyumluluk için 26x100 seat sabitleri
+bulunmaya devam eder. Fakat bayrak ürünün geçerli OSC source kapasitesi 256'dır ve
+`MidiAudienceModel` 26x100 grid kullanmaz.
 
-- **Anahtar tipler:** `AudienceEditor` (~70 kontrol), `AuroraComponent` (30Hz seat-map + spektral strip), `LibraryRail` (Samples/Elements browser), `DebugPanel` (MIDI/MPE diagnostik), `AudienceMidiGeneratorEditor` (ayri MIDI-jenerator plugin'i icin), `SA/CA/BA` APVTS attachment typedef'leri.
-- **Sorumluluk:** Mesaj-thread GUI. Kontroller APVTS'e attachment ile baglanir; gorseller Timer ile lock-free getter'lari poll eder. **Hicbir kod ses thread'inde calismaz.**
-- **Dikkat:** Iki tam bagimsiz tasarim sistemi (`cs::` palette vs `oklch()`), uc kopyalanmis `midiName()` tanimi (drift riski). Per-paint `std::array<float,8192>` stack bufferlari (~32KB) — RT sorunu degil ama frame basina maliyet.
+### 6.2 Normal MIDI channel kuralı
 
-### Networking, Samples & Seat Model
+Bayrak ürün base-1 convention kullanır:
 
-- **Anahtar tipler:** `SeatEventSink` (cekirdek soyutlama), `OscBridge` + `OscBridge::SharedPort` (process-global UDP port paylasimi, <=16 client fan-out), `Simulator`, `SampleLibrary` + `Sample`, `DualSeatRouter`.
-- **Sorumluluk:** Harici/simule kalabaligi motorlara koprule. OSC parse: `row A-Z->0-25`, `col < MAX_COLS`, **`finger<n>` indexi YOK SAYILIR** (multi-touch tek koltuga collapse), `v`->setY, `line`->setX (value/127), `on`/`off`->setOn.
-- **Public arayuz:** `SeatEventSink::setX/setY/setOn`, `OscBridge::start/stop`, `Simulator::addRandomSeat(s)`, `SampleLibrary::loadFromDirectory/getSampleForMidi/parseRootMidiFromName`.
-- **OSC wire format:** `/cs/<rowLetter A-Z>/<col 0..99>/finger<n>/{on(int)|off|line(0..127->X)|v(0..1->Y)}`.
+```text
+channel = positive_mod(source_id - 1, 16) + 1
+```
 
-### Build / Apps / Test
+| Source | Channel |
+|---:|---:|
+| 0 | 16 |
+| 1 | 1 |
+| 16 | 16 |
+| 17 | 1 |
+| 32 | 16 |
+| 255 | 15 |
 
-- **Anahtar tipler:** `AUDIENCE_SYNTH_BUILD_TESTS` (CMake option, ON), `FetchContent JUCE 8.0.4`, 4 urun hedefi, 7 test exe, `ELEMENTS` Python listesi (29 element), `Runner/expect()` ad-hoc test harness.
-- **Sorumluluk:** Ne derlenecegini tanimlar, JUCE'yi pinler, spektral-veri codegen'i, ve repodaki TEK otomatik regresyon kapsamini saglar.
-- **Veri pipeline:** `data/<symbol>.txt` --(`generate_element_spectral_data.py`, 29-element liste)--> `Source/ElementSpectralData.{h,cpp}` (git-tracked, elle yeniden uretilir).
+Kritik invariant: **source 0, Channel 16'ya gider.**
 
----
+Tüm finger'lar source'un Normal MIDI kanalını paylaşır; ancak note ownership anahtarı
+finger bazında ayrıdır. `normalNoteRefCounts[16 * 128]`, aynı channel/note'u tutan son
+semantic owner bırakana kadar fiziksel Note Off gönderilmesini erteler.
 
-## Capraz-Kesen Endiseler
+### 6.3 MPE kimliği
 
-1. **MPE kapsam/isim yanlis hizalamasi (en onemli mimari netlik):** MPE ozellikleri (kanal allocation, per-note bend, CC74/CC11/pressure, bend-range RPN, MCM) `MidiEngine`/`MidiProcessor`'da DEGIL, `PluginProcessor.cpp` icindeki `AudienceProcessor`'dadir. `MidiEngine` sadece nota + CC uretir. Her mimari dokuman MPE'yi `AudienceHarmonicSynth`/`Ahss` binary'sine atfetmelidir.
+MPE kanalını source ID doğrudan belirlemez. Her aktif `source/finger` çifti bir member
+channel alır:
 
-2. **`atomicResultFor` magic-static deseni:** 145-girisli cache fonksiyon-yerel `static const`. `prepare()` ile isitilir ama ses-thread yolundan da erisilebilir — dogruluk cagri sirasina baglidir. Tum spektral pitch + tini bu cache'e dayanir.
+| Zone | Master | Members |
+|---|---:|---|
+| Lower | 1 | 2..16 |
+| Upper | 16 | 1..15 |
 
-3. **Spektral matematik tek kaynak (iyi):** AGENTS.md kuralina uygun olarak hem ses hem MPE `getScalePitch`/`AtomicScaleBuilder` paylasir. Ancak UI tarafinda UC bagimsiz olcek-isim vokabuleri var: `MidiScaleModule::scaleNames()` (16 tip), `atomicScaleModeName` (5 mod), ve `AudienceMidiDeviceApp.cpp`'deki hardcoded liste — karistirilmasi kolay.
+15 member doluysa en yaşlı aktif MPE note önce düzgün biçimde bırakılır, sonra kanalı
+yeni finger'a atanır. Free channel taraması round-robin'dir ve yeni bırakılan kanalı
+diğerlerinden sonra tekrar kullanır.
 
-4. **Lock-free sinir deseni (tutarli):** Tum alt sistemler ayni deseni kullanir — `AbstractFifo` + atomic + sequence-stamped ring. Uretici taraf `CriticalSection`, ses-thread okuyucu hicbir zaman bloklanmaz.
+## 7. OSC ingress
 
-5. **Kopyalanmis veri ve yardimcilar:** (a) `PartialEngine.cpp:95-1530` element cizgilerinin ikinci bir fallback kopyasini tutar (generated dataset bos olursa). (b) `rootNames()`/`midiNoteName()`/`midiName()` 3-4 yerde tekrar tanimli. (c) `data/` 91 element .txt tutar ama sadece 29'u derlenir.
+### Parse ve scaling
 
-6. **APVTS ID kararliligi (kisitlama):** AGENTS.md acikca parametre ID'lerini ve 4-char kodlari korumayi zorunlu kilar. Tum iyilestirmeler ID degisikligi ONERMEZ.
+`OscWireFormat.h` adresi bounded ve allocation-free biçimde parse eder:
 
----
+- `/cs/`, zone ve param isimleri case-insensitive;
+- `finger` literal'i lower-case ve tam eşleşmeli;
+- source 256 ve finger10 geçersiz;
+- `u/v`: `0..1` aralığına clamp;
+- `line`: 127'ye böl, sonra clamp;
+- `on`: numeric ve sıfır değilse aktif;
+- `off`: argümansız veya finite numeric kabul edilir;
+- NaN/Inf ve numeric olmayan argümanlar reddedilir;
+- nested OSC bundle'lar recursive işlenir.
 
-## Test Kapsami ve Bosluklar
+### SharedPort
 
-**Test edilen (7 ctest hedefi):**
+Aynı process içinde aynı UDP portuna bağlanan `OscBridge` nesneleri bir `SharedPort`
+paylaşır. Maksimum 16 client vardır. Callback client listesini `CriticalSection` ile
+korur; bu thread audio thread değildir. Client taşması UI'da `PORT FULL` olarak görünür.
+
+Üretim tasarımı yine bir zone/port/instance kuralıdır. SharedPort zone ayırma aracı
+değildir.
+
+### Overflow davranışı
+
+`OscFingerRouter` 8192 event kapasitelidir. Producer'lar kısa bir `SpinLock` ile
+serialize edilir; audio consumer lock almaz. FIFO dolarsa:
+
+1. dropped counter artar;
+2. `resetPending` set edilir;
+3. audio thread eski queue'yu discard eder;
+4. all-off reset üretir.
+
+Bu politika, her hareket paketini korumak yerine stuck-note güvenliğini önceler.
+
+## 8. Pitch systems
+
+Her iki sistem de audio thread üzerinde heap allocation ve parse olmadan çalışır.
+`MidiPitchMap` yedi tonal 12-TET tabloyu üretir:
+
+| Scale | Semitone offset'leri |
+|---|---|
+| Major | `0,2,4,5,7,9,11` |
+| Natural Minor | `0,2,3,5,7,8,10` |
+| Pentatonic | `0,2,4,7,9` |
+| Dorian | `0,2,3,5,7,9,10` |
+| Lydian | `0,2,4,6,7,9,11` |
+| Harmonic Minor | `0,2,3,5,7,8,11` |
+| Whole Tone | `0,2,4,6,8,10` |
+
+Ortak root hesabı:
+
+```text
+root_midi = (root_octave + 1) * 12 + pitch_class
+```
+
+Yeni session varsayılanı C2 (`36`), Atomic, Helium, Extended ve 4 octave'dır. Tonal
+seçildiğinde saklanan varsayılan scale Major'dır.
+
+Atomic katalog Hydrogen'dan Zinc'e uzanan 29 element içerir; uygun veri seti olmadığı
+için Nitrogen listede yoktur. Developer-only `tools/GenerateAtomicScaleCatalog.cpp`,
+`ElementSpectralData` içindeki wavelength/intensity verisini `AtomicScaleBuilder` ile
+önceden işler. Her elementin en uzun geçerli wavelength'i referans alınır, wavelength
+ratio'ları bir octave içine cents olarak katlanır ve kompakt sonuç
+`AtomicScaleCatalogData.h` içine yazılır. Büyük spektral tablo ve builder bayrak ürünün
+runtime target'ında derlenmez.
+
+| Atomic mode | Degree üst sınırı | Minimum katalog aralığı |
+|---|---:|---:|
+| Core | 7 | 80 cent |
+| Extended | 12 | 40 cent |
+| Microtonal | 24 | 20 cent |
+| Scientific | 48 | 10 cent |
+| Raw 128 | 128 | ek ayrım yok |
+
+Bunlar üst sınırdır; elementte daha az kullanılabilir çizgi varsa gerçek degree sayısı
+daha düşüktür. `AtomicScaleMap` degree bank'ini 1..6 octave tekrarlar ve en fazla
+`128 x 6 = 768` pitch step saklar. Atomic target için exact frequency, en yakın MIDI
+note ve bu note'a göre cents offset birlikte tutulur.
+
+X her iki sistemde eşit genişlikli pitch-step bölgelerine bölünür; X=0 ilk, X=1 son
+geçerli step'i seçer. Üst MIDI sınırını aşan tablo güvenli biçimde truncate edilir.
+
+Pitch System, root, octave, tonal Scale, Atomic Element/Density veya Range değiştiğinde
+aktif finger'lar yeni tabloyla yeniden çözülür. Bir block'ta en fazla 256 retrigger
+üretilerek büyük durum geçişi bounded tutulur.
+
+## 9. MIDI emission
+
+### Normal MIDI
+
+- Note On velocity doğrudan V/Y'den gelir (`1..127`).
+- CC74 doğrudan U/X'ten gelir (`0..127`).
+- CC11 doğrudan V/Y'den gelir (`0..127`).
+- OSC finger'ları için pitch wheel gönderilmez.
+- Tonal map exact 12-TET note üretir; Atomic map exact target'ın en yakın semitone'unu
+  gönderir.
+- Fixed Channel veya Per source 1-16 seçilebilir.
+
+Normal CC'ler channel-wide olduğu için Channel 1'i paylaşan source 1 ve 17 birbirinin
+son CC74/CC11 değerini etkileyebilir. Per-finger expression izolasyonu için MPE gerekir.
+
+### MPE
+
+Setup açıkken master'da RPN6 MPE Configuration Message, her member'da RPN0 bend range
+gönderilir. Note On mesaj sırası:
+
+```text
+Pitch Wheel -> CC74 -> CC11 -> Note On -> Channel Pressure
+```
+
+Note Off sırası:
+
+```text
+Note Off -> Channel Pressure 0 -> Pitch Wheel 8192
+```
+
+Tonal map exact 12-TET MIDI note üretir; dolayısıyla pitch wheel normalde center'dır.
+Atomic map nearest base note'u ve element-derived exact target frequency'ye ulaşan
+per-note bend'i üretir. Exact target MIDI pitch wheel'in 14-bit çözünürlüğüyle temsil
+edilir. Bend range seçenekleri 2/12/24/48 semitone, varsayılan 2'dir ve receiver aynı
+aralığa ayarlanmalıdır.
+
+### Host ve harici destination
+
+Destination sırası:
+
+1. Host MIDI Output
+2. `Virtual: Cosmic Microwave <UDP port> Out`
+3. Sistem/hardware MIDI output'ları
+
+Host stream her zaman korunur. Harici destination seçilirse aynı kısa mesajlar 8192
+kapasiteli FIFO'ya yazılır. 60 Hz message timer `MidiOutput::sendMessageNow` çağrılarını
+yapar; audio thread OS MIDI device I/O yapmaz.
+
+Bu nedenle host çıkışı block/sample pozisyonunu korurken harici/virtual çıkış timer
+granülaritesine sahiptir. Hassas timestamp gerektiren kullanımda host yolu daha
+deterministiktir.
+
+## 10. Thread modeli
+
+| Thread/context | İş | Senkronizasyon |
+|---|---|---|
+| OSC realtime callback | Parse, telemetry, source atomic update, event enqueue. | Shared client `CriticalSection` + producer `SpinLock`; audio thread değil. |
+| Audio processing | MIDI input copy, Tonal/Atomic fixed map seçimi, event drain, Normal/MPE host üretimi, external FIFO write. | Fixed array/FIFO ve pre-reserved `MidiBuffer`; katalog üretimi, parse ve device I/O yok. |
+| Message/UI | Editor 8 Hz telemetry, simulator ~30 Hz, destination/state değişimi, 60 Hz external drain. | Atomics, kısa pending-state lock; destructive route işlemlerinde processor suspension. |
+
+Kapasiteler:
+
+| Kaynak | Kapasite |
+|---|---:|
+| Source | 256 |
+| Finger/source | 10 |
+| Semantic MIDI state | 2560 |
+| OSC finger FIFO | 8192 |
+| Audio block event drain | 1024 |
+| NoteEvent scratch | 8192 |
+| External MIDI FIFO | 8192 |
+| MIDI scratch reserve | buffer başına 262144 byte |
+| SharedPort client | 16 |
+| Atomic degree | element/mode başına en fazla 128 |
+| Atomic pitch step | en fazla 768 |
+
+`setMidiOutputOptionIndex` ve `panic`, immediate external reset sırasında processor'ı
+geçici olarak suspend eder. `releaseResources` doğrudan device I/O yapmak yerine reset
+isteğini message timer'a yayınlar.
+
+## 11. State ve migration
+
+### APVTS parametreleri
+
+| ID | Değerler | Varsayılan |
+|---|---|---|
+| `midiOutputType` | Off / Normal MIDI / MPE MIDI | Normal MIDI |
+| `normalMidiRoutingMode` | Single Channel / Per Source 1-16 | Per Source 1-16 |
+| `normalMidiChannel` | 1..16 | 1 |
+| `mpeZone` | Lower / Upper | Lower |
+| `mpePitchBendRange` | 2 / 12 / 24 / 48 st | 2 st |
+| `mpeSendSetupMessages` | bool | On |
+| `mpePitchMode` | Retrigger / Glide | Retrigger |
+| `pitchSystem` | Tonal / Atomic | Atomic |
+| `scaleRoot` | C..B | C |
+| `scaleRootOctave` | 0..6 | 2 |
+| `scaleMode` | 7 tonal map | Major |
+| `spectralElement` | 29 element, H..Zn | Helium |
+| `atomicScaleMode` | Core / Extended / Microtonal / Scientific / Raw 128 | Extended |
+| `scaleOctaves` | 1..6 | 4 |
+
+ValueTree ek alanları:
+
+- `udpPort` (6060)
+- `midiOutputOption` (Host)
+- `cosmicMicrowaveSchema` (3)
+
+Eski state migration:
+
+- `normalMidiRoutingMode` yoksa legacy davranış için Single Channel eklenir;
+- released schema-0 `normalMidiChannel` değerleri `1..16` integer formatından
+  `0..15` Choice index formatına çevrilir;
+- schema-2 MIDI-only session'lara açıkça Tonal atanır;
+- released 1.x ilk yedi tonal seçimi korunur;
+- released 1.x 36-choice Scale içindeki element seçimi Atomic'e çevrilir ve karşılık
+  gelen element index'i `spectralElement` üzerine taşınır;
+- eski element-engine session'ları Atomic'e taşınırken stabil `spectralElement` ve
+  `atomicScaleMode` değerleri korunur;
+- bozuk/non-finite choice değerleri güvenli sınırlara clamp edilir;
+- UDP port ve destination'ın dış dünyaya etkisi message timer üzerinden uygulanır.
+
+## 12. UI mimarisi
+
+`AudienceEditor` yalnızca `AudienceProcessor`, APVTS attachment'ları ve
+`MidiAudienceModel` snapshot'larını kullanır.
+
+Görünür modüller:
+
+- Header: SOURCES, FINGERS, NOTES, MPE VOICES;
+- OSC INPUT;
+- SOURCE ROUTING + observed zones;
+- SIMULATOR;
+- 256-source / 16-channel SOURCE MATRIX;
+- PITCH MAPPING: Tonal/Atomic selector, ortak root/octave/range ve moda göre
+  Scale veya Element/Density;
+- Normal/MPE mode-specific MIDI ROUTING;
+- MIDI OUTPUT, Rescan, Panic.
+
+UI timer'ı 8 Hz'de telemetry çeker. Paint yolu network receiver'a veya MIDI device'a
+doğrudan dokunmaz. Source map hücreleri seçim kontrolü değil, read-only görseldir.
+
+## 13. Test kapsamı
+
+CMake on iki CTest hedefi tanımlar:
 
 | Test | Kapsam |
 |---|---|
-| `AtomicScaleBuilderTests` | Angstrom->nm, en-uzun-dalga-boyu root, clustering invariantlari, degree caps |
-| `MidiScaleModuleTests` | 12-TET scale correction (Nearest/Up/Down), remap, note-off eslesme |
-| `MidiPitchTests` | `convertFrequencyToMidiPitch` matematigi (A4->note69/bend8192, clamp) |
-| `MidiMappingTests` | `MidiEngine` (non-MPE): X->nota, Y->velocity, retrigger debounce, kanal modlari |
-| `OscBridgeTests` | Iki bridge tek UDP port, `/cs/...` fan-out (loopback socket) |
-| `SignalFlowTests` | `PartialEngine`+`SampleLibrary` entegrasyonu, 29 element line-count oracle, render sonluluk |
-| `PerformanceSmokeTests` | 60/130/512/1024 katilimci, wall<50x audio, peak<=1.0001 |
+| `AudienceMidiMappingTests` | Yardımcı `MidiEngine` mapping/channel/CC. |
+| `AudienceMidiScaleModuleTests` | Yardımcı scale correction/remap/note-off pairing. |
+| `AudienceMidiPitchTests` | Frequency -> MIDI note/bend hesabı. |
+| `AudienceMpeOutputTests` | MPE setup/order/zones/allocation/steal/reset, 2560 ID, Normal source mapping/ref-count. |
+| `AudienceOscBridgeTests` | Parser boundary/scaling/bundle/fan-out/telemetry/client cap. |
+| `AudienceOscFingerRouterTests` | FIFO order/reset. |
+| `AudienceMidiAudienceModelTests` | Finger masks/counts/boundary/source mapping (`0 -> 16`). |
+| `AudienceMidiPitchMapTests` | Yedi pitch tablo, X sınırları, root/range clamp. |
+| `AudienceAtomicScaleBuilderTests` | Offline wavelength normalize/seçim, density cap ve hostile numeric input. |
+| `AudienceAtomicScaleMapTests` | Fixed exact-frequency map, 768-step sınırı ve hostile numeric input. |
+| `AudienceAtomicScaleCatalogTests` | 29x5 generated katalog bütünlüğü, metadata ve mode cap'leri. |
+| `AudiencePluginStateMigrationTests` | Released channel/scale formatı, schema-2 Tonal koruma, 1.x Atomic recovery, clamp ve idempotence. |
 
-**Test EDILMEYEN (kritik bosluklar):**
+Önemli kalan entegrasyon boşlukları:
 
-- **`AudienceProcessor` MPE/harici-MIDI cikis yolu:** `convertFrequencyToMidiPitch` izole test edilir ama gercek tuketicisi (MPE note-on/bend/channel allocation/panic, PluginProcessor.cpp ~879-1201) hicbir otomatik kapsama sahip degil. AGENTS.md bir bolumu bunlara ayirmasina ragmen.
-- **`PluginProcessor` + `PluginEditor` (bayrak urun):** APVTS state save/restore, parametre wiring, preset recall, output-mode switching — hicbir test hedefinde derlenmiyor.
-- **CI yok:** `.github/workflows` veya herhangi bir build config mevcut degil. 7 ctest ve 4 urun sadece gelistiricinin yerel calismasiyla dogrulanir.
-- **Generated `ElementSpectralData.cpp` drift'i:** `data/` ile committed .cpp arasinda senkronizasyon dogrulayan build/test adimi yok; `SignalFlowTests` exact line-count oracle'i (orn. Iron==4041) ikili guncelleme gerektirir.
-- **Ornek-varlik bagimliligi:** `SignalFlowTests`/`PerformanceSmokeTests` `Samples/Piano Dream`'i diskte zorunlu kilar; eksikse cevresel basarisizlik (kod regresyonu degil).
+- gerçek host/Ableton route otomasyonu;
+- OS virtual endpoint yaşam döngüsü ve timestamp ölçümü;
+- uzun süreli yüksek hızlı OSC soak testi;
+- resizable editor snapshot/interaction regresyonu.
 
----
+## 14. Operasyonel riskler ve teknik borç
 
-## Riskler ve Teknik Borc (oncelikli)
+### Yüksek önem
 
-### Yuksek
+1. **Zone source collision:** İki zone aynı porta gelirse zone kimliği source anahtarında
+   olmadığı için aynı ID'ler ortak state kullanır. Çözüm upstream split'tir.
+2. **MPE 15-channel limiti:** 16. aktif finger oldest-note steal tetikler. Bu bir
+   allocation sınırıdır, bug değildir.
+3. **Event overflow:** 8192 event üstü burst safety reset üretir; upstream U/V rate
+   limiti gerekir.
 
-1. **MPE / harici-MIDI emisyonu ana plugin'de tamamen test edilmemis.** `AudienceProcessor`'in MPE kanal allocation, RPN/MCM byte dizisi, ve bend-before-note-on davranisi hicbir testle calistirilmamis. AGENTS.md bunu kritik sayar.
-2. **`PluginProcessor`/`PluginEditor` (bayrak urun) sifir test.** State, param wiring, preset recall, mode switching dogrulanmamis.
-3. **`atomicResultFor` cache fonksiyon-yerel magic-static, ses-thread'inden erisilebilir.** `prepare()` ile isitilir (dogrulandi) ama herhangi bir ses cagrisi `prepare`'i gecerse C++ thread-safe-static init + agir heap allocation/sorting ses thread'inde calisir. Dogruluk tamamen cagri sirasina bagli.
+### Orta önem
 
-### Orta
+4. **Harici MIDI timer granülaritesi:** Virtual/hardware route sample-accurate değildir;
+   host MIDI yolu tercih edilebilir.
+5. **Simulator/live namespace:** Simulator 0..255 pool'unu live OSC ile paylaşır;
+   soundcheck sonrası Clear/Panic yapılmalı.
+6. **Dynamic endpoint desteği:** `createNewDevice` OS tarafından reddedilebilir; UI host
+   output'a fallback durumunu gösterir.
+7. **Silent-shell host bağımlılığı:** Track devre dışı bırakılır veya host processing'i
+   durdurursa `processBlock` çağrılmayabilir ve MIDI üretimi durur.
 
-4. **Per-partial `std::sin` per sample.** `renderVoices` (3677+) en sicak dongu; worst-case ~512k transcendental cagri/ornek. Ultra polyphony'de en olasi dropout kaynagi.
-5. **"Element Partial" knob'u solo-disi modda etkisiz (DOGRULANMIS HATA).** `v.elementPartials` `elementLineCount`'tan set edilir (satir 3385-3386, TUM tini partial sayisi), `spectralPartialCount` sadece solo secimini etkiler (satir 3656-3679). Knob normal additif oynatmada label'ladigi gibi davranmiyor.
-6. **CI konfigurasyonu yok.** Test/build zorlamasi tamamen manuel.
-7. **Generated veri drift'i + ornek-varlik baglanmasi.** Sessiz divergence riski.
+### Önerilen backlog
 
-### Dusuk (dogrulanmis somut bulgular)
+- Dropped OSC/external MIDI counter'larını görünür telemetry'ye eklemek.
+- Ableton host MIDI vs virtual-port latency/jitter ölçümü.
+- Simulator source aralığını konfigüre edilebilir bir test namespace'ine taşımak.
+- Plugin validation ve farklı hostlarda MIDI-output lifecycle matrisi.
 
-8. **Olu `scaleTable`/`scaleTableCount`/`buildScaleTable` makinesi (DOGRULANMIS).** `scaleTableCount` sadece store edilir (satir 2399), asla load edilmez; `scaleTable[]` hicbir yerde okunmaz. Header yorumu (satir 398-402) hala aktif scale table oldugunu iddia eder.
-9. **`mpeZone` parametresi inert (DOGRULANMIS).** Sadece deklare (satir 255), asla okunmaz. Upper/dual-zone MPE implemente degil.
-10. **`spectralPartialCount` header varsayilani olu (DOGRULANMIS).** Header `{9}` (satir 159) vs APVTS `1` (satir 304); `pullParams` her zaman `1` fallback ile yazar (satir 456). `9` runtime'da asla gozlenmez.
-11. **`getScaleLineWavelengthNm/Amplitude` negatif idx'i clamp'lemez** (UB potansiyeli, mevcut cagiranlar tetiklemiyor).
-12. **OSC `finger<n>` indexi sessizce atilir** (multi-touch tek koltuga collapse). **`SharedPort` 16-client cap'i sessiz drop.** **`SampleLibrary` INT_MAX disinda boyut sinirina sahip degil** (RAM spike riski).
-13. **macOS-only ad-hoc codesign + sabit-yol VST3 install** her build'de `~/Library/Audio/Plug-Ins/VST3`'u ezer (opt-out yok).
+## 15. 2.1 yükseltme notu
 
----
+1. Eski VST3 bundle'ını scanned plugin klasörü dışına yedekle.
+2. Cosmic Microwave 2.1'i kur ve host'u rescan et.
+3. Önce Ableton set'in bir kopyasını aç.
+4. Her instance için UDP port, MIDI Format, source routing, destination, Pitch System
+   ve Tonal/Atomic map'i doğrula.
+5. MIDI alan instrument track'lerini kur; bayrak ürünün kendisi ses üretmez.
+6. Audience server bağlanmadan önce Simulator, her channel ve Panic'i test et.
 
-## Iyilestirme Backlog'u (oncelikli)
+Yeni session'lar Atomic / Helium / Extended açılır. Schema-2 MIDI-only session'lar
+Tonal'a, released 1.x spectral seçimler karşılık gelen elementle Atomic'e migrate olur.
+Atomic MPE kullanılıyorsa receiver bend range performans öncesi yeniden doğrulanmalıdır.
 
-> Her madde value/effort ve parallel-safe ile isaretli. **Hicbir madde APVTS ID veya 4-char kod degistirmez.** En kritik catisma noktasi: `PartialEngine.cpp` ve `PluginProcessor.cpp`'ye dokunan maddeler ayni batch'te olmamali.
-
-### Yuksek deger
-
-- **B1 — Spektral osilator banki: per-partial `std::sin` yerine wavetable/phase-LUT** (`PartialEngine.cpp/.h`). value:high, effort:medium, parallel-safe: evet (renderVoices'a yerel). En sicak dongunun CPU maliyetini kirar.
-- **B2 — "Element Partial" knob'unu solo-disi modda gercekten etkili yap** (`PartialEngine.cpp`). value:high, effort:low, parallel-safe: evet. `spectralPartialCount`'u non-solo kolda `min(lineCount, count)` olarak onurlandir.
-- **B3 — `AudienceProcessor` MPE cikis yolu icin test hedefi ekle** (`Tests/MpeOutputTests.cpp` + `CMakeLists.txt`). value:high, effort:high, parallel-safe: hayir (CMakeLists). En yuksek riskli kapsam bosluğunu kapatir.
-- **B4 — Minimal CI workflow (configure + build + ctest)** (`.github/workflows/ci.yml`). value:high, effort:medium, parallel-safe: evet (kaynaga dokunmaz).
-
-### Orta deger
-
-- **B5 — 145-girisli spektral cache'i acikca-sahipli member'a tasi (sadece `prepare`'de kur)** (`PartialEngine.cpp/.h`). value:medium, effort:medium, parallel-safe: evet. Latent ses-thread alloc riskini kaldirir.
-- **B6 — Aktif-voice index listesi (full MAX_VOICES sweep'inden kacin)** (`PartialEngine.cpp/.h`). value:medium, effort:medium, parallel-safe: evet.
-- **B7 — `externalMidiDropped` tasmasini MIDI debug raporunda goster** (`PluginProcessor.cpp`). value:medium, effort:low, parallel-safe: hayir (PluginProcessor).
-- **B8 — `mpeMasterChannel` ve member range'i yasal MPE zone'a couple/validate et** (`PluginProcessor.cpp`). value:medium, effort:medium, parallel-safe: hayir (PluginProcessor MPE cekirdek).
-- **B9 — Generator-sync check (regenerate + diff)** (`tools/generate_element_spectral_data.py` + CI). value:medium, effort:low, parallel-safe: evet.
-- **B10 — `SignalFlowTests`/`PerformanceSmokeTests`'i Piano Dream yokken graceful degrade et** (her iki test dosyasi). value:medium, effort:medium, parallel-safe: evet.
-- **B11 — LibraryRail element->scale index mapping'i hardcoded fallback 7 yerine saglam yap** (`LibraryRail.cpp`). value:medium, effort:low, parallel-safe: evet.
-- **B12 — MidiGeneratorEditor hit-test dikdortgenlerini `resized()`'da hesapla (paint yerine)** (`MidiGeneratorEditor.cpp/.h`). value:medium, effort:medium, parallel-safe: evet.
-- **B13 — `MidiEngine`'in non-MPE oldugunu ve MPE'nin `AudienceProcessor`'da oldugunu yorumlarla netlestir** (`MidiEngine.h`, `PluginProcessor.h`). value:medium, effort:low, parallel-safe: hayir (PluginProcessor.h).
-- **B14 — `ScaleDegree.frequencyHz`'i sentez icin yetkili-degil olarak belgele** (`AtomicScaleBuilder.h`). value:medium, effort:low, parallel-safe: evet.
-- **B15 — macOS VST3 auto-install/codesign'i opt-in option arkasina al** (`CMakeLists.txt`). value:medium, effort:low, parallel-safe: hayir (CMakeLists).
-- **B16 — OSC wire format'ini paylasilan belgeli parser/sabit header'a cikar** (`OscBridge.h/.cpp`). value:medium, effort:low, parallel-safe: evet.
-- **B17 — `SampleLibrary::loadFromDirectory`'ye sample-count/byte budjesi ekle** (`SampleLibrary.h/.cpp`). value:medium, effort:medium, parallel-safe: evet.
-- **B18 — `SampleLibrary::parseRootMidiFromName`/`getSampleForMidi` icin unit test** (`Tests/` + `CMakeLists.txt`). value:medium, effort:medium, parallel-safe: evet (yeni dosya).
-
-### Dusuk deger
-
-- **B19 — Olu `scaleTable`/`scaleTableCount`/`buildScaleTable` makinesini kaldir** (`PartialEngine.cpp/.h`). value:medium, effort:low, parallel-safe: evet.
-- **B20 — Kopyalanmis in-file element cizgi tablolarini generated kaynaga collapse et** (`PartialEngine.cpp`). value:low, effort:medium, parallel-safe: evet.
-- **B21 — `getScaleLineWavelengthNm/Amplitude`'i negatif/overflow idx'e karsi koru** (`PartialEngine.cpp`). value:low, effort:low, parallel-safe: evet.
-- **B22 — Uc kopyalanmis `midiName()` tanimini paylasilan helper'a cikar** (`PluginEditor.cpp`, `AuroraComponent.cpp`, `MidiGeneratorEditor.cpp`, `DebugPanel.cpp`). value:low, effort:low, parallel-safe: evet.
-- **B23 — Per-paint `std::array<float,8192>` bufferlarini reusable member'a tasi** (`AuroraComponent.cpp/.h`, `PluginEditor.cpp/.h`). value:low, effort:low, parallel-safe: evet.
-- **B24 — `mpeSetupDirty`'i `std::atomic<bool>` yap** (`PluginProcessor.h/.cpp`). value:low, effort:low, parallel-safe: hayir (PluginProcessor).
-- **B25 — OSC `SharedPort` 16-client cap'ine ulasildiginda farkli status goster** (`OscBridge.h/.cpp`). value:low, effort:low, parallel-safe: evet.
-- **B26 — OSC parser'da per-message `juce::String` allocation'indan kacin** (`OscBridge.cpp`). value:low, effort:low, parallel-safe: evet.
-- **B27 — OSC sinir/edge testleri ekle (col>=MAX_COLS, finger collapse, zero-arg off)** (`Tests/OscBridgeTests.cpp`). value:medium, effort:low, parallel-safe: evet.
-- **B28 — `Sources/` (plural) raw-asset klasorunu belgele/yeniden adlandir** (`README.md`). value:low, effort:low, parallel-safe: evet.
+Kullanıcı akışları için `docs/manual/README.md`, ayrıntılı İngilizce teknik referans
+için kökteki `WIKI.md` kullanılmalıdır.

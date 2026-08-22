@@ -1,207 +1,199 @@
-# 03 — MPE Setup
+# 03 - Normal MIDI and MPE Setup
 
-SpektraSynth's scales are microtonal by design — atomic spectra are translated into
-playable musical scales, and most of those degrees fall *between* the 12-TET notes.
-Plain MIDI cannot carry that. **MPE MIDI** can: each sounding note gets its own MIDI
-channel with its own pitch bend, so every voice lands exactly on its translated
-spectral pitch in the receiving synth.
+Cosmic Microwave offers two MIDI output models. Use **Normal MIDI** when source IDs
+must feed deterministic Channels 1-16. Use **MPE MIDI** when each active finger needs
+its own channel for independent CC, pressure, and pitch-wheel state.
 
-This chapter is the one to read carefully if you want the microtones to survive the
-trip into another instrument.
+Pitch behaviour depends on **PITCH SYSTEM**. Tonal maps contain standard 12-TET notes,
+so their pitch wheel is normally centered. Atomic maps retain element-derived
+microtonal targets: MPE encodes each target as the nearest base note plus per-note
+pitch bend, while Normal MIDI sends only the nearest semitone.
 
-## 1. Turn the MIDI output on
+## 1. Enable MIDI output
 
-Two combos in the MIDI output row (macro panel, bottom) gate everything:
+In the **MIDI ROUTING** card, **OUTPUT** has three choices:
 
-- **OUTPUT MODE** — *Audio Only* (default), *MIDI Only*, or *Audio + MIDI*.
-  MIDI is only generated when this is **not** *Audio Only*. *MIDI Only* silences the
-  internal engine and emits MIDI; *Audio + MIDI* does both.
-- **MIDI OUT** — *Off* (default), *Normal MIDI*, or *MPE MIDI*.
-  - **Normal MIDI** sends the nearest 12-TET note on one channel (**CH**), with CC74
-    and CC11 expression but **no pitch bends** — microtonal detail is rounded away.
-    Use it for conventional receivers.
-  - **MPE MIDI** sends nearest-note **plus per-note pitch bend** on MPE member
-    channels — the spectral cents are preserved for compatible receivers.
+- **Off** - OSC reception and UI monitoring remain active, but no MIDI is emitted.
+- **Normal MIDI** - conventional channel MIDI with source-based or fixed-channel
+  routing.
+- **MPE MIDI** - one member channel per active finger, up to 15 simultaneous member
+  channels.
 
-Both the audio engine and the MIDI/MPE output resolve pitches through the same scale
-resolver, so what you hear internally and what you send externally are the same
-translation.
+Cosmic Microwave 2.1 is always silent and MIDI-oriented.
+
+Incoming host MIDI is passed through unchanged whenever output is enabled. It is not
+quantized, remapped, or converted into MPE. Avoid routing a keyboard into the plugin if
+that pass-through stream would duplicate notes at the receiver.
 
 ## 2. Choose a destination
 
-The **MIDI OUTPUT** combo selects where the generated stream goes:
+The **MIDI OUTPUT** destination menu contains:
 
-- **Host MIDI Output** — the plugin's MIDI bus into the DAW (in Ableton: route *from*
-  the SpektraSynth track into another track's MIDI input).
-- **Virtual: SpektraSynth MIDI Out** — creates a system-wide virtual MIDI port named
-  **“SpektraSynth MIDI Out”** that any other app (standalone synths, other DAWs) can
-  subscribe to. If more than one SpektraSynth instance opens a virtual port, later
-  instances get numbered names (*SpektraSynth MIDI Out 2*, *3*, …).
-- **Any physical/system MIDI device** — the rest of the list. **Rescan** refreshes it.
+- **Host MIDI Output** - the plugin's MIDI bus into the DAW.
+- **Virtual: Cosmic Microwave <port> Out** - a system endpoint whose name is derived
+  from the instance's UDP port, such as `Cosmic Microwave 6060 Out`.
+- Available system or hardware MIDI devices.
 
-Even with a virtual or physical port selected, the host MIDI bus keeps receiving the
-stream as well (the status line notes *“host MIDI output remains available”*).
+**Rescan** refreshes the list. Selecting a virtual or hardware route does not disable
+the host bus; the same stream remains available to the DAW. If a receiver listens to
+both paths, it will receive duplicate MIDI.
 
-## 3. Zones — the ZONE control
+The port-derived endpoint is stable across plugin creation order and session reopen.
+Applying a new UDP port renames/reopens a selected virtual endpoint to match the new
+port.
 
-MPE splits the 16 MIDI channels into a *master channel* (global messages) and *member
-channels* (one per note). The **ZONE** combo selects the layout, and the zone fully
-owns the channel mapping:
+## 3. Normal MIDI source routing
 
-| ZONE | Master channel | Member channels | Notes |
-|---|---|---|---|
-| **Lower** *(default)* | 1 | 2–16 (15 voices) | The common convention; matches most receivers out of the box. |
-| **Upper** | 16 | 1–15 (15 voices) | Use when the receiver is configured for an upper zone, or to keep ch 1 free. |
+Normal MIDI has two routing modes:
 
-Switching the zone mid-performance is safe: SpektraSynth sends a safety all-off on
-the old channels, resets its channel allocator, and re-sends the MPE configuration on
-the new master before the next note.
+- **Per source 1-16** is the default. The source/participant ID selects a channel:
+  source 1 -> Channel 1, source 16 -> Channel 16, source 17 -> Channel 1. Source 0
+  is valid and maps to Channel 16.
+- **Single channel** sends every OSC source through the selected **FIXED CHANNEL**.
 
-**Match the receiver:** if SpektraSynth is on Lower and the receiving synth listens on
-Upper (or vice versa), notes will land on channels the receiver treats incorrectly.
+The mapping belongs to source identity, not packet order. Every `u`, `v`, `on`, and
+`off` message, across all ten fingers of a source, stays on the same channel. Each
+finger remains an independent note owner, and reference counting prevents one finger
+from releasing a same-channel/same-note value still owned by another finger.
 
-## 4. Bend range — why the default is 2 st
+Normal MIDI expression is channel-wide by definition:
 
-The **BEND** combo sets the MPE pitch-bend range for the member channels:
-**2 st** *(default)*, **12 st**, **24 st**, **48 st**.
+- U/X sends CC74.
+- V/Y sends CC11 and supplies note-on velocity.
 
-The default is deliberately the smallest:
+Sources wrap after 16, so source 1 and source 17 share Channel 1. Their channel
+controllers are therefore shared. Choose MPE when expression must be isolated per
+active finger.
 
-- Every outgoing note is encoded as the **nearest 12-TET note plus a bend**, so the
-  bend needed is always at most **±50 cents** — well inside a ±2-semitone range.
-- SpektraSynth announces its bend range via RPN, but some receivers **ignore the
-  RPN** and stay on their own default. ±2 semitones *is* the near-universal
-  MIDI/synth default — so even an RPN-deaf receiver interprets the bends correctly
-  and the microtonal scale survives.
-- Larger ranges divide the same 14-bit bend resolution over more semitones; 2 st also
-  gives the finest pitch resolution.
+## 4. MPE zones
 
-Pick a wider range only if you use **MPE PITCH = Glide** with large slides (a glide
-can only travel as far as the bend range allows around the original note).
+MPE divides the channel set into a master channel and member channels:
 
-**Whatever you pick, the receiver must be set to the same value** — see the checklist
-below. A mismatch does not mute anything; it just bends every note by the wrong
-amount (a 2 st bend interpreted as 48 st sounds wildly sharp/flat — or, more commonly,
-microtones quietly collapse to 12-TET).
+| Zone | Master | Members | Simultaneous member channels |
+|---|---:|---|---:|
+| **Lower** (default) | 1 | 2-16 | 15 |
+| **Upper** | 16 | 1-15 | 15 |
 
-## 5. The Setup toggle (MPE configuration messages)
+Match the receiving instrument's zone to Cosmic Microwave. If one side uses Lower and
+the other Upper, the receiver may treat member data as ordinary or global channel
+data.
 
-With **Setup** on (default), SpektraSynth sends the standard MPE configuration
-whenever it is needed (first note after enabling MPE, or after any zone / bend-range /
-mode change):
+Changing zone, output protocol, bend range, fixed channel, source-routing mode, or
+destination triggers a safety reset before active fingers are re-established. This
+prevents notes held under the previous channel contract from remaining stuck.
 
-1. **MPE Configuration Message (RPN 6)** on the **master** channel, declaring the
-   member-channel count for the zone.
-2. A **pitch-bend-range RPN (RPN 0)** on **every member channel**, set to the BEND
-   value.
+## 5. Bend range and Setup
 
-Leave it on unless the receiver documents that it must not receive RPNs. With it off,
-you must configure zone and bend range entirely on the receiver.
+**BEND RANGE** offers `+/-2`, `+/-12`, `+/-24`, and `+/-48` semitones. The default is
+`+/-2` semitones. Configure the receiver to the same range.
 
-## 6. What is actually sent (per note)
+With **Send MPE setup** enabled, Cosmic Microwave sends:
 
-For each note-on, in this order (order matters — the bend always precedes the note):
+1. MPE Configuration Message, RPN 6, on the master channel.
+2. Pitch-bend-range RPN 0 on every member channel.
 
-1. `Pitch Wheel` — the per-note bend, **sent before the note-on** so the note starts
-   in tune.
-2. `CC74` (Timbre/Slide) — from the seat's X position blended with the **MOTION**
-   macro (`x·0.68 + motion·0.32`).
-3. `CC11` (Expression) — from Y blended with **ENERGY** (`y·0.70 + energy·0.30`).
-4. `Note On` — velocity from the seat's Y value.
-5. `Channel Pressure` — from Y; updated continuously while the note holds.
+The setup is sent when MPE first needs output and again after a relevant configuration
+change. Leave it enabled unless the receiver explicitly rejects incoming RPN setup.
+Some instruments ignore RPN messages; configure their MPE zone and bend range manually.
 
-While a note sounds, movement updates re-send pitch bend, pressure, CC74, and CC11
-(only when they change by more than one step, to keep the stream lean). Note-off
-sends `Note Off`, `Channel Pressure 0`, and recenters the pitch wheel.
+For Tonal maps, pitch wheel is normally center (`8192`). Atomic targets can sit between
+semitones, so their pitch wheel carries the offset from the nearest MIDI base note.
+Atomic offsets stay within half a semitone, but the receiver must still match the
+selected bend range or the resulting frequency will be wrong.
 
-**MPE PITCH — Retrig vs Glide:** with *Retrig* (default), a moving seat that crosses
-to a different scale degree retriggers as a new note (new bend + note-on). With
-*Glide*, if the new degree rounds to the **same** MIDI note number, the pitch bend is
-updated instead — a smooth slide; degree changes that need a different note number
-still retrigger.
+## 6. Retrigger and Glide
 
-## 7. Receiver checklist
+**PITCH MOTION** controls a held finger when horizontal movement selects another pitch:
 
-On the receiving synth/plugin:
+- **Retrigger** - release the old mapped note and start the new one.
+- **Glide** - update pitch bend without retriggering when the target can remain on the
+  same base MIDI note; a target requiring a different base note still retriggers.
 
-- [ ] **Enable MPE mode** (sometimes called "MPE", "Multi-channel", or per-note
-      expression mode). A receiver in plain omni/single-channel mode will play the
-      notes but apply bends globally — microtones will smear or vanish.
-- [ ] **Match the zone** — Lower (master 1 / members 2–16) by default.
-- [ ] **Match the pitch-bend range** to SpektraSynth's **BEND** value (default
-      **2 st**). If the receiver honours RPNs and SpektraSynth's **Setup** is on,
-      this happens automatically; otherwise set it by hand.
-- [ ] **Map CC74 (Slide) and CC11** if you want X/macro expression, and route
-      **channel pressure** for Y.
-- [ ] Give it **at least 15 voices** of polyphony if you intend to use the full
-      member range — a crowd can hold many notes at once.
+Tonal and Atomic maps are both discrete X regions. A move that changes the nearest base
+note retriggers in either mode. In Atomic mode, **Glide** can update pitch bend without
+retriggering when two target frequencies share the same nearest base note.
 
-Then verify: enable **Debug** view in SpektraSynth and watch the **outgoing MIDI /
-MPE** console while you press one key on the SCALE KEYBOARD. You should see the
-pitch-wheel message immediately before each note-on, on a member channel.
+## 7. Messages sent for an MPE note
 
-## 8. Channel allocation (what the MPE a/f counter shows)
+For a new active finger, member-channel messages are ordered as follows:
 
-Each active note owns one member channel until its note-off. Channels are handed out
-**round-robin**: the allocator scans for a free channel starting *after* the last
-channel it handed out, wrapping around the member range. The practical effect is that
-a **just-freed channel is the last one to be reused**.
+1. `Pitch Wheel` - sent before the note-on.
+2. `CC74` - direct normalized U/X, converted to `0..127`.
+3. `CC11` - direct normalized V/Y, converted to `0..127`.
+4. `Note On` - mapped base note; velocity comes from V/Y and is limited to `1..127`.
+5. `Channel Pressure` - direct normalized V/Y.
 
-Why: some receivers latch a channel's pitch state when a note-on arrives. If a new
-note immediately reused the channel that a different note just left, a slow receiver
-could capture the *stale* bend and start the note out of tune. Cycling through the
-other channels first gives every receiver time to settle — this matters precisely
-because SpektraSynth's whole point is per-note microtonal accuracy.
+While held:
 
-When **all member channels are busy**, the oldest sounding note is stolen: it gets a
-proper note-off first, then its channel is reassigned. The activity readout next to
-the MIDI row shows this live: `MPE 7/8` means 7 active MPE voices, 8 member channels
-still free.
+- U/X can change the mapped note and updates CC74.
+- V/Y updates CC11 and channel pressure.
+- Controller updates are suppressed when their quantized 7-bit value has not changed
+  enough to produce a new MIDI value.
 
-## 9. KNOWN LIMITATION — single-stream MPE routing in Ableton Live
+On release, the member channel receives `Note Off`, Channel Pressure 0, and a centered
+pitch wheel before returning to the available pool. No removed sound-generation
+control biases CC74, CC11, velocity, or pressure.
 
-**Symptom:** you route SpektraSynth's MPE output through an Ableton Live MIDI track
-into one MPE-capable plugin, play a chord of microtonal degrees — and every note
-snaps to the *same* detune, or to plain 12-TET.
+## 8. Member-channel allocation
 
-**Cause:** when one MIDI track funnels the full multi-channel MPE stream into a
-single receiving plugin, the per-channel separation can be collapsed on the way in
-(channel data is merged, so the receiver applies the most recent pitch bend
-*globally* instead of per note). The result: per-note bends stop being per-note.
+Each active finger owns one member channel until release. Free member channels are
+allocated round-robin, beginning at the first channel in the selected zone. A recently
+released channel is visited after the others, reducing immediate channel-state reuse.
 
-**The plugin's own output is not the problem.** SpektraSynth's MPE stream is
-spec-correct — bend-before-note-on, MCM + per-member RPN setup, per-channel
-allocation — and this is verified at the byte level by the automated MPE output tests
-(`Tests/MpeOutputTests.cpp`) and visible in the Debug-view MIDI console.
+When all 15 member channels are occupied, the oldest active MPE note receives a proper
+release and its channel is assigned to the new finger. The header's **MPE VOICES**
+metric shows the number of occupied member channels.
 
-**Verified workarounds:**
+## 9. Receiver checklist
 
-- **Per-channel split routing** — create one receiver track *per member channel* in
-  Live (track MIDI-From: SpektraSynth, channel 2; next track channel 3; …), each with
-  its own instance of the receiving instrument. Each instance then sees exactly one
-  note + one bend, and the microtones are exact. This works.
-- **Standalone receivers** — send to a standalone synth app via the virtual port
-  **SpektraSynth MIDI Out** (or a hardware synth). Outside Live's track routing the
-  stream arrives intact. This works.
-- **MPE-native hosts** — hosts with first-class MPE routing (e.g. **Bitwig Studio**)
-  pass the per-note expression through to MPE plugins correctly.
+On the receiving instrument or application:
 
-If you must stay on a single Live track, prefer **BEND = 2 st** (default) so that
-even a collapsed stream degrades to "nearest note, slightly mistuned" rather than
-octave-wild jumps — but for real microtonal accuracy use one of the workarounds.
+- [ ] Enable MPE or per-note multi-channel expression mode.
+- [ ] Match Lower/Upper zone.
+- [ ] Match the pitch-bend range, normally `+/-2` semitones.
+- [ ] Allow at least 15 notes if the full member pool is needed.
+- [ ] Map CC74 if U/X should affect timbre or another destination parameter.
+- [ ] Map CC11 and channel pressure if V/Y should affect expression.
+- [ ] Confirm it receives one route, not both the host and virtual copies.
 
-## 10. Quick recipes
+Use the simulator and the receiving application's MIDI monitor to verify that messages
+for different fingers arrive on different member channels. The first MPE note after
+setup should have its pitch wheel and controllers before `Note On`.
 
-**Standalone software synth (most reliable):**
-1. MIDI OUTPUT → *Virtual: SpektraSynth MIDI Out*; OUTPUT MODE → *Audio + MIDI* (or
-   *MIDI Only*); MIDI OUT → *MPE MIDI*; ZONE *Lower*; BEND *2 st*; Setup *on*.
-2. In the receiver app: MIDI input = *SpektraSynth MIDI Out*, MPE on, bend range 2.
+When validating an Atomic map, inspect the pitch wheel as well as Note On. A MIDI
+monitor that shows only note names will display the nearest semitone and can make a
+correct Atomic MPE stream appear quantized.
 
-**Ableton Live, one microtonal voice per track:**
-1. MIDI OUT → *MPE MIDI*, destination *Host MIDI Output*.
-2. Create receiver tracks with MIDI-From = SpektraSynth, channels 2, 3, 4, … —
-   one plugin instance per track.
+## 10. Ableton recipes
 
-**Plain MIDI sketching (no microtones):**
-1. MIDI OUT → *Normal MIDI*, set **CH**, destination as needed. Notes are the nearest
-   scale notes; no bends are sent.
+### Normal MIDI, one source-channel group per track
+
+1. Set Cosmic Microwave to **Normal MIDI / Per source 1-16**.
+2. Select `Virtual: Cosmic Microwave <port> Out`.
+3. Create receiving tracks with **MIDI From** set to that endpoint.
+4. Select Channel 1 on the first track, Channel 2 on the second, and so on.
+
+This is the recommended layout when different source groups should play different
+instruments. Zone A and Zone B use different Cosmic Microwave instances and therefore
+have independent channel sets.
+
+### MPE, one complete stream
+
+1. Set Cosmic Microwave to **MPE MIDI**, select Lower or Upper, and leave Setup on.
+2. Route the complete multi-channel stream to one MPE-capable receiver.
+3. Match the receiver's zone and bend range.
+
+Do not interpret MPE member channels as the stable source-to-channel map: member
+channels are allocated dynamically per active finger. Some DAW routing paths can
+remap or merge MIDI channels; if expression appears global, test the port-named virtual
+endpoint with a standalone MPE receiver or a host with explicit MPE routing.
+
+## 11. Panic and safe changes
+
+Use **PANIC** after a lost OSC `off`, receiver disconnect, or unexpected routing loop.
+It clears live/simulator source state and sends note-off/all-off safety messages to the
+host and selected external destination.
+
+Changing the UDP port also performs a safety release before restarting the listener.
+After changing a port, confirm both the new OSC input and the newly named virtual MIDI
+endpoint at the receiver.

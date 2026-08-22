@@ -1,124 +1,243 @@
-# 04 — OSC & the Audience
+# 04 - OSC & the Audience
 
-SpektraSynth is played by a crowd. Each participant's phone sends OSC messages over
-UDP to the machine running the plugin; each participant is one **seat** in a virtual
-venue. This chapter documents the seat model, the wire format, port configuration,
-and the built-in simulator.
+Cosmic Microwave receives normalized audience controls over OSC/UDP and turns them
+into Normal MIDI or MPE. The production server has already separated the zones, so
+each plugin instance listens to one dedicated UDP port.
 
-## The seat model
+Example layout:
 
-The venue is a fixed grid:
+| Audience zone | UDP port | Ableton device | Recommended virtual MIDI endpoint |
+|---|---:|---|---|
+| A | `6060` | Cosmic Microwave 1 | `Cosmic Microwave 6060 Out` |
+| B | `6061` | Cosmic Microwave 2 | `Cosmic Microwave 6061 Out` |
 
-- **26 rows**, lettered `A` … `Z`
-- **100 columns**, numbered `0` … `99`
-- → up to **2,600 seats**
+Additional zones follow the same pattern with their own ports and instances. Cosmic
+Microwave does not split or forward zones itself.
 
-A seat is identified purely by its address (row + column) — there is no login or
-session. Each active seat contributes one voice layer to the texture; its **X** value
-chooses pitch on the selected scale and its **Y** value drives amplitude/expression.
-The **AUDIENCE MAP** in the editor mirrors this grid live.
+The plugin is behaviourally MIDI-only. It presents a silent stereo instrument shell
+to Ableton for host compatibility, but it does not create sound.
 
-## Wire format
+## Port and zone are different fields
 
-Messages use this OSC address pattern (defined in `Source/OscWireFormat.h`):
+The UDP port selects which socket an instance listens to. The zone letter remains part
+of every OSC address:
 
+```text
+UDP 6060  <-  /cs/A/...
+UDP 6061  <-  /cs/B/...
 ```
-/cs/<row>/<col>/finger<n>/<param>
+
+`6060 -> A` and `6061 -> B` are deployment conventions, not rules inside the plugin.
+Cosmic Microwave reads and displays the zone letters it receives; it never infers a
+zone from the port. It also does not filter a packet because its zone letter differs
+from the expected deployment convention.
+
+This means the upstream split must be correct. If A and B traffic are both sent to one
+port, the instance reports both observed zones and processes both streams. Source
+identity inside an instance is based on source ID, so the same source ID arriving from
+two zones would share state. Use one already-separated zone, one port, and one instance.
+
+## Source and finger identity
+
+An OSC control is identified by:
+
+- **Zone:** `A` through `Z`.
+- **Source/participant ID:** `0` through `255`.
+- **Finger:** `finger0` through `finger9`.
+
+Every finger is an independent note lifecycle. Releasing `finger0` does not release
+`finger1`. In Normal MIDI's default **Per source 1-16** mode, all ten fingers of one
+source use the same MIDI channel.
+
+Channel assignment is source-based, not packet-based:
+
+| Source ID | MIDI channel |
+|---:|---:|
+| `0` | 16 |
+| `1` | 1 |
+| `2` | 2 |
+| `16` | 16 |
+| `17` | 1 |
+| `32` | 16 |
+| `255` | 15 |
+
+For the primary 1-based convention:
+
+```text
+channel = ((source_id - 1) mod 16) + 1
+```
+
+Source `0` is valid and wraps backward to Channel 16. Once assigned, a source's
+`u`, `v`, `on`, `off`, and all finger messages stay on that channel. This keeps a
+finger's note-on and note-off together even when many sources are active.
+
+MPE works differently: each active finger receives an available MPE member channel.
+The source ID still owns the lifecycle, but the selected MPE zone defines the channel
+pool.
+
+## OSC wire format
+
+Canonical addresses use:
+
+```text
+/cs/<zone>/<source>/finger<n>/<param>
 ```
 
 | Segment | Meaning |
 |---|---|
-| `/cs/` | Literal "control surface" prefix. Case-insensitive. |
-| `<row>` | A single letter `A`–`Z` (case-insensitive) → row 0–25. Any extra characters after the letter up to the next `/` are ignored (`/cs/A/...` and `/cs/A1/...` both mean row A). |
-| `<col>` | One or more decimal digits → column index. Must be in `0…99`; out-of-range columns are rejected. |
-| `finger<n>` | The finger id. The segment is **not inspected** — finger indices are ignored, so multiple fingers from one seat collapse onto that single seat. |
-| `<param>` | The action — one of the four below (case-insensitive). |
+| `/cs/` | Cosmic Symphony/control-surface prefix. |
+| `<zone>` | Zone letter `A` through `Z`. |
+| `<source>` | Decimal source ID `0` through `255`. |
+| `finger<n>` | Lower-case `finger` followed by one digit `0` through `9`. |
+| `<param>` | `u`, `v`, `on`, `off`, or legacy `line`. |
+
+The `/cs/` prefix, zone letter, and parameter name are accepted without regard to
+letter case. The `finger` token itself is deliberately lower-case and strict.
 
 ### Parameters
 
-| Param | Argument | Semantics |
+| Parameter | Argument | MIDI meaning |
 |---|---|---|
-| `on` | int or float; any non-zero value | Seat activates (note on). `0` deactivates. |
-| `off` | none required | Seat deactivates (note off). |
-| `line` | float `0 … 127` | **X position** → pitch. Internally normalized to 0–1 and quantized to the current root/scale/octave range (or to the element's translated spectral scale). |
-| `v` | float `0 … 1` | **Y position** → voice amplitude / expression. |
+| `u` | Numeric, normally `0..1` | Horizontal position. Selects a pitch from the configured Tonal or Atomic map and directly sets CC74. |
+| `v` | Numeric, normally `0..1` | Vertical position. Sets note-on velocity and directly sets CC11; MPE also sends channel pressure. |
+| `on` | Numeric | Non-zero activates the source/finger; zero releases it. |
+| `off` | No argument required | Releases the source/finger. A finite numeric argument is accepted and ignored. |
+| `line` | Numeric, legacy `0..127` | Divided by 127 and handled as horizontal position. Prefer `u` for new senders. |
 
-### Examples
+OSC `int32` and `float32` arguments are accepted. Non-numeric and non-finite values
+are ignored. `u` and `v` are clamped to `0..1`; `line` is divided by 127 and then
+clamped.
+
+The direct controller conversion is:
 
 ```text
-/cs/A/0/finger0/on    1        seat A0 activates
-/cs/A/0/finger0/line  64.0     seat A0 moves X to mid-scale
-/cs/A/0/finger0/v     0.8      seat A0 raises Y to 0.8
-/cs/A/0/finger0/off            seat A0 releases
-/cs/M/41/finger2/on   1        seat M41 activates (finger index irrelevant)
+CC74 = round(clamp(u, 0, 1) * 127)
+CC11 = round(clamp(v, 0, 1) * 127)
+velocity = round(clamp(v, 0, 1) * 127), limited to 1..127
 ```
 
-Anything that does not match the pattern (wrong prefix, invalid row letter, column
-≥ 100, unknown trailing param) is silently ignored — malformed traffic cannot crash
-or detune the instrument. The OSC receive path only validates and enqueues events;
-the audio thread consumes them lock-free, so a flood of messages does not glitch
-audio.
+There is no macro or sound-engine bias in these mappings. X/U directly controls the
+pitch-map position and CC74; Y/V directly controls velocity, CC11, and MPE pressure.
 
-## UDP port configuration & status
+### Message examples
 
-- **Default port: `6060`.** Change it in the **NETWORK** section of the ribbon: type
-  the port and click **Apply** (the OSC listener restarts on the new port).
-- The top-bar **UDP** pill shows the port in green while listening, or `busy` in red
-  if the port could not be bound.
-- The empty-state hint on the audience map repeats it in plain words:
-  *“Waiting for audience — Listening for OSC on UDP 6060.”*
-- The exact status string (also visible in Debug view) is one of:
-  - `Listening on UDP <port>` — all good.
-  - `FAILED to bind UDP <port> - port busy?` — some other app owns the port; pick a
-    different one or close the conflict.
-  - `UDP <port> PORT FULL - max 16 clients reached, this instance is not receiving OSC`
-    — see below.
-  - `Stopped` — the listener is off.
+```text
+/cs/A/1/finger0/u     0.50   source 1, finger 0: horizontal midpoint
+/cs/A/1/finger0/v     0.80   source 1, finger 0: velocity/expression 0.8
+/cs/A/1/finger0/on    1      activate on Normal MIDI Channel 1
+/cs/A/1/finger1/on    1      independent finger, still Normal MIDI Channel 1
+/cs/A/1/finger0/off          release finger 0 only
+/cs/A/17/finger3/on   1      source 17 wraps to Normal MIDI Channel 1
+/cs/B/16/finger9/on   1      source 16 maps to Normal MIDI Channel 16
+```
 
-### Port sharing and the 16-client cap (“PORT FULL”)
+Send `u` and `v` before `on` when starting a new finger so the first note uses the
+intended pitch and velocity. Later `u`/`v` messages update a held finger. A pitch-map
+step change retriggers the note by default; MPE can glide while the target remains
+within the same base MIDI note.
 
-Multiple SpektraSynth-family instances inside the same process (e.g. several plugin
-instances in one DAW) can all listen on the **same** UDP port: the first one binds
-the socket and the others attach to it, with incoming messages fanned out to every
-attached instance. The fan-out table holds at most **16 clients**. The 17th instance
-on that port is not fed any OSC and reports **PORT FULL** instead of failing
-silently. Fix: close unused instances, or give extra instances their own port
-numbers.
+Addresses outside the contract are ignored: wrong prefix, missing segments, source
+`256` or higher, `finger10`, a non-lower-case `finger` token, or an unknown parameter.
+OSC bundles are supported.
 
-## The simulator — a stand-in audience
+## Pitch mapping
 
-Everything the network can do, the **SIMULATOR** row can fake — same seat events,
-same engine path, no traffic:
+Normalized U/X is divided across the pitch table selected in the editor. Both systems
+use:
 
-- **+ Add** — drops one simulated participant onto a free seat.
-- **+25 Crowd** — adds 25 at once.
-- **Remove** — ends one simulated participant.
-- **Random Movement** — continuously drifts every active participant's X/Y, which is
-  the quickest way to hear scale quantization and expression mapping.
-- **Clear All** — clears all simulated/live seats and immediately stops voices,
-  delay, and reverb (equivalent to **Panic**).
+- Root note: `C` through `B`.
+- Root octave: `0` through `6`.
+- Range: `1` through `6` octaves.
 
-Use the simulator to soundcheck a patch, rehearse macro moves, and verify MIDI/MPE
-output before a single phone connects. Simulated and real seats coexist — you can pad
-a thin real audience with simulated seats.
+**Tonal** adds a choice of Major, Natural Minor, Pentatonic, Dorian, Lydian, Harmonic
+Minor, or Whole Tone. **Atomic** adds an element and density choice. Its 29 catalog
+entries span Hydrogen through Zinc (Nitrogen is unavailable in the current dataset),
+and the Core/Extended/Microtonal/Scientific/Raw 128 modes cap the available one-octave
+degree bank at 7/12/24/48/128 respectively. The actual count may be lower for an
+element with fewer usable spectral lines.
 
-## Basic network tips
+U=`0` selects the first step and U=`1` selects the final available step. Each
+intermediate region selects one pitch step. The map never emits an invalid MIDI note.
+Normal MIDI rounds an Atomic target to its nearest semitone. MPE preserves the exact
+element-derived target frequency by sending a per-note pitch wheel before Note On.
 
-- **Same network:** participants' devices and the SpektraSynth machine must reach
-  each other — typically one Wi-Fi LAN. Send to the host machine's LAN IP, port 6060
-  (or your configured port).
-- **Firewall:** allow inbound UDP on the chosen port for the host/standalone app
-  (macOS will usually prompt the first time).
-- **UDP is fire-and-forget:** there are no acknowledgements and no retransmits. The
-  protocol is deliberately tolerant — a lost `line`/`v` message just means the next
-  one lands a moment later; a lost `off` is cleaned up the next time that seat sends
-  anything, and **Panic** always provides a hard reset from the stage.
-- **Keep rates sane:** phones should throttle `line`/`v` updates (tens of messages
-  per second per seat is plenty). The engine coalesces per-seat state, so the *last*
-  value wins anyway.
-- **One venue, many engines:** because instances can share the port (up to 16), you
-  can run the audio synth and a MIDI generator side by side on the same audience
-  feed.
-- For audience-scale stress testing without a crowd, combine **+25 Crowd** several
-  times with **Random Movement**, and watch the **PARTICIPANTS / ACTIVE VOICES**
-  counters and your CPU meter.
+New sessions default to Atomic / Helium / Extended. Existing schema-2 MIDI-only
+sessions restore as Tonal, so an older set does not silently change its pitch map.
+
+## UDP configuration and status
+
+1. Enter the assigned port in **OSC INPUT**.
+2. Click **Apply** or press Return.
+3. Confirm **Listening ... waiting for data**.
+4. Send a valid OSC message and confirm **Receiving** plus the observed zone letter.
+
+The default port is `6060`. Valid ports are `1..65535`. Invalid text leaves the active
+listener unchanged. Applying a different port releases held notes before the listener
+restarts.
+
+The status card counts only valid messages. It retains the observed zone set while the
+listener remains on that port. Multiple letters indicate mixed upstream traffic, not
+an automatic multi-zone mode.
+
+The virtual output name is derived from the active UDP port:
+
+```text
+Cosmic Microwave <port> Out
+```
+
+For example, UDP `6060` uses `Cosmic Microwave 6060 Out`. If a virtual destination is
+selected and the port changes, the plugin reopens the endpoint with the new port-based
+name.
+
+## Ableton routing
+
+Use this layout for each zone:
+
+1. Place one Cosmic Microwave instance on its own Ableton track.
+2. Set the instance's UDP port to the already-separated stream for that zone.
+3. Select **Normal MIDI** and **Per source 1-16**.
+4. Under **DESTINATION**, select **Virtual: Cosmic Microwave <port> Out**.
+5. On receiving Ableton MIDI tracks, choose that virtual endpoint under **MIDI From**
+   and select Channel 1, Channel 2, and so on.
+6. Set the receiving tracks' monitoring/arming as your Live set requires and place the
+   destination instruments there.
+
+The port-named virtual endpoint is recommended because it makes zone ownership and
+channel selection explicit. The plugin's host MIDI output remains available at the
+same time, but the virtual endpoint is usually clearer when one instance must feed up
+to 16 channel-specific Ableton tracks.
+
+Zone A and Zone B each get an independent set of Channels 1-16 because they use
+different Cosmic Microwave instances and virtual endpoints.
+
+For MPE, select **MPE MIDI**, match the receiving instrument's Lower/Upper zone and
+bend range, and route the full MPE channel set together instead of splitting it into
+16 independent tracks.
+
+## Simulator
+
+The **SIMULATOR** card sends controls through the same source/finger-to-MIDI path:
+
+- **+ Source** adds one simulated source.
+- **+ 25** adds 25.
+- **Remove** releases one simulated source.
+- **Random movement** updates horizontal and vertical values continuously.
+- **Clear** releases all simulated sources.
+
+Use it to confirm pitch mapping, source-to-channel assignment, destination selection,
+and receiving-track monitoring before the network sender connects. Simulator activity
+does not invent a UDP zone; the observed-zone status reflects valid OSC traffic only.
+
+## Network and lifecycle checklist
+
+- The sender must be able to reach the Cosmic Microwave machine's LAN address and the
+  assigned UDP port.
+- Allow inbound UDP for the standalone application or Ableton in the system firewall.
+- UDP has no acknowledgements or retransmission. Send explicit `off` messages and keep
+  **PANIC** available for a hard release.
+- Send `u`/`v` only as fast as the performance requires; avoid needless duplicate
+  traffic.
+- Confirm one zone, one port, and one instance together before the audience connects.
+- If an `off` packet is lost or the sender disappears, click **PANIC**. It clears live
+  source state and sends note-off/all-off safety messages to the host and selected
+  external destination.
