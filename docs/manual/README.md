@@ -8,20 +8,22 @@ touch for each source ID, maps normalized X/Y controls through Tonal or Atomic S
 pitch maps and expression, and sends MIDI to Ableton, a virtual endpoint, or a system
 MIDI device.
 
-Version 2.2 does not generate sound. It remains a silent stereo instrument shell for
+Version 2.3 does not generate sound. It remains a silent stereo instrument shell for
 Ableton placement and old-session compatibility; the product's behaviour and editor
 are MIDI-only. Put sound-producing instruments after it or on receiving MIDI tracks.
 
-The 2.2 **TIME FIELD** adds Flow, Grid, and Ensemble timing. New sessions begin in
+The 2.2 **TIME FIELD** added Flow, Grid, and Ensemble timing. New 2.3 sessions begin in
 Ensemble on a host-synced 1/16 grid; projects saved before schema 4 open in Flow so
-their earlier direct timing is preserved.
+their earlier direct timing is preserved. Version 2.3 adds a disabled-by-default
+**Time Gate LFO** for rhythmically opening Grid and Ensemble admission while preserving
+source-safe releases.
 
 ## Chapters
 
 | # | Chapter | What it covers |
 |---|---|---|
 | 1 | [Getting Started](01-getting-started.md) | Requirements, install/build, product variants, and the first routed MIDI test. |
-| 2 | [UI Guide](02-ui-guide.md) | Header metrics, OSC input, Source Matrix, Time Field, Tonal/Atomic pitch mapping, Normal/MPE routing, destinations, simulator, and Panic. |
+| 2 | [UI Guide](02-ui-guide.md) | Header version/metrics, OSC input, Source Matrix, Time Field and LFO, Tonal/Atomic pitch mapping, Normal/MPE routing, destinations, simulator, and Panic. |
 | 3 | [MPE Setup](03-mpe-setup.md) | Normal MIDI source routing, MPE zones, expression messages, receiver setup, channel allocation, and Ableton choices. |
 | 4 | [OSC & the Audience](04-osc-audience.md) | One separated zone per UDP port, the OSC contract, scaling, Time Field crowd scheduling, channel ownership, and network checks. |
 | 5 | [Pitch Systems & External Tuning](05-tuning-files.md) | Seven tonal maps, 29 element-derived Atomic maps, X-to-pitch selection, Normal/MPE tuning, and receiver-side tuning. |
@@ -41,10 +43,11 @@ their earlier direct timing is preserved.
   normalized value contract.
 - **Taming asynchronous crowd timing?** Start with Ensemble's default 1/16 grid,
   then tune attacks per step, active limit, gate, and spread in Chapters 2 and 4.
+  Enable the Time Gate LFO only when you also want rhythmic open/hold windows.
 - **No result?** Chapter 6 starts with the shortest routing checklist.
 
 ---
 
-*This manual documents the Cosmic Microwave 2.2 flagship VST3 and Standalone products.
+*This manual documents the Cosmic Microwave 2.3 flagship VST3 and Standalone products.
 Other MIDI-oriented targets in the repository have their own, more specialized UI and
 parameter sets.*

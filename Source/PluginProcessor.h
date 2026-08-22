@@ -7,6 +7,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "AtomicScaleCatalog.h"
 #include "AtomicScaleMap.h"
+#include "CrowdLfoGate.h"
 #include "CrowdTimeField.h"
 #include "MidiAudienceModel.h"
 #include "MidiPitchMap.h"
@@ -109,6 +110,26 @@ public:
     {
         return timeFieldClockLocked.load(std::memory_order_relaxed);
     }
+    bool getTimeGateOpen() const noexcept
+    {
+        return timeGateOpen.load(std::memory_order_relaxed);
+    }
+    bool getTimeGateActive() const noexcept
+    {
+        return timeGateActive.load(std::memory_order_relaxed);
+    }
+    double getTimeGatePhase() const noexcept
+    {
+        return timeGatePhase.load(std::memory_order_relaxed);
+    }
+    double getTimeGateValue() const noexcept
+    {
+        return timeGateValue.load(std::memory_order_relaxed);
+    }
+    double getTimeGateRateHz() const noexcept
+    {
+        return timeGateRate.load(std::memory_order_relaxed);
+    }
     int getMidiOutputOptionIndex() const noexcept { return midiOutputOptionIndex.load(std::memory_order_relaxed); }
     int getResolvedMidiOutputOptionIndex();
     uint32_t getMidiOutputRouteRevision() const noexcept { return midiOutputRouteRevision.load(std::memory_order_acquire); }
@@ -126,20 +147,27 @@ private:
                              bool outputEnabled,
                              const MpeMidiOutput::MpeConfig& midiConfig,
                              const CrowdTimeField::Config& timeConfig,
+                             const CrowdLfoGate::Config& timeGateConfig,
                              const CrowdTimeField::ClockFrame& clockFrame,
                              bool resetAlreadyEmitted);
     void renderTimedOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples,
                                   bool outputEnabled,
                                   const MpeMidiOutput::MpeConfig& midiConfig,
                                   const CrowdTimeField::Config& timeConfig,
+                                  const CrowdLfoGate::Config& timeGateConfig,
                                   const CrowdTimeField::ClockFrame& clockFrame,
                                   bool resetAlreadyEmitted);
     MpeMidiOutput::MpeConfig buildMpeConfig() const;
     CrowdTimeField::Config buildTimeFieldConfig (
         const MpeMidiOutput::MpeConfig& midiConfig) const noexcept;
+    CrowdLfoGate::Config buildTimeGateConfig() const noexcept;
+    CrowdLfoGate::ClockFrame buildTimeGateClock (
+        const CrowdTimeField::ClockFrame&,
+        const CrowdTimeField::Config&) const noexcept;
     CrowdTimeField::ClockFrame captureTimeFieldClock (int numSamples,
                                                        double monotonicSeconds) const noexcept;
-    void rehydrateTimeFieldFromCanonical() noexcept;
+    void rehydrateDirectMidiFromCanonical() noexcept;
+    void rehydrateTimeFieldFromCanonical (bool externalGateOpen) noexcept;
     void recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
     void queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages,
                                     double blockStartTimeMs,
@@ -167,9 +195,12 @@ private:
     bool midiRenderScratchLoanedToHost = false;
     std::array<OscFingerRouter::Event, midiLifecycleEventBudget> fingerEventScratch {};
     std::array<MpeMidiOutput::NoteEvent, midiLifecycleEventBudget> midiNoteEventScratch {};
-    std::array<CrowdTimeField::InputEvent, midiLifecycleEventBudget> timeFieldInputScratch {};
+    std::array<CrowdTimeField::InputEvent,
+               midiLifecycleEventBudget + CrowdLfoGate::kMaxTransitionsPerBlock>
+        timeFieldInputScratch {};
     std::array<CrowdTimeField::HeldVoice, CrowdTimeField::kMaxVoices> timeFieldHeldScratch {};
     CrowdTimeField::OutputBlock timeFieldOutputScratch;
+    CrowdLfoGate::OutputBlock timeGateOutputScratch;
 
     struct FingerMidiState
     {
@@ -183,6 +214,7 @@ private:
     MidiPitchMap pitchMap;
     AtomicScaleMap atomicPitchMap;
     CrowdTimeField crowdTimeField;
+    CrowdLfoGate crowdLfoGate;
     bool retriggerFingerMidi = false;
     int fingerRetriggerCursor = 0;
     bool pitchMapChangedThisBlock = false;
@@ -259,6 +291,11 @@ private:
     std::atomic<int> timeFieldActive { 0 };
     std::atomic<uint32_t> timeFieldMerged { 0 };
     std::atomic<bool> timeFieldClockLocked { false };
+    std::atomic<bool> timeGateOpen { true };
+    std::atomic<bool> timeGateActive { false };
+    std::atomic<double> timeGatePhase { 0.0 };
+    std::atomic<double> timeGateValue { 1.0 };
+    std::atomic<double> timeGateRate { 0.0 };
 
     int lastScaleRootPitchClass = -1;
     int lastScaleRootOctave = -1;
@@ -300,6 +337,11 @@ private:
         std::atomic<float>* maxActiveVoices = nullptr;
         std::atomic<float>* gatePercent = nullptr;
         std::atomic<float>* temporalSpread = nullptr;
+        std::atomic<float>* timeGateEnabled = nullptr;
+        std::atomic<float>* timeGateWaveform = nullptr;
+        std::atomic<float>* timeGateRateMode = nullptr;
+        std::atomic<float>* timeGateSyncDivision = nullptr;
+        std::atomic<float>* timeGateRateHz = nullptr;
     } rawParams;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceProcessor)

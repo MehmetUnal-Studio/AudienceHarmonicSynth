@@ -194,15 +194,31 @@ int main()
                "schema-3 state receives backward-compatible Time Field defaults");
         expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
                    == CosmicStateMigration::currentSchema,
-               "schema-3 Time Field migration advances to schema 4");
+               "schema-3 Time Field migration advances to the current schema");
 
         const int childCount = state.getNumChildren();
         CosmicStateMigration::migrate(state);
         expect(state.getNumChildren() == childCount
                    && countParams(state, "timeMode") == 1
                    && countParams(state, "temporalSpread") == 1
+                   && countParams(state, "timeGateEnabled") == 1
+                   && countParams(state, "timeGateRateHz") == 1
                    && sameValue(valueOf(state, "internalBpm"), 120.0f),
-               "schema-4 migration is idempotent and does not duplicate Time Field nodes");
+               "current migration is idempotent and does not duplicate Time Field nodes");
+    }
+
+    {
+        auto state = makeState(4);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeGateEnabled"), 0.0f)
+                   && sameValue(valueOf(state, "timeGateWaveform"), 2.0f)
+                   && sameValue(valueOf(state, "timeGateRateMode"), 0.0f)
+                   && sameValue(valueOf(state, "timeGateSyncDivision"), 3.0f)
+                   && sameValue(valueOf(state, "timeGateRateHz"), 1.0f),
+               "schema-4 sessions receive a default-off Time Gate LFO");
+        expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
+                   == CosmicStateMigration::currentSchema,
+               "schema-4 Time Gate migration advances to schema 5");
     }
 
     {
@@ -295,6 +311,79 @@ int main()
     }
 
     {
+        auto state = makeState(5);
+        addParam(state, "timeGateEnabled", 1.0f);
+        addParam(state, "timeGateWaveform", 4.0f);
+        addParam(state, "timeGateRateMode", 1.0f);
+        addParam(state, "timeGateSyncDivision", 6.0f);
+        addParam(state, "timeGateRateHz", 12.5f);
+        CosmicStateMigration::migrate(state);
+        const int childCount = state.getNumChildren();
+
+        expect(sameValue(valueOf(state, "timeGateEnabled"), 1.0f)
+                   && sameValue(valueOf(state, "timeGateWaveform"), 4.0f)
+                   && sameValue(valueOf(state, "timeGateRateMode"), 1.0f)
+                   && sameValue(valueOf(state, "timeGateSyncDivision"), 6.0f)
+                   && sameValue(valueOf(state, "timeGateRateHz"), 12.5f),
+               "schema-5 preserves valid denormalized Time Gate values");
+
+        CosmicStateMigration::migrate(state);
+        expect(state.getNumChildren() == childCount
+                   && countParams(state, "timeGateEnabled") == 1
+                   && countParams(state, "timeGateWaveform") == 1
+                   && countParams(state, "timeGateRateMode") == 1
+                   && countParams(state, "timeGateSyncDivision") == 1
+                   && countParams(state, "timeGateRateHz") == 1
+                   && sameValue(valueOf(state, "timeGateRateHz"), 12.5f),
+               "schema-5 Time Gate migration is idempotent");
+    }
+
+    {
+        auto state = makeState(5);
+        addParam(state, "timeGateEnabled", 1.0f);
+        addParam(state, "timeGateRateHz", 2.5f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeGateEnabled"), 1.0f)
+                   && sameValue(valueOf(state, "timeGateWaveform"), 2.0f)
+                   && sameValue(valueOf(state, "timeGateRateMode"), 0.0f)
+                   && sameValue(valueOf(state, "timeGateSyncDivision"), 3.0f)
+                   && sameValue(valueOf(state, "timeGateRateHz"), 2.5f),
+               "schema-5 partial states preserve values and heal missing Time Gate nodes");
+    }
+
+    {
+        auto state = makeState(5);
+        addParam(state, "timeGateEnabled", 37.0f);
+        addParam(state, "timeGateWaveform", 3.6f);
+        addParam(state, "timeGateRateMode", -99.0f);
+        addParam(state, "timeGateSyncDivision", 5.49f);
+        addParam(state, "timeGateRateHz", -400.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeGateEnabled"), 1.0f)
+                   && sameValue(valueOf(state, "timeGateWaveform"), 4.0f)
+                   && sameValue(valueOf(state, "timeGateRateMode"), 0.0f)
+                   && sameValue(valueOf(state, "timeGateSyncDivision"), 5.0f)
+                   && sameValue(valueOf(state, "timeGateRateHz"), 0.05f),
+               "schema-5 clamps and rounds hostile finite Time Gate values");
+    }
+
+    {
+        auto state = makeState(5);
+        addParam(state, "timeGateEnabled", std::numeric_limits<float>::quiet_NaN());
+        addParam(state, "timeGateWaveform", std::numeric_limits<float>::infinity());
+        addParam(state, "timeGateRateMode", -std::numeric_limits<float>::infinity());
+        addParam(state, "timeGateSyncDivision", std::numeric_limits<float>::quiet_NaN());
+        addParam(state, "timeGateRateHz", std::numeric_limits<float>::infinity());
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "timeGateEnabled"), 0.0f)
+                   && sameValue(valueOf(state, "timeGateWaveform"), 2.0f)
+                   && sameValue(valueOf(state, "timeGateRateMode"), 0.0f)
+                   && sameValue(valueOf(state, "timeGateSyncDivision"), 3.0f)
+                   && sameValue(valueOf(state, "timeGateRateHz"), 1.0f),
+               "non-finite Time Gate values recover field-specific defaults");
+    }
+
+    {
         auto state = makeState();
         state.setProperty("cosmicMicrowaveSchema",
                           std::numeric_limits<double>::quiet_NaN(), nullptr);
@@ -308,12 +397,17 @@ int main()
     {
         auto state = makeState(CosmicStateMigration::currentSchema + 1);
         addParam(state, "timeMode", 2.0f);
+        addParam(state, "timeGateEnabled", 0.4f);
+        addParam(state, "timeGateRateHz", 99.0f);
         const int childrenBefore = state.getNumChildren();
         CosmicStateMigration::migrate(state);
         expect((int) state.getProperty("cosmicMicrowaveSchema", 0)
                    == CosmicStateMigration::currentSchema + 1
                    && state.getNumChildren() == childrenBefore
-                   && sameValue(valueOf(state, "timeMode"), 2.0f),
+                   && sameValue(valueOf(state, "timeMode"), 2.0f)
+                   && sameValue(valueOf(state, "timeGateEnabled"), 0.4f)
+                   && sameValue(valueOf(state, "timeGateRateHz"), 99.0f)
+                   && ! CosmicStateMigration::containsParameter(state, "timeGateWaveform"),
                "future schemas are not destructively downgraded");
     }
 

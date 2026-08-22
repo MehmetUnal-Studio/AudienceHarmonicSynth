@@ -51,6 +51,7 @@ endforeach()
 
 if(DEFINED SYSTEM_VST3_ROOT AND NOT SYSTEM_VST3_ROOT STREQUAL "")
     set(system_legacy_bundles
+        "${SYSTEM_VST3_ROOT}/Cosmic Microwave.vst3"
         "${SYSTEM_VST3_ROOT}/SpektraSynth.vst3"
         "${SYSTEM_VST3_ROOT}/Audience Harmonic Synth.vst3"
         "${SYSTEM_VST3_ROOT}/Cosmic/Cosmic Microwave.vst3"

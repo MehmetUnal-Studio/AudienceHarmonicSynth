@@ -175,6 +175,25 @@ juce::AudioProcessorValueTreeState::ParameterLayout AudienceProcessor::createLay
         ParameterID("temporalSpread", 1), "Temporal Spread",
         StringArray { "1", "2", "4", "8", "16" }, 2));
 
+    layout.add(std::make_unique<AudioParameterBool>(
+        ParameterID("timeGateEnabled", 1), "Time Gate LFO Enabled", false));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("timeGateWaveform", 1), "Time Gate LFO Waveform",
+        StringArray { "Sine", "Triangle", "Square", "Ramp Up", "Ramp Down" }, 2));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("timeGateRateMode", 1), "Time Gate LFO Rate Mode",
+        StringArray { "Sync", "Hz" }, 0));
+
+    layout.add(std::make_unique<AudioParameterChoice>(
+        ParameterID("timeGateSyncDivision", 1), "Time Gate LFO Sync Rate",
+        StringArray { "2 Bars", "1 Bar", "1/2", "1/4", "1/8", "1/16", "1/32" }, 3));
+
+    layout.add(std::make_unique<AudioParameterFloat>(
+        ParameterID("timeGateRateHz", 1), "Time Gate LFO Rate",
+        NormalisableRange<float>(0.05f, 20.0f, 0.0f, 0.35f), 1.0f));
+
     layout.add(std::make_unique<AudioParameterChoice>(
         ParameterID("pitchSystem", 1), "Pitch System",
         StringArray { "Tonal", "Atomic" }, 1));
@@ -235,6 +254,11 @@ void AudienceProcessor::cacheParameterPointers()
     rawParams.maxActiveVoices = apvts.getRawParameterValue("maxActiveVoices");
     rawParams.gatePercent = apvts.getRawParameterValue("gatePercent");
     rawParams.temporalSpread = apvts.getRawParameterValue("temporalSpread");
+    rawParams.timeGateEnabled = apvts.getRawParameterValue("timeGateEnabled");
+    rawParams.timeGateWaveform = apvts.getRawParameterValue("timeGateWaveform");
+    rawParams.timeGateRateMode = apvts.getRawParameterValue("timeGateRateMode");
+    rawParams.timeGateSyncDivision = apvts.getRawParameterValue("timeGateSyncDivision");
+    rawParams.timeGateRateHz = apvts.getRawParameterValue("timeGateRateHz");
 }
 
 void AudienceProcessor::prepareToPlay (double sampleRate, int)
@@ -260,6 +284,7 @@ void AudienceProcessor::prepareToPlay (double sampleRate, int)
     mpeOut.reset();
     mpeOut.markSetupDirty();
     crowdTimeField.reset();
+    crowdLfoGate.reset();
     timeFieldRehydratePending = true;
     retriggerFingerMidi = true;
     fingerRetriggerCursor = 0;
@@ -463,6 +488,7 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // reset, corrupting normal-note refcounts or MPE channel ownership.
     const auto midiConfig = buildMpeConfig();
     const auto timeConfig = buildTimeFieldConfig(midiConfig);
+    const auto timeGateConfig = buildTimeGateConfig();
     const int midiType = midiConfig.outputType;
     const int routingMode = midiConfig.normalRoutingMode;
     const int normalChannel = midiConfig.normalMidiChannel;
@@ -581,7 +607,8 @@ void AudienceProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const auto clockFrame = captureTimeFieldClock(buffer.getNumSamples(),
                                                    externalBlockStartTimeMs * 0.001);
     renderOutgoingMidi(output, buffer.getNumSamples(), outputEnabled,
-                       midiConfig, timeConfig, clockFrame, needsSafetyReset);
+                       midiConfig, timeConfig, timeGateConfig,
+                       clockFrame, needsSafetyReset);
 #if COSMIC_MIDI_DIAGNOSTICS
     mpeOut.recordOutgoingMidiDebugEvents(output);
 #endif
@@ -641,6 +668,53 @@ CrowdTimeField::Config AudienceProcessor::buildTimeFieldConfig (
     return CrowdTimeField::sanitiseConfig(config);
 }
 
+CrowdLfoGate::Config AudienceProcessor::buildTimeGateConfig() const noexcept
+{
+    static constexpr CrowdLfoGate::SyncDivision syncDivisions[] {
+        CrowdLfoGate::SyncDivision::TwoBars,
+        CrowdLfoGate::SyncDivision::OneBar,
+        CrowdLfoGate::SyncDivision::Half,
+        CrowdLfoGate::SyncDivision::Quarter,
+        CrowdLfoGate::SyncDivision::Eighth,
+        CrowdLfoGate::SyncDivision::Sixteenth,
+        CrowdLfoGate::SyncDivision::ThirtySecond
+    };
+
+    CrowdLfoGate::Config config;
+    config.enabled = rawParamBool(rawParams.timeGateEnabled);
+    config.waveform = static_cast<CrowdLfoGate::Waveform>(
+        juce::jlimit(0, 4, rawParamInt(rawParams.timeGateWaveform, 2)));
+    // The public parameter lists the musician-facing Sync choice first, while
+    // the small core enum keeps Hertz as zero. Map explicitly so stored choice
+    // indices remain stable if the implementation enum ever evolves.
+    config.rateMode = rawParamInt(rawParams.timeGateRateMode) == 0
+                    ? CrowdLfoGate::RateMode::Sync
+                    : CrowdLfoGate::RateMode::Hertz;
+    config.syncDivision = syncDivisions[juce::jlimit(
+        0, 6, rawParamInt(rawParams.timeGateSyncDivision, 3))];
+    config.rateHz = juce::jlimit(0.05, 20.0,
+        static_cast<double>(rawParamValue(rawParams.timeGateRateHz, 1.0f)));
+    return CrowdLfoGate::sanitiseConfig(config);
+}
+
+CrowdLfoGate::ClockFrame AudienceProcessor::buildTimeGateClock (
+    const CrowdTimeField::ClockFrame& source,
+    const CrowdTimeField::Config& timeConfig) const noexcept
+{
+    CrowdLfoGate::ClockFrame frame;
+    frame.sampleRate = source.sampleRate;
+    frame.numSamples = source.numSamples;
+    const bool followsHost = timeConfig.clockSource
+                           == CrowdTimeField::ClockSource::Host;
+    frame.hostValid = followsHost && source.hostValid;
+    frame.isPlaying = followsHost && source.isPlaying;
+    frame.bpm = source.bpm;
+    frame.ppqPosition = source.ppqPosition;
+    frame.monotonicSeconds = source.monotonicSeconds;
+    frame.fallbackBpm = timeConfig.internalBpm;
+    return frame;
+}
+
 CrowdTimeField::ClockFrame AudienceProcessor::captureTimeFieldClock (
     int numSamples, double monotonicSeconds) const noexcept
 {
@@ -670,7 +744,28 @@ CrowdTimeField::ClockFrame AudienceProcessor::captureTimeFieldClock (
     return frame;
 }
 
-void AudienceProcessor::rehydrateTimeFieldFromCanonical() noexcept
+void AudienceProcessor::rehydrateDirectMidiFromCanonical() noexcept
+{
+    bool hasHeldFinger = false;
+    for (int voice = 0; voice < (int) fingerMidiStates.size(); ++voice)
+    {
+        const int sourceId = voice / OscFingerRouter::MAX_FINGERS;
+        const int finger = voice % OscFingerRouter::MAX_FINGERS;
+        const auto canonical = audienceModel.getFingerSnapshot(sourceId, finger);
+        auto& state = fingerMidiStates[(size_t) voice];
+        state = {};
+        state.x = canonical.x;
+        state.y = canonical.y;
+        state.active = canonical.active;
+        hasHeldFinger = hasHeldFinger || canonical.active;
+    }
+
+    retriggerFingerMidi = hasHeldFinger;
+    fingerRetriggerCursor = 0;
+}
+
+void AudienceProcessor::rehydrateTimeFieldFromCanonical (
+    bool externalGateOpen) noexcept
 {
     int heldCount = 0;
     for (int voice = 0; voice < CrowdTimeField::kMaxVoices; ++voice)
@@ -687,7 +782,8 @@ void AudienceProcessor::rehydrateTimeFieldFromCanonical() noexcept
             timeFieldHeldScratch[(size_t) heldCount++] = { voice, sourceId };
     }
 
-    crowdTimeField.rehydrate(timeFieldHeldScratch.data(), heldCount);
+    crowdTimeField.rehydrate(timeFieldHeldScratch.data(), heldCount,
+                             externalGateOpen);
     timeFieldRehydratePending = false;
 }
 
@@ -696,19 +792,35 @@ void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
                                             bool outputEnabled,
                                             const MpeMidiOutput::MpeConfig& config,
                                             const CrowdTimeField::Config& timeConfig,
+                                            const CrowdLfoGate::Config& timeGateConfig,
                                             const CrowdTimeField::ClockFrame& clockFrame,
                                             bool resetAlreadyEmitted)
 {
     if (timeConfig.mode != CrowdTimeField::Mode::Flow)
     {
         renderTimedOutgoingMidi(midiMessages, numSamples, outputEnabled,
-                                config, timeConfig, clockFrame,
+                                config, timeConfig, timeGateConfig, clockFrame,
                                 resetAlreadyEmitted);
         return;
     }
 
+    // The first Time Gate release is intentionally scoped to Grid/Ensemble.
+    // Flow remains the exact direct path, and switching back to a timed mode
+    // starts from the core's safe-open baseline before absolute phase is read.
+    crowdLfoGate.reset();
+    timeGateOpen.store(true, std::memory_order_relaxed);
+    timeGateActive.store(false, std::memory_order_relaxed);
+    timeGatePhase.store(0.0, std::memory_order_relaxed);
+    timeGateValue.store(1.0, std::memory_order_relaxed);
+    timeGateRate.store(0.0, std::memory_order_relaxed);
+
     if (timeFieldRehydratePending)
     {
+        // Timed modes may own only a subset of the canonical held audience.
+        // Rebuild the direct ledger when returning to Flow so a source held
+        // behind the Time Gate (or the active cap) is not silently lost.
+        fingerRouter.discardPendingEvents();
+        rehydrateDirectMidiFromCanonical();
         crowdTimeField.reset();
         timeFieldRehydratePending = false;
     }
@@ -739,26 +851,11 @@ void AudienceProcessor::renderOutgoingMidi (juce::MidiBuffer& midiMessages,
     if (reset)
     {
         fingerRouter.discardPendingEvents();
-        bool hasHeldFinger = false;
-        for (int voice = 0; voice < (int) fingerMidiStates.size(); ++voice)
-        {
-            const int sourceId = voice / OscFingerRouter::MAX_FINGERS;
-            const int finger = voice % OscFingerRouter::MAX_FINGERS;
-            const auto canonical = audienceModel.getFingerSnapshot(sourceId, finger);
-            auto& state = fingerMidiStates[(size_t) voice];
-            state = {};
-            state.x = canonical.x;
-            state.y = canonical.y;
-            state.active = canonical.active;
-            hasHeldFinger = hasHeldFinger || canonical.active;
-        }
+        rehydrateDirectMidiFromCanonical();
         // A reset is a transport boundary, not deletion of authoritative OSC
         // state. Rehydrate every held finger from the lock-free control ledger
         // on following blocks. Events published after discard remain queued and
         // will be applied normally, so clear/on races cannot lose a touch.
-        retriggerFingerMidi = hasHeldFinger;
-        fingerRetriggerCursor = 0;
-
         if (! resetAlreadyEmitted)
         {
             MpeMidiOutput::NoteEvent allOff;
@@ -901,11 +998,21 @@ void AudienceProcessor::renderTimedOutgoingMidi (
     juce::MidiBuffer& midiMessages, int numSamples, bool outputEnabled,
     const MpeMidiOutput::MpeConfig& midiConfig,
     const CrowdTimeField::Config& timeConfig,
+    const CrowdLfoGate::Config& timeGateConfig,
     const CrowdTimeField::ClockFrame& clockFrame, bool resetAlreadyEmitted)
 {
     const int blockBudget = juce::jlimit(1, midiLifecycleEventBudget,
                                          juce::jmax(1, numSamples));
     int midiEventCount = 0;
+
+    crowdLfoGate.process(timeGateConfig,
+                         buildTimeGateClock(clockFrame, timeConfig),
+                         timeGateOutputScratch);
+    timeGateOpen.store(timeGateOutputScratch.gateOpen, std::memory_order_relaxed);
+    timeGateActive.store(timeGateOutputScratch.active, std::memory_order_relaxed);
+    timeGatePhase.store(timeGateOutputScratch.phaseAtEnd, std::memory_order_relaxed);
+    timeGateValue.store(timeGateOutputScratch.valueAtEnd, std::memory_order_relaxed);
+    timeGateRate.store(timeGateOutputScratch.effectiveRateHz, std::memory_order_relaxed);
 
     auto appendMidi = [this, &midiEventCount, outputEnabled]
                       (const MpeMidiOutput::NoteEvent& event) noexcept
@@ -926,7 +1033,7 @@ void AudienceProcessor::renderTimedOutgoingMidi (
         crowdTimeField.reset();
         CrowdTimeField::OutputBlock prime;
         crowdTimeField.process(timeConfig, clockFrame, nullptr, 0, prime);
-        rehydrateTimeFieldFromCanonical();
+        rehydrateTimeFieldFromCanonical(timeGateOutputScratch.gateOpen);
         timeFieldBpm.store(prime.effectiveBpm, std::memory_order_relaxed);
         timeFieldClockLocked.store(prime.clockLocked, std::memory_order_relaxed);
         timeFieldPending.store(crowdTimeField.getPendingCount(), std::memory_order_relaxed);
@@ -935,7 +1042,8 @@ void AudienceProcessor::renderTimedOutgoingMidi (
     };
 
     const bool routerReset = fingerRouter.takeResetRequest();
-    if (routerReset || timeFieldRehydratePending)
+    if (routerReset || timeFieldRehydratePending
+        || timeGateOutputScratch.resetRequested)
     {
         fingerRouter.discardPendingEvents();
         if (! resetAlreadyEmitted)
@@ -969,6 +1077,38 @@ void AudienceProcessor::renderTimedOutgoingMidi (
         event.voiceId = CrowdTimeField::voiceIdFor(sourceId, finger);
         event.sourceId = sourceId;
         event.sampleOffset = 0;
+    }
+
+    for (int index = 0; index < timeGateOutputScratch.count; ++index)
+    {
+        const auto& transition = timeGateOutputScratch.transitions[(size_t) index];
+        auto& event = timeFieldInputScratch[(size_t) inputCount++];
+        event.type = transition.type == CrowdLfoGate::Transition::Type::Open
+                   ? CrowdTimeField::InputEvent::Type::GateOpen
+                   : CrowdTimeField::InputEvent::Type::GateClose;
+        event.voiceId = -1;
+        event.sourceId = -1;
+        event.sampleOffset = juce::jlimit(0, juce::jmax(0, numSamples - 1),
+                                          transition.sampleOffset);
+    }
+
+    // OSC lifecycle events currently arrive at sample zero and LFO edges are
+    // chronological, but keep this fixed-capacity merge generally correct for
+    // future timestamped OSC input. Stable insertion order makes On/Off at the
+    // same sample precede the subsequently appended Time Gate edge.
+    for (int index = 1; index < inputCount; ++index)
+    {
+        const auto event = timeFieldInputScratch[(size_t) index];
+        int insertAt = index;
+        while (insertAt > 0
+               && event.sampleOffset
+                    < timeFieldInputScratch[(size_t) (insertAt - 1)].sampleOffset)
+        {
+            timeFieldInputScratch[(size_t) insertAt]
+                = timeFieldInputScratch[(size_t) (insertAt - 1)];
+            --insertAt;
+        }
+        timeFieldInputScratch[(size_t) insertAt] = event;
     }
 
     crowdTimeField.process(timeConfig, clockFrame,
@@ -1540,6 +1680,12 @@ void AudienceProcessor::panic()
     releaseAllIncomingMidiNotes();
     audienceModel.clear();
     crowdTimeField.reset();
+    crowdLfoGate.reset();
+    timeGateOpen.store(true, std::memory_order_relaxed);
+    timeGateActive.store(false, std::memory_order_relaxed);
+    timeGatePhase.store(0.0, std::memory_order_relaxed);
+    timeGateValue.store(1.0, std::memory_order_relaxed);
+    timeGateRate.store(0.0, std::memory_order_relaxed);
     timeFieldRehydratePending = true;
     // Drop packets produced before the panic while the audio producer is
     // quiescent. Otherwise an old NoteOn could be drained after the immediate

@@ -19,7 +19,7 @@ In the **MIDI ROUTING** card, **OUTPUT** has three choices:
 - **MPE MIDI** - one member channel per active source touch, up to 15 simultaneous member
   channels.
 
-Cosmic Microwave 2.2 is always silent and MIDI-oriented.
+Cosmic Microwave 2.3 is always silent and MIDI-oriented.
 
 Incoming host MIDI is passed through unchanged whenever output is enabled. It is not
 quantized, remapped, or converted into MPE. Avoid routing a keyboard into the plugin if
@@ -153,6 +153,12 @@ Flow sends OSC touch lifecycle and expression directly. Grid and Ensemble schedu
 OSC attacks, coalesce U/V bursts to the latest values sampled on musical boundaries,
 and preserve On/Off order. Incoming host MIDI thru is never quantized by the Time
 Field.
+
+The optional **Time Gate LFO** affects scheduled OSC voices only in Grid and Ensemble.
+Its falling edge emits the ordinary semantic Note Off for each sounding source; held
+sources wait for a later normal grid/lane opportunity after the gate reopens. It never
+blocks an OSC Off, watchdog release, Panic, or unchanged host MIDI thru, and it does
+not alter source-owned Normal channels or MPE member ownership. Flow bypasses the LFO.
 
 ## 9. Receiver checklist
 

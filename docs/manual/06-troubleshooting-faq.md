@@ -10,7 +10,7 @@ class identity for old-session recall and must not be installed side by side.
 
 ## Cosmic Microwave itself makes no sound
 
-That is expected in version 2.2. Cosmic Microwave is an OSC-to-MIDI router with a
+That is expected in version 2.3. Cosmic Microwave is an OSC-to-MIDI router with a
 silent stereo instrument shell. It must feed a sound-producing instrument or hardware
 receiver.
 
@@ -50,13 +50,32 @@ Check **TIME FIELD -> MODE**:
 - **Ensemble** assigns the source to a spread lane, applies a fixed gate, and queues a
   still-held source touch for another pulse.
 
-New 2.2 sessions intentionally default to Ensemble. Use Flow when diagnosing raw
+New 2.3 sessions intentionally default to Ensemble. Use Flow when diagnosing raw
 sender timing. Projects saved before state schema 4 migrate to Flow, so opening an old
 set does not silently quantize it.
 
 If too few notes begin, inspect **PENDING**, lower the spread or division, raise
 **ATTACKS / STEP**, or raise **ACTIVE LIMIT**. In MPE, the effective active limit is
 always at most 15 even if the saved control reads 16.
+
+## Notes stop and return in a repeating LFO pattern
+
+Check **TIME FIELD -> LFO GATE**. In Grid or Ensemble, **LFO OPEN** admits scheduled
+OSC voices and **LFO HOLD** closes the window. A close edge intentionally sends each
+sounding source its ordinary Note Off. A source still held at the next open window is
+eligible only at its next normal grid/lane tick, so reopening does not create a burst.
+
+Turn the LFO **Off** for a continuously open Time Field, or select **Flow** for an exact
+direct bypass. Defaults are **Off / Square / Sync / 1/4** with `1.00 Hz` saved for Hz
+mode. Sync offers `2 Bars` through `1/32` and uses valid playing host PPQ when the
+Time Field clock is **Host**; **Internal** or an unavailable host follows the shared
+monotonic fallback at Internal BPM. Hz covers `0.05..20 Hz`
+on the absolute process-wide monotonic clock.
+
+The LFO never blocks explicit OSC Off, the three-second watchdog release, Panic, or
+unchanged host MIDI thru. A touch that begins and ends entirely during Hold is consumed
+and cancelled; it must not appear as a ghost note after the gate reopens. If it does,
+record the exact source's `finger0` On/Off stream and include it in a bug report.
 
 ## The Time Field says WAIT instead of LOCK
 
@@ -293,15 +312,16 @@ note-off messages.
 
 ### Why did a new session open on Helium / Extended?
 
-Cosmic Microwave 2.2 intentionally defaults new sessions to **Atomic / Helium /
+Cosmic Microwave 2.3 intentionally defaults new sessions to **Atomic / Helium /
 Extended**. Choose **Tonal** for the seven conventional 12-TET maps. The historical
 schema-2 migration still selects Tonal, while released 1.x element/spectral choices
 migrate to Atomic and recover their corresponding element. Separately, schema-3 and
-older state receives Flow for the new Time Field.
+older state receives Flow for the Time Field, while schema 5 adds a disabled Time Gate
+LFO to every older state that lacks those parameters.
 
 ### What happened to the previous sound-generation controls?
 
-They were removed from the 2.0 flagship and remain absent in 2.2. Old repositories may
+They were removed from the 2.0 flagship and remain absent in 2.3. Old repositories may
 retain archival media or implementation files, but the current flagship target neither
 compiles nor loads them.
 

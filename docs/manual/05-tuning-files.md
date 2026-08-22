@@ -1,6 +1,6 @@
 # 05 - Pitch Systems and External Tuning
 
-Cosmic Microwave 2.2 maps normalized horizontal position through one of two pitch
+Cosmic Microwave 2.3 maps normalized horizontal position through one of two pitch
 systems. **Tonal** provides seven conventional 12-TET scale tables. **Atomic** projects
 stored element emission spectra into playable one-octave degree banks. Both systems
 share **ROOT**, **OCTAVE**, and **RANGE**.
@@ -150,7 +150,7 @@ not discard Cosmic Microwave's pitch wheel.
 
 ## Session migration
 
-Cosmic Microwave 2.2 uses state schema 4. Pitch migration remains compatible with the
+Cosmic Microwave 2.3 uses state schema 5. Pitch migration remains compatible with the
 earlier schema-3 Pitch System transition:
 
 - new sessions start at Atomic / Helium / Extended;
@@ -161,8 +161,11 @@ earlier schema-3 Pitch System transition:
   `atomicScaleMode` choice where possible; and
 - invalid or non-finite stored choice values are clamped to safe defaults.
 
-Schema 4 adds the Time Field. New 2.2 sessions start in Ensemble; any state that lacks
+Schema 4 added the Time Field. New 2.3 sessions start in Ensemble; any state that lacks
 the schema-4 timing parameters receives Flow so an older session's attacks stay direct.
+Schema 5 adds the Time Gate LFO parameters. New sessions and every older or partial
+state that lacks them receive **Off / Square / Sync / 1/4 / 1.00 Hz**, so loading an
+older project cannot unexpectedly gate its MIDI.
 
 This migration restores pitch intent only. Removed sample, granular, timbre, and
-internal sound-generation controls do not return in the 2.2 flagship.
+internal sound-generation controls do not return in the 2.3 flagship.

@@ -411,8 +411,18 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     setResizable (true, true);
     setResizeLimits (900, 560, 2200, 1300);
     setOpaque (true);
-    setTitle ("Cosmic Microwave OSC to MIDI router");
+    const auto versionText = "v" + juce::String (JucePlugin_VersionString);
+    setTitle ("Cosmic Microwave " + versionText + " OSC to MIDI router");
     setDescription ("MIDI-only control surface for zone OSC input, source routing, pitch mapping, Time Field scheduling and MIDI output.");
+
+    versionLabel.setText (versionText, juce::dontSendNotification);
+    versionLabel.setJustificationType (juce::Justification::centred);
+    versionLabel.setColour (juce::Label::textColourId, cm::cyan.withAlpha (0.88f));
+    versionLabel.setFont (juce::Font (juce::FontOptions (9.0f).withStyle ("bold")));
+    versionLabel.setTitle ("Cosmic Microwave version");
+    versionLabel.setDescription ("Cosmic Microwave version "
+                                 + juce::String (JucePlugin_VersionString));
+    addAndMakeVisible (versionLabel);
 
     sourceMap = std::make_unique<SourceActivityMap> (proc.audienceModel);
     addAndMakeVisible (*sourceMap);
@@ -606,9 +616,16 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     addChoiceItems (clockSourceCombo, { "Host", "Internal" });
     addChoiceItems (gridDivisionCombo, { "1/4", "1/8", "1/16", "1/32" });
     addChoiceItems (temporalSpreadCombo, { "1", "2", "4", "8", "16" });
+    addChoiceItems (timeGateWaveformCombo,
+                    { "Sine", "Triangle", "Square", "Ramp Up", "Ramp Down" });
+    addChoiceItems (timeGateRateModeCombo, { "Sync", "Hz" });
+    addChoiceItems (timeGateSyncDivisionCombo,
+                    { "2 Bars", "1 Bar", "1/2", "1/4", "1/8", "1/16", "1/32" });
 
     for (auto* combo : { &timeModeCombo, &clockSourceCombo,
-                         &gridDivisionCombo, &temporalSpreadCombo })
+                         &gridDivisionCombo, &temporalSpreadCombo,
+                         &timeGateWaveformCombo, &timeGateRateModeCombo,
+                         &timeGateSyncDivisionCombo })
     {
         styleCombo (*combo);
         addAndMakeVisible (*combo);
@@ -622,6 +639,20 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     gridDivisionCombo.setDescription ("Temporal scheduling grid, from quarter notes to thirty-second notes.");
     temporalSpreadCombo.setTitle ("Time Field temporal spread");
     temporalSpreadCombo.setDescription ("Number of grid steps over which scheduled attacks may be distributed.");
+    timeGateWaveformCombo.setTitle ("Time Gate LFO waveform");
+    timeGateWaveformCombo.setDescription ("Waveform used to open and close scheduled OSC note flow.");
+    timeGateRateModeCombo.setTitle ("Time Gate LFO rate mode");
+    timeGateRateModeCombo.setDescription ("Run the Time Gate from musical sync or free-running cycles per second.");
+    timeGateSyncDivisionCombo.setTitle ("Time Gate LFO synced rate");
+    timeGateSyncDivisionCombo.setDescription ("Length of one complete Time Gate LFO cycle in musical time.");
+
+    timeGateEnabledButton.setColour (juce::ToggleButton::textColourId, cm::textMuted);
+    timeGateEnabledButton.setColour (juce::ToggleButton::tickColourId, cm::violet);
+    timeGateEnabledButton.setColour (juce::ToggleButton::tickDisabledColourId, cm::line);
+    timeGateEnabledButton.setTitle ("Enable Time Gate LFO");
+    timeGateEnabledButton.setDescription ("Rhythmically releases and re-admits Grid or Ensemble OSC voices. Note Off, watchdog, Panic and host MIDI thru are never blocked.");
+    timeGateEnabledButton.setTooltip (timeGateEnabledButton.getDescription());
+    addAndMakeVisible (timeGateEnabledButton);
 
     auto styleTimeSlider = [this] (juce::Slider& slider, const juce::String& title,
                                    const juce::String& description, const juce::String& suffix,
@@ -649,6 +680,13 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
                      "Maximum simultaneous scheduled MIDI voices.", {}, 0);
     styleTimeSlider (gatePercentSlider, "Gate length",
                      "Scheduled note gate as a percentage of the selected grid division.", " %", 0);
+    styleTimeSlider (timeGateRateHzSlider, "Time Gate LFO rate",
+                     "Free-running Time Gate cycles per second.", {}, 2);
+    // The adjacent rate-mode selector already carries the Hz unit. A compact
+    // numeric box keeps 1.00 readable at the 900 px minimum instead of showing
+    // an ellipsis while retaining a useful drag track.
+    timeGateRateHzSlider.setTextBoxStyle (juce::Slider::TextBoxRight,
+                                          false, 46, 24);
 
     styleLabel (timeModeLabel, "MODE");
     styleLabel (clockSourceLabel, "CLOCK");
@@ -658,10 +696,20 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     styleLabel (maxActiveVoicesLabel, "ACTIVE LIMIT");
     styleLabel (gatePercentLabel, "GATE");
     styleLabel (temporalSpreadLabel, "SPREAD / STEPS");
+    styleLabel (timeGateLabel, "LFO GATE");
+    styleLabel (timeGateRateLabel, "RATE");
     for (auto* label : { &timeModeLabel, &clockSourceLabel, &internalBpmLabel,
                          &gridDivisionLabel, &maxAttacksLabel, &maxActiveVoicesLabel,
-                         &gatePercentLabel, &temporalSpreadLabel })
+                         &gatePercentLabel, &temporalSpreadLabel,
+                         &timeGateLabel, &timeGateRateLabel })
         addAndMakeVisible (*label);
+
+    styleLabel (timeGateStateLabel, "LFO OFF", juce::Justification::centred);
+    timeGateStateLabel.setFont (juce::Font (juce::FontOptions (9.0f).withStyle ("bold")));
+    timeGateStateLabel.setColour (juce::Label::textColourId, cm::textDim);
+    timeGateStateLabel.setTitle ("Time Gate LFO state");
+    timeGateStateLabel.setDescription ("Time Gate LFO is disabled.");
+    addAndMakeVisible (timeGateStateLabel);
 
     styleLabel (timeStatusLabel, {}, juce::Justification::centredLeft);
     timeStatusLabel.setColour (juce::Label::textColourId, cm::green);
@@ -687,10 +735,27 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     maxActiveVoicesAttachment = std::make_unique<SliderAttachment> (proc.apvts, "maxActiveVoices", maxActiveVoicesSlider);
     gatePercentAttachment = std::make_unique<SliderAttachment> (proc.apvts, "gatePercent", gatePercentSlider);
     temporalSpreadAttachment = std::make_unique<ComboAttachment> (proc.apvts, "temporalSpread", temporalSpreadCombo);
+    timeGateEnabledAttachment = std::make_unique<ButtonAttachment> (proc.apvts, "timeGateEnabled", timeGateEnabledButton);
+    timeGateWaveformAttachment = std::make_unique<ComboAttachment> (proc.apvts, "timeGateWaveform", timeGateWaveformCombo);
+    timeGateRateModeAttachment = std::make_unique<ComboAttachment> (proc.apvts, "timeGateRateMode", timeGateRateModeCombo);
+    timeGateSyncDivisionAttachment = std::make_unique<ComboAttachment> (proc.apvts, "timeGateSyncDivision", timeGateSyncDivisionCombo);
+    timeGateRateHzAttachment = std::make_unique<SliderAttachment> (proc.apvts, "timeGateRateHz", timeGateRateHzSlider);
+    // SliderAttachment installs the parameter's generic formatter, so apply
+    // the compact performance readout afterwards. This keeps the minimum-width
+    // Time Field card from abbreviating a value such as 1.0 with an ellipsis.
+    timeGateRateHzSlider.textFromValueFunction = [] (double value)
+    {
+        return juce::String (value, value < 1.0 ? 2 : 1);
+    };
+    timeGateRateHzSlider.updateText();
 
     timeModeCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
     clockSourceCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
     gridDivisionCombo.onChange = [this] { updateLiveText(); };
+    timeGateEnabledButton.onClick = [this] { updateModeVisibility(); updateLiveText(); };
+    timeGateRateModeCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
+    timeGateWaveformCombo.onChange = [this] { updateLiveText(); };
+    timeGateSyncDivisionCombo.onChange = [this] { updateLiveText(); };
 
     // MIDI routing ------------------------------------------------------------
     addChoiceItems (midiTypeCombo, { "Off", "Normal MIDI", "MPE MIDI" });
@@ -832,7 +897,7 @@ void AudienceEditor::paint (juce::Graphics& g)
     g.drawText ("COSMIC MICROWAVE", 66, 9, 260, 25, juce::Justification::centredLeft, false);
     g.setColour (cm::textDim);
     g.setFont (juce::Font (juce::FontOptions (9.5f).withStyle ("bold")));
-    g.drawText ("OSC / MIDI ROUTING INSTRUMENT", 67, 35, 245, 14,
+    g.drawText ("OSC / MIDI ROUTING", 67, 35, 218, 14,
                 juce::Justification::centredLeft, false);
 
     auto badge = juce::Rectangle<float> (303.0f, 20.0f, 67.0f, 20.0f);
@@ -867,9 +932,29 @@ void AudienceEditor::paint (juce::Graphics& g)
     cm::drawCard (g, routingCardBounds, "SOURCE ROUTING", "ID-LOCKED");
     cm::drawCard (g, simulatorCardBounds, "SIMULATOR", "LOCAL TEST");
     cm::drawCard (g, pitchCardBounds, "PITCH MAPPING");
-    cm::drawCard (g, timeCardBounds, "TIME FIELD", "SYNC / LOAD");
+    cm::drawCard (g, timeCardBounds, "TIME FIELD");
     cm::drawCard (g, midiCardBounds, "MIDI ROUTING", "NORMAL / MPE");
     cm::drawCard (g, destinationCardBounds, "MIDI OUTPUT");
+
+    if (! timeGateStateLabel.getBounds().isEmpty())
+    {
+        const auto bounds = timeGateStateLabel.getBounds().toFloat();
+        g.setColour (cm::background.withAlpha (0.58f));
+        g.fillRoundedRectangle (bounds, 7.0f);
+        g.setColour (cm::lineSoft);
+        g.drawRoundedRectangle (bounds.reduced (0.5f), 7.0f, 0.8f);
+        if (proc.getTimeGateActive())
+        {
+            const auto phase = (float) juce::jlimit (0.0, 1.0,
+                                                     proc.getTimeGatePhase());
+            g.setColour ((proc.getTimeGateOpen() ? cm::green : cm::violet)
+                           .withAlpha (0.82f));
+            const auto phaseTrack = bounds.withY (bounds.getBottom() - 2.0f)
+                                          .withHeight (2.0f);
+            g.fillRoundedRectangle (phaseTrack.withWidth (phaseTrack.getWidth() * phase),
+                                    1.0f);
+        }
+    }
 
     if (! timeStatusLabel.getBounds().isEmpty() && ! timeTelemetryLabel.getBounds().isEmpty())
     {
@@ -887,6 +972,7 @@ void AudienceEditor::resized()
 {
     auto area = getLocalBounds();
     auto headerArea = area.removeFromTop (64);
+    versionLabel.setBounds (303, 42, 67, 12);
 
     auto metrics = headerArea.reduced (14, 12).removeFromRight (juce::jmin (500, getWidth() - 395));
     constexpr int metricGap = 7;
@@ -985,9 +1071,11 @@ void AudienceEditor::resized()
     }
 
     // Time Field: a dedicated two-column scheduling surface. Keeping it beside
-    // the source matrix gives all eight parameters full-height controls even at
-    // the 900x560 minimum editor size.
+    // the source matrix gives the scheduler and compact Time Gate LFO full-height
+    // controls even at the 900x560 minimum editor size.
     {
+        timeGateStateLabel.setBounds (timeCardBounds.getRight() - 92,
+                                      timeCardBounds.getY() + 6, 78, 23);
         auto inner = timeCardBounds.reduced (13);
         inner.removeFromTop (27);
         timeStatusLabel.setBounds (inner.removeFromTop (21));
@@ -1011,9 +1099,9 @@ void AudienceEditor::resized()
         };
 
         const int rowGap = 3;
-        const int rowHeight = juce::jlimit (39, 47,
-                                            juce::jmax (1, (inner.getHeight() - rowGap * 3) / 4));
-        const int controlsHeight = rowHeight * 4 + rowGap * 3;
+        const int rowHeight = juce::jlimit (42, 50,
+                                            juce::jmax (1, (inner.getHeight() - rowGap * 4) / 5));
+        const int controlsHeight = rowHeight * 5 + rowGap * 4;
         inner.removeFromTop (juce::jmax (0, (inner.getHeight() - controlsHeight) / 2));
         layoutPair (inner.removeFromTop (rowHeight),
                     timeModeLabel, timeModeCombo, clockSourceLabel, clockSourceCombo);
@@ -1050,6 +1138,43 @@ void AudienceEditor::resized()
         layoutPair (inner.removeFromTop (rowHeight),
                     gatePercentLabel, gatePercentSlider,
                     temporalSpreadLabel, temporalSpreadCombo);
+        inner.removeFromTop (rowGap);
+
+        auto lfoRow = inner.removeFromTop (rowHeight);
+        auto lfoLabels = lfoRow.removeFromTop (12);
+        auto lfoControls = lfoRow;
+        constexpr int lfoGap = 7;
+        const int lfoHalf = (lfoLabels.getWidth() - lfoGap) / 2;
+        timeGateLabel.setBounds (lfoLabels.removeFromLeft (lfoHalf));
+        lfoLabels.removeFromLeft (lfoGap);
+        timeGateRateLabel.setBounds (lfoLabels);
+
+        auto leftLfo = lfoControls.removeFromLeft (lfoHalf);
+        lfoControls.removeFromLeft (lfoGap);
+        const int enableWidth = juce::jlimit (42, 50, leftLfo.getWidth() / 3);
+        timeGateEnabledButton.setBounds (leftLfo.removeFromLeft (enableWidth));
+        leftLfo.removeFromLeft (4);
+        timeGateWaveformCombo.setBounds (leftLfo);
+
+        // JUCE's ComboBox reserves room for its arrow; 45 px collapsed "Sync"
+        // to an ellipsis at the default editor size. Keep both rate modes
+        // legible while leaving enough room for 1/32 or the compact Hz value.
+        const bool hzRate = cm::choiceValue (proc.apvts, "timeGateRateMode") == 1;
+        const int modeWidth = hzRate
+                            ? 50
+                            : juce::jlimit (54, 60, lfoControls.getWidth() / 2);
+        timeGateRateModeCombo.setBounds (lfoControls.removeFromLeft (modeWidth));
+        lfoControls.removeFromLeft (4);
+        if (! hzRate)
+        {
+            timeGateSyncDivisionCombo.setBounds (lfoControls);
+            timeGateRateHzSlider.setBounds ({});
+        }
+        else
+        {
+            timeGateRateHzSlider.setBounds (lfoControls);
+            timeGateSyncDivisionCombo.setBounds ({});
+        }
     }
 
     // Pitch mapping card: the system selector lives in the card header; the
@@ -1270,6 +1395,8 @@ void AudienceEditor::updateModeVisibility()
                            ? selectedTimeMode
                            : cm::choiceValue (proc.apvts, "timeMode");
     const bool timed = timeMode != 0;
+    const bool timeGateEnabled = cm::choiceValue (proc.apvts, "timeGateEnabled") != 0;
+    const bool timeGateHz = cm::choiceValue (proc.apvts, "timeGateRateMode") == 1;
     const int selectedClock = clockSourceCombo.getSelectedItemIndex();
     const bool internalClock = selectedClock >= 0
                                  ? selectedClock == 1
@@ -1278,8 +1405,10 @@ void AudienceEditor::updateModeVisibility()
     const bool mpe = midiType == 2;
     const bool fixedChannel = normal
                            && cm::choiceValue (proc.apvts, "normalMidiRoutingMode") == 0;
-    const int visibilityKey = timeMode * 10000
-                            + (internalClock ? 1000 : 0)
+    const int visibilityKey = timeMode * 1000000
+                            + (internalClock ? 100000 : 0)
+                            + (timeGateEnabled ? 10000 : 0)
+                            + (timeGateHz ? 1000 : 0)
                             + (atomicPitch ? 100 : 0)
                             + midiType * 10 + (fixedChannel ? 1 : 0);
 
@@ -1292,6 +1421,8 @@ void AudienceEditor::updateModeVisibility()
 
     internalBpmLabel.setVisible (timed && internalClock);
     internalBpmSlider.setVisible (timed && internalClock);
+    timeGateSyncDivisionCombo.setVisible (! timeGateHz);
+    timeGateRateHzSlider.setVisible (timeGateHz);
 
     // Flow is intentionally direct. Keep the timing configuration visible as
     // a stable layout, but make it unmistakably unavailable until Grid or
@@ -1309,6 +1440,13 @@ void AudienceEditor::updateModeVisibility()
                              static_cast<juce::Component*> (&gatePercentLabel),
                              static_cast<juce::Component*> (&temporalSpreadLabel) })
         component->setEnabled (timed);
+
+    timeGateEnabledButton.setEnabled (timed);
+    for (auto* component : { static_cast<juce::Component*> (&timeGateWaveformCombo),
+                             static_cast<juce::Component*> (&timeGateRateModeCombo),
+                             static_cast<juce::Component*> (&timeGateSyncDivisionCombo),
+                             static_cast<juce::Component*> (&timeGateRateHzSlider) })
+        component->setEnabled (timed && timeGateEnabled);
 
     normalRoutingLabel.setVisible (normal);
     normalRoutingCombo.setVisible (normal);
@@ -1475,6 +1613,45 @@ void AudienceEditor::updateLiveText()
     timeTelemetryLabel.setColour (juce::Label::textColourId,
                                   highLoad || mergeActivity ? cm::amber
                                   : pending > 0 ? cm::violet : cm::textMuted);
+
+    const bool gateEnabled = cm::choiceValue (proc.apvts, "timeGateEnabled") != 0;
+    const bool gateActive = liveTimeMode != 0 && gateEnabled && proc.getTimeGateActive();
+    const bool gateOpen = proc.getTimeGateOpen();
+    const auto gateRate = juce::String (proc.getTimeGateRateHz(), 2);
+    const auto gatePhase = juce::String (proc.getTimeGatePhase() * 360.0, 0);
+    juce::String gateState;
+    juce::String gateDescription;
+    juce::Colour gateColour;
+    if (liveTimeMode == 0 && gateEnabled)
+    {
+        gateState = "LFO BYPASS";
+        gateDescription = "Time Gate LFO is bypassed because Flow mode remains a direct OSC-to-MIDI path.";
+        gateColour = cm::textDim;
+    }
+    else if (! gateActive)
+    {
+        gateState = "LFO OFF";
+        gateDescription = "Time Gate LFO is disabled; scheduled OSC note flow remains open.";
+        gateColour = cm::textDim;
+    }
+    else if (gateOpen)
+    {
+        gateState = "LFO OPEN";
+        gateDescription = "Time Gate is open at " + gateRate + " Hz effective rate and "
+                        + gatePhase + " degrees phase. Pending sources may enter on the next normal grid step.";
+        gateColour = cm::green;
+    }
+    else
+    {
+        gateState = "LFO HOLD";
+        gateDescription = "Time Gate is closed at " + gateRate + " Hz effective rate and "
+                        + gatePhase + " degrees phase. Active OSC voices were safely released; Off, watchdog and Panic remain live.";
+        gateColour = cm::violet;
+    }
+    timeGateStateLabel.setText (gateState, juce::dontSendNotification);
+    timeGateStateLabel.setColour (juce::Label::textColourId, gateColour);
+    timeGateStateLabel.setTooltip (gateDescription);
+    timeGateStateLabel.setDescription (gateDescription);
 
     const bool listening = proc.osc.isRunning() && proc.osc.isReceiving();
     const auto messageCount = proc.osc.getValidMessageCount();

@@ -2,7 +2,7 @@
 
 Formerly named **SpektraSynth**.
 
-Version 2.2.1
+Version 2.3.0
 
 Cosmic Microwave is a JUCE VST3 and standalone OSC-to-MIDI router for
 audience interaction. It receives already-separated zone streams over UDP, keeps each
@@ -10,7 +10,7 @@ source's single-touch lifecycle intact, maps normalized movement through either 
 element-derived Atomic Scale pitch maps, and sends Normal MIDI or MPE to Ableton, a
 virtual MIDI endpoint, or a system MIDI device.
 
-Cosmic Microwave 2.2 is behaviourally MIDI-only: it does not generate sound. The VST3
+Cosmic Microwave 2.3 is behaviourally MIDI-only: it does not generate sound. The VST3
 keeps a silent stereo instrument shell, its existing class identity, and its instrument
 placement so Ableton sets made with the earlier product can still resolve the device.
 
@@ -69,7 +69,7 @@ density, root C2, and a four-octave range.
 
 ## Crowd Time Field
 
-Cosmic Microwave 2.2 can turn an asynchronous crowd into a shared rhythmic field
+Cosmic Microwave 2.3 can turn an asynchronous crowd into a shared rhythmic field
 without changing source identity or note ownership:
 
 | Mode | Behaviour |
@@ -97,6 +97,29 @@ Ensemble, the UDP port supplies a stable lane seed so different zone instances d
 all place the same source ID on the same tick. A pending short tap remains eligible for
 at least one complete lane cycle. **MERGED** is monitoring only: it counts scheduled
 work coalesced or expired under pressure and does not produce a MIDI CC.
+
+### Time Gate LFO
+
+Version 2.3 adds an Ableton-inspired **Time Gate LFO** to Grid and Ensemble. It is
+disabled by default, so new and migrated sessions remain open until it is deliberately
+enabled. **Flow** is always a direct bypass and does not gate OSC or host MIDI.
+
+The LFO offers **Sine**, **Triangle**, **Square**, **Ramp Up**, and **Ramp Down**
+waveforms. Its rate can be host-synchronised from **2 Bars** through **1/32**, or run
+at an absolute **0.05..20 Hz**. The default is **Square / Sync / 1/4**; the saved Hz
+default is **1.00 Hz**. Sync follows valid, playing host PPQ when the Time Field clock
+is **Host**; an **Internal** selection or unavailable host uses the same process-wide
+monotonic clock plus Internal BPM as the Time Field. Hz mode derives
+phase directly from absolute process-wide monotonic seconds, so restarting or opening
+an instance does not create an unrelated free-running phase accumulator.
+
+At a falling edge, every currently sounding Time Field OSC voice receives its normal
+semantic source Note Off at the exact edge offset. Held sources remain pending. A
+rising edge only reopens admission: it never bursts all held notes immediately, and
+each source must wait for its next ordinary Grid boundary or Ensemble lane. The closed
+window still consumes canonical On/Off and watchdog state; an Off cancels a pending
+touch so a short closed-window tap cannot return as a ghost note. Explicit Off,
+watchdog releases, Panic, and unchanged host MIDI thru are never blocked by the LFO.
 
 ## Pitch systems
 
@@ -175,13 +198,15 @@ instead of treating its member channels as independent source channels.
 
 The MIDI-only editor contains:
 
+- a permanent build-derived **v2.3.0** version label in the header;
 - live **SOURCES**, **TOUCHES**, **NOTES**, and **MPE VOICES** metrics;
 - an **OSC INPUT** card with port and validated-traffic status;
 - a source-routing summary with observed zone letters;
 - a simulator for source-count and movement tests;
 - a 256-source **SOURCE MATRIX** grouped into 16 MIDI-channel columns;
 - a **TIME FIELD** card for Flow/Grid/Ensemble timing, host/internal clocking,
-  density limits, gate, spread, and live Pending/Active/Merged telemetry;
+  density limits, gate, spread, the Grid/Ensemble-only Time Gate LFO, and live
+  Pending/Active/Merged plus LFO Open/Hold telemetry;
 - a Tonal/Atomic pitch system with element and density selection;
 - Normal MIDI and MPE routing controls;
 - host, virtual, and hardware destination selection; and
@@ -206,6 +231,11 @@ The MIDI-only editor contains:
 | Maximum Active Voices | 1..16 | 16 (effective 15 in MPE) |
 | Gate Length | 5..100% | 70% |
 | Temporal Spread | 1, 2, 4, 8, 16 steps | 4 steps |
+| Time Gate LFO | Off, On | Off |
+| Time Gate Waveform | Sine, Triangle, Square, Ramp Up, Ramp Down | Square |
+| Time Gate Rate Mode | Sync, Hz | Sync |
+| Time Gate Sync Rate | 2 Bars, 1 Bar, 1/2, 1/4, 1/8, 1/16, 1/32 | 1/4 |
+| Time Gate Rate | 0.05..20 Hz | 1.00 Hz |
 | Pitch System | Tonal, Atomic | Atomic |
 | Root | C..B | C |
 | Root Octave | 0..6 | 2 |
@@ -256,6 +286,7 @@ already-separated OSC zone / simulator
   -> OscBridge validation
   -> MidiAudienceModel (256 sources x one admitted live touch)
   -> OscFingerRouter fixed-capacity event queue
+  -> CrowdLfoGate (Grid/Ensemble Time Gate; Flow bypass)
   -> CrowdTimeField
        -> Flow: direct lifecycle/motion
        -> Grid: clocked attack queue
@@ -287,16 +318,18 @@ bundle identity for existing session lookup. Do not keep `SpektraSynth.vst3` and
 same plugin class. Back up the old bundle outside the plugin folder, install Cosmic
 Microwave, and rescan the host.
 
-New 2.2 sessions open on Ensemble timing and Atomic / Helium / Extended pitch mapping.
-Existing state from schema 3 or earlier receives Flow timing, so upgrading does not
-move established attacks onto a grid. Existing schema-2 MIDI-only sessions still
+New 2.3 sessions open on Ensemble timing and Atomic / Helium / Extended pitch mapping,
+with the Time Gate LFO disabled. Existing state from schema 3 or earlier receives Flow
+timing, so upgrading does not move established attacks onto a grid. Schema 5 adds the
+five Time Gate parameters; every older or partial state missing them receives the safe
+disabled defaults. Existing schema-2 MIDI-only sessions still
 migrate explicitly to Tonal so they keep their previous pitch-map intent.
 Released 1.x sessions that selected an element spectrum migrate to Atomic and recover
 the corresponding element; their stable `spectralElement` and `atomicScaleMode`
 parameter values are retained.
 
 Repositories upgraded from pre-2.0 versions may still contain old media, preparation
-tools, or implementation files. The `AudienceHarmonicSynth` 2.2 target does not load
+tools, or implementation files. The `AudienceHarmonicSynth` 2.3 target does not load
 or compile them; `CMakeLists.txt` is the authoritative runtime source list.
 
 ## Manual
