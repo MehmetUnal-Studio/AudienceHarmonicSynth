@@ -80,15 +80,10 @@ private:
     // Temporal note scheduling
     juce::Label timeStatusLabel;
     juce::Label timeTelemetryLabel;
-    juce::Label timeGateStateLabel;
     juce::Label timeModeLabel, clockSourceLabel, internalBpmLabel, gridDivisionLabel;
     juce::Label maxAttacksLabel, maxActiveVoicesLabel, gatePercentLabel, temporalSpreadLabel;
-    juce::Label timeGateLabel, timeGateRateLabel;
     juce::ComboBox timeModeCombo, clockSourceCombo, gridDivisionCombo, temporalSpreadCombo;
-    juce::ComboBox timeGateWaveformCombo, timeGateRateModeCombo, timeGateSyncDivisionCombo;
-    juce::ToggleButton timeGateEnabledButton { "LFO" };
     juce::Slider internalBpmSlider, maxAttacksSlider, maxActiveVoicesSlider, gatePercentSlider;
-    juce::Slider timeGateRateHzSlider;
 
     // MIDI mode / channel routing card
     juce::Label midiTypeLabel, normalRoutingLabel, normalChannelLabel;
@@ -144,11 +139,6 @@ private:
     std::unique_ptr<SliderAttachment> maxActiveVoicesAttachment;
     std::unique_ptr<SliderAttachment> gatePercentAttachment;
     std::unique_ptr<ComboAttachment> temporalSpreadAttachment;
-    std::unique_ptr<ButtonAttachment> timeGateEnabledAttachment;
-    std::unique_ptr<ComboAttachment> timeGateWaveformAttachment;
-    std::unique_ptr<ComboAttachment> timeGateRateModeAttachment;
-    std::unique_ptr<ComboAttachment> timeGateSyncDivisionAttachment;
-    std::unique_ptr<SliderAttachment> timeGateRateHzAttachment;
     std::unique_ptr<ComboAttachment> midiTypeAttachment;
     std::unique_ptr<ComboAttachment> normalRoutingAttachment;
     std::unique_ptr<ComboAttachment> normalChannelAttachment;

@@ -7,7 +7,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQU
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment target" FORCE)
 endif()
 
-project(AudienceHarmonicSynth VERSION 2.3.0 LANGUAGES C CXX)
+project(AudienceHarmonicSynth VERSION 2.3.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -71,7 +71,6 @@ target_sources(AudienceHarmonicSynth PRIVATE
     Source/PluginEditor.cpp
     Source/AtomicScaleMap.cpp
     Source/AtomicScaleCatalog.cpp
-    Source/CrowdLfoGate.cpp
     Source/CrowdTimeField.cpp
     Source/MidiAudienceModel.cpp
     Source/MidiPitchMap.cpp
@@ -469,18 +468,6 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_test(NAME AudienceAtomicMidiIntegrationTests COMMAND AudienceAtomicMidiIntegrationTests)
 
-    add_executable(AudienceCrowdLfoGateTests
-        Tests/CrowdLfoGateTests.cpp
-        Source/CrowdLfoGate.cpp
-    )
-
-    target_link_libraries(AudienceCrowdLfoGateTests PRIVATE
-        juce::juce_recommended_config_flags
-        juce::juce_recommended_warning_flags
-    )
-
-    add_test(NAME AudienceCrowdLfoGateTests COMMAND AudienceCrowdLfoGateTests)
-
     add_executable(AudienceCrowdTimeFieldTests
         Tests/CrowdTimeFieldTests.cpp
         Source/CrowdTimeField.cpp
@@ -495,7 +482,6 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_executable(AudienceCrowdMidiIntegrationTests
         Tests/CrowdMidiIntegrationTests.cpp
-        Source/CrowdLfoGate.cpp
         Source/CrowdTimeField.cpp
         Source/MidiAudienceModel.cpp
         Source/MpeMidiOutput.cpp

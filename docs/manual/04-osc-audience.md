@@ -162,8 +162,8 @@ New sessions default to **Ensemble / Host / 1/16**, **4 attacks per step**, **16
 voices**, **70% gate**, and **4 spread steps**. MPE's effective active limit is 15,
 because its Lower or Upper zone has 15 member channels. Session state from schema 3 or
 earlier migrates to **Flow**, preserving the direct timing of existing Ableton sets.
-Version 2.3 state schema 5 adds the Time Gate LFO; it is **Off** in new sessions and
-is added as Off to every older or partial state that lacks its parameters.
+Schema-5 input remains compatible; schema 6 discards its retired experimental fields
+during upgrade.
 
 ### Clock behaviour
 
@@ -177,28 +177,6 @@ Selecting **Internal** explicitly uses that common monotonic reference at `40..2
 BPM`. It is not a free-running accumulator unique to each instance, so instances in
 the same process retain a common phase. The available divisions are `1/4`, `1/8`,
 `1/16`, and `1/32`.
-
-### Time Gate LFO
-
-The **Time Gate LFO** can rhythmically alternate scheduled OSC flow between open and
-hold windows in Grid and Ensemble. Flow bypasses it completely. Five unipolar
-waveforms are available: **Sine**, **Triangle**, **Square**, **Ramp Up**, and
-**Ramp Down**. A fixed midpoint turns each waveform into a binary gate.
-
-In **Sync**, one LFO cycle can last **2 Bars**, **1 Bar**, **1/2**, **1/4**, **1/8**,
-**1/16**, or **1/32**. Sync follows valid playing host PPQ while the Time Field clock
-is **Host**; **Internal** or an unavailable host uses the common process-wide monotonic
-timebase at Internal BPM. In **Hz**, the LFO covers
-`0.05..20 Hz` and derives phase from absolute process-wide monotonic seconds. Defaults
-are **Off / Square / Sync / 1/4**, with `1.00 Hz` stored for Hz mode.
-
-A close edge is a musical release, not a packet filter: every sounding Time Field OSC
-voice receives its source-owned Note Off at the exact edge offset. Held sources remain
-pending. Reopening only permits ordinary Grid/Ensemble admission and never causes an
-all-at-once Note On burst. Incoming On/Off and watchdog state continue to be processed
-while closed; a short tap whose Off arrives in that window is cancelled and cannot
-reappear later. Explicit Off, watchdog releases, Panic, and unchanged host MIDI thru
-are never gated.
 
 ### Burst control and lifecycle safety
 
@@ -282,8 +260,8 @@ Use this layout for each zone:
 1. Place one Cosmic Microwave instance on its own Ableton track.
 2. Set the instance's UDP port to the already-separated stream for that zone.
 3. Select **Normal MIDI** and **Per source 1-16**.
-4. For the starting crowd preset, leave **TIME FIELD** at **Ensemble / Host / 1/16**
-   and leave **LFO GATE** Off. Use Flow when inspecting the sender's raw timing.
+4. For the starting crowd preset, leave **TIME FIELD** at **Ensemble / Host / 1/16**.
+   Use Flow when inspecting the sender's raw timing.
 5. Under **DESTINATION**, select **Virtual: Cosmic Microwave <port> Out**.
 6. On receiving Ableton MIDI tracks, choose that virtual endpoint under **MIDI From**
    and select Channel 1, Channel 2, and so on.

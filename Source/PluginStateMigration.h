@@ -4,7 +4,7 @@
 
 namespace CosmicStateMigration
 {
-    inline constexpr int currentSchema = 5;
+    inline constexpr int currentSchema = 6;
 
     // Upgrades a serialized APVTS ValueTree in-place. APVTS stores choice
     // parameters as their denormalized choice index (0, 1, 2...), not as 0..1.

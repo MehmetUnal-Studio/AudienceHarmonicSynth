@@ -1,4 +1,4 @@
-# Cosmic Microwave 2.3 WIKI
+# Cosmic Microwave 2.3.1 WIKI
 
 > **A single-touch, zone-oriented OSC-to-MIDI router for audience interaction.**
 
@@ -6,7 +6,7 @@
 |---|---|
 | Product | Cosmic Microwave (formerly SpektraSynth) |
 | CMake project/target | `AudienceHarmonicSynth` |
-| Version | 2.3.0 |
+| Version | 2.3.1 |
 | Formats | VST3 + Standalone |
 | Framework | JUCE 8.0.4, C++17, CMake 3.22+ |
 | Runtime role | MIDI-only OSC router with a silent mono/stereo instrument output shell |
@@ -67,9 +67,6 @@ receiving Cosmic Microwave's MIDI.
   on musical boundaries.
 - Separate instances can share host PPQ or a process-wide monotonic clock; Ensemble
   uses the UDP port only as a lane-phase seed, never as a zone filter.
-- A disabled-by-default Time Gate LFO may close only scheduled Grid/Ensemble OSC
-  admission. Source Off, watchdog release, Panic, and unchanged host MIDI thru remain
-  outside that gate; Flow is an exact bypass.
 
 ## 2. Products and host identity
 
@@ -255,7 +252,7 @@ from `process()`.
 | Grid | Queue attacks to the base division, select pending identities fairly, and obey attacks-per-step and active limits. Held notes release on ordered Off; an admitted short tap receives a minimum gate. |
 | Ensemble | Restrict each source to one deterministic spread lane, apply a fixed gate, and requeue a still-held voice after release. |
 
-New 2.3 instances default to **Ensemble**, **Host**, **1/16**, four attacks per step,
+New 2.3.1 instances default to **Ensemble**, **Host**, **1/16**, four attacks per step,
 16 active voices, 70% gate, and four spread slots. `AudienceProcessor` caps the
 effective Time Field active count at 15 in MPE mode because Lower and Upper zones each
 have 15 member channels. Serialized state from schema 3 or earlier receives Flow, so
@@ -277,44 +274,7 @@ explicitly and reports locked. Because phase is calculated from absolute monoton
 time rather than a per-instance accumulator, multiple instances receive a common
 fallback/internal grid.
 
-### 5.3 Time Gate LFO
-
-`CrowdLfoGate` is an allocation-free binary lifecycle gate evaluated before
-`CrowdTimeField`. It is enabled only when the saved LFO parameter is On and Time Field
-mode is Grid or Ensemble. Flow resets it to safe-open bypass. The public parameter
-choices are:
-
-| Control | Values | Default |
-|---|---|---|
-| Enabled | Off / On | Off |
-| Waveform | Sine / Triangle / Square / Ramp Up / Ramp Down | Square |
-| Rate mode | Sync / Hz | Sync |
-| Sync cycle | 2 Bars / 1 Bar / 1/2 / 1/4 / 1/8 / 1/16 / 1/32 | 1/4 |
-| Hz | 0.05..20 Hz | 1.00 Hz |
-
-Each waveform is unipolar and becomes Open or Close at the fixed `0.5` threshold.
-Sync derives phase from valid playing host PPQ only while Time Field uses **Host**;
-an **Internal** selection or unavailable host uses process-wide monotonic seconds
-converted at Internal BPM. Hz mode always derives
-phase from absolute process-wide monotonic seconds. Neither mode owns a per-instance
-free-running accumulator, so instances share the same absolute reference.
-
-The gate emits at most 64 sorted transitions per audio block. A falling edge is merged
-with the OSC lifecycle input at its exact sample offset and causes a semantic release
-for each currently sounding Time Field OSC identity. This preserves the source's
-Normal channel or MPE ownership instead of using a packet-level MIDI kill. Held
-identities remain pending. A rising edge only re-enables ordinary admission: it does
-not emit Note On, and held identities wait for the next valid Grid boundary or
-Ensemble lane.
-
-Canonical On/Off state and the three-second live watchdog continue while the gate is
-closed. Off cancels a gate-owned pending identity, including a short touch completed
-inside the closed window, so it cannot become a ghost note on reopen. Explicit Off,
-watchdog Off, Panic, and host MIDI thru are never gated. Transition overflow requests
-the same bounded safety-release and canonical rehydration policy used by the timed
-path; the final gate state decides whether held voices may be re-pended.
-
-### 5.4 Admission, lanes, and short taps
+### 5.3 Admission, lanes, and short taps
 
 At every base grid boundary, admission is limited by both `maxAttacksPerStep` and the
 remaining `maxActive` capacity. A rotating voice cursor prevents a low source ID from
@@ -335,7 +295,7 @@ Grid uses the configured gate only for an admitted tap released before its attac
 held Grid note ends on its ordered Off. Ensemble always uses the configured gate and
 requeues a voice that remains held.
 
-### 5.5 Movement coalescing and telemetry
+### 5.4 Movement coalescing and telemetry
 
 In Grid and Ensemble, `MidiAudienceModel` continues to publish the canonical latest
 U/V values but suppresses the per-packet movement FIFO. Attack and `SampleMotion`
@@ -474,8 +434,6 @@ OSC UDP callback                         Simulator / UI thread
                            |
                     audio processBlock
                            |
-                 CrowdLfoGate (Grid/Ensemble only)
-                           |
              CrowdTimeField (Flow / Grid / Ensemble)
                            |
                     Pitch System lookup
@@ -501,12 +459,11 @@ host MIDI in -> preserved scratch -> unchanged thru when output enabled
 | Class | Responsibility |
 |---|---|
 | `AudienceProcessor` | APVTS, process lifecycle, pitch configuration, input MIDI thru, OSC touch state, safety resets, host/external MIDI routing, state migration. |
-| `CosmicStateMigration` | Schema-aware, bounded restoration through schema 5, including Flow timing and disabled Time Gate defaults for older sessions. |
+| `CosmicStateMigration` | Schema-aware, bounded restoration through schema 6, including Flow timing for older sessions. |
 | `OscBridge` | Shared UDP receiver, wire validation, value decoding/clamping, traffic and zone telemetry. |
 | `MidiAudienceModel` | Atomic 256-source UI/control state and single-touch hand-off. |
 | `OscFingerRouter` | Separate fixed lifecycle and latest-motion queues; lifecycle-first draining, U/V coalescing, epochs, and reset-on-lifecycle-overflow recovery. |
 | `CrowdTimeField` | Allocation-free host/monotonic clock resolution, pending admission, fair Grid scheduling, port-seeded Ensemble lanes, gates, and telemetry. |
-| `CrowdLfoGate` | Allocation-free Sync/Hz phase resolution and exact-offset binary Open/Close transitions for the Grid/Ensemble OSC lifecycle gate. |
 | `MidiPitchMap` | Seven fixed-capacity tonal tables and normalized-X lookup. |
 | `AtomicScaleCatalog` | Immutable 29-element x 5-mode generated degree catalog and fixed-map lookup. |
 | `AtomicScaleMap` | Fixed 128-degree/768-step Atomic pitch projection with exact-frequency metadata. |
@@ -519,7 +476,7 @@ host MIDI in -> preserved scratch -> unchanged thru when output enabled
 | Context | Work | Boundary mechanism |
 |---|---|---|
 | OSC realtime callback | Validate/decode OSC, update source atomics, enqueue touch events. | Shared-port callback/client lock plus producer spin lock; never the audio thread. |
-| Audio processing thread | Copy input MIDI, capture host position, select/re-root a fixed pitch table, drain bounded lifecycle events, run the Time Gate and Time Field, generate sample-offset host MIDI, and enqueue short external messages. | Pre-reserved MIDI buffers, fixed arrays, bounded FIFOs/schedulers; no parsing, catalog generation, or device I/O. |
+| Audio processing thread | Copy input MIDI, capture host position, select/re-root a fixed pitch table, drain bounded lifecycle events, run the Time Field, generate sample-offset host MIDI, and enqueue short external messages. | Pre-reserved MIDI buffers, fixed arrays, bounded FIFOs/schedulers; no parsing, catalog generation, or device I/O. |
 | Message/UI thread | Editor refresh, simulator, destination changes, state application, external MIDI sending. | Atomics, pending-state lock, processor suspension for destructive route changes. |
 
 Key capacities:
@@ -533,7 +490,6 @@ Key capacities:
 | OSC latest-motion marker FIFO | 8192 (at most one pending marker per voice/axis/epoch) |
 | Lifecycle events drained per block | `min(64, max(1, block samples))` |
 | Time Field output events per block | 64 |
-| Time Gate transitions per block | 64 |
 | Generated note-event scratch | 64 |
 | External short-message FIFO | 16384 |
 | Pre-reserved MIDI buffer storage | 262144 bytes each |
@@ -560,7 +516,7 @@ message timer performs device I/O outside the host's processing callback.
 
 The flagship editor is resizable (`1120 x 640` default, `900 x 560` minimum). It has:
 
-- a permanent build-derived version label (for example `v2.3.0`) beside the MIDI-only
+- a permanent build-derived version label (for example `v2.3.1`) beside the MIDI-only
   product identity;
 - header metrics for active sources, active touches, emitted note count, and occupied
   MPE member channels;
@@ -569,8 +525,7 @@ The flagship editor is resizable (`1120 x 640` default, `900 x 560` minimum). It
 - simulator controls;
 - a 16-column x 16-row **SOURCE MATRIX** covering all 256 IDs;
 - a **TIME FIELD** card for mode, clock, BPM/division, attacks per step, active limit,
-  gate, spread, the Grid/Ensemble Time Gate LFO, Pending/Active/Merged status, and
-  LFO Off/Bypass/Open/Hold feedback;
+  gate, spread, and Pending/Active/Merged status;
 - Tonal/Atomic selector; shared root, octave, and range; Tonal scale or Atomic
   element/density controls;
 - mode-specific Normal MIDI or MPE controls;
@@ -581,7 +536,7 @@ wrapped source IDs; source 0 is the final cell in the Channel 16 column. Active-
 position follows the source's latest X/Y snapshot.
 
 The editor exposes no internal diagnostics panel. Internal MIDI rings still support
-tests and processor diagnostic text methods, but they are not part of the 2.3 visible
+tests and processor diagnostic text methods, but they are not part of the 2.3.1 visible
 UI contract.
 
 ## 10. Parameters and state
@@ -605,11 +560,6 @@ UI contract.
 | `maxActiveVoices` | Maximum Active Voices | 1..16 | 16; effective maximum 15 in MPE |
 | `gatePercent` | Gate Length | 5..100% | 70% |
 | `temporalSpread` | Temporal Spread | 1 / 2 / 4 / 8 / 16 | 4 |
-| `timeGateEnabled` | Time Gate LFO Enabled | Off / On | Off |
-| `timeGateWaveform` | Time Gate LFO Waveform | Sine / Triangle / Square / Ramp Up / Ramp Down | Square |
-| `timeGateRateMode` | Time Gate LFO Rate Mode | Sync / Hz | Sync |
-| `timeGateSyncDivision` | Time Gate LFO Sync Rate | 2 Bars / 1 Bar / 1/2 / 1/4 / 1/8 / 1/16 / 1/32 | 1/4 |
-| `timeGateRateHz` | Time Gate LFO Rate | 0.05..20 Hz | 1.00 Hz |
 | `pitchSystem` | Pitch System | Tonal / Atomic | Atomic |
 | `scaleRoot` | Root | C..B | C |
 | `scaleRootOctave` | Root Octave | 0..6 | 2 |
@@ -624,7 +574,7 @@ The APVTS ValueTree also stores:
 
 - `udpPort` (default 6060);
 - `midiOutputOption` (default Host MIDI Output); and
-- `cosmicMicrowaveSchema` (current schema 5).
+- `cosmicMicrowaveSchema` (current schema 6).
 
 `setStateInformation` replaces the APVTS parameter tree, while UDP-port and destination
 side effects are deferred to the message timer. Migration preserves released state
@@ -641,8 +591,8 @@ contracts:
   `spectralElement` and `atomicScaleMode` choices;
 - supplies Flow plus safe timing defaults to any state that lacks schema-4 Time Field
   parameters;
-- supplies disabled **Off / Square / Sync / 1/4 / 1.00 Hz** Time Gate defaults to any
-  older or partial state that lacks schema-5 LFO parameters; and
+- accepts schema-5 input, discards its retired experimental fields, and stamps newly
+  saved state as schema 6; and
 - clamps malformed or non-finite choice state to safe bounds.
 
 ## 11. Build and tests
@@ -683,9 +633,8 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 | `AudienceAtomicScaleCatalogTests` | 29 x 5 generated catalog integrity, mode caps, metadata, and map parity. |
 | `AudienceAtomicMidiIntegrationTests` | Atomic map exact-frequency output through the Normal/MPE renderer. |
 | `AudienceCrowdTimeFieldTests` | Flow/Grid/Ensemble timing, host/internal/fallback clocks, fairness, lane seeding, taps, gates, saturation, hostile input, and reset/rehydration. |
-| `AudienceCrowdLfoGateTests` | Five waveforms, Sync/Hz absolute phase, exact sample transitions, bypass, hostile clocks, overflow, and reset behaviour. |
 | `AudienceCrowdMidiIntegrationTests` | Host-PPQ grid offsets and unchanged source-to-channel ownership through the full timed MIDI path. |
-| `AudiencePluginStateMigrationTests` | Released channel/scale representations, schema-2 Tonal preservation, schema-4 Flow compatibility, schema-5 disabled Time Gate defaults, numeric clamping, and idempotence. |
+| `AudiencePluginStateMigrationTests` | Released channel/scale representations, schema-2 Tonal preservation, schema-4 Flow compatibility, schema-5 input compatibility, schema-6 stamping, numeric clamping, and idempotence. |
 
 ## 12. Repository map
 
@@ -693,10 +642,9 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 |---|---|
 | `CMakeLists.txt` | Authoritative product source boundaries, dependencies, signing, installation, tests. |
 | `Source/PluginProcessor.*` | Flagship processor and state/routing orchestration. |
-| `Source/PluginStateMigration.*` | Flagship schema-5 state migration. |
+| `Source/PluginStateMigration.*` | Flagship schema-6 state migration. |
 | `Source/PluginEditor.*` | Flagship MIDI-only editor. |
 | `Source/CrowdTimeField.*` | Realtime Flow/Grid/Ensemble scheduler and shared clock-domain logic. |
-| `Source/CrowdLfoGate.*` | Realtime Time Gate waveform/phase evaluation and fixed-capacity Open/Close transitions. |
 | `Source/MidiAudienceModel.*` | Source/touch state and UI snapshots. |
 | `Source/MidiPitchMap.*` | Flagship seven-scale pitch table. |
 | `Source/AtomicScaleMap.*` | Fixed-capacity exact-frequency Atomic projection used by the flagship. |
@@ -714,7 +662,7 @@ build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app
 | `docs/manual/` | Current user manual. |
 
 Old research data, media, design files, or implementation units may still exist in an
-upgraded checkout. Their presence does not make them a 2.3 product feature. Check the
+upgraded checkout. Their presence does not make them a 2.3.1 product feature. Check the
 target's `target_sources` list before documenting or modifying runtime behaviour.
 
 ## 13. Operational limits and upgrade notes
@@ -732,20 +680,20 @@ target's `target_sources` list before documenting or modifying runtime behaviour
   lifecycle burst can still overflow its fixed priority FIFO and trigger a safety reset.
 - Merged telemetry is cumulative and diagnostic; it is not a MIDI control output.
 
-### Upgrade to 2.3
+### Upgrade to 2.3.1
 
 1. Back up the old VST3 outside the scanned plugin folder.
-2. Install Cosmic Microwave 2.3 and rescan the host.
+2. Install Cosmic Microwave 2.3.1 and rescan the host.
 3. Open a copied Ableton set first.
-4. Confirm each instance's UDP port, Time Field, Time Gate LFO, clock, MIDI protocol,
+4. Confirm each instance's UDP port, Time Field, clock, MIDI protocol,
    source-routing mode, destination, Pitch System, and Tonal or Atomic map.
 5. Add downstream instruments because the flagship no longer creates sound.
 6. Test Panic and every receiving channel before connecting the audience server.
 
 New sessions default to Ensemble / Host / 1/16 with four attacks per step, active 16
-(15 in MPE), 70% gate, four spread slots, Atomic / Helium / Extended, and a disabled
-Time Gate LFO. Existing schema-3-or-earlier sessions migrate to Flow. Schema 5 adds
-the disabled LFO defaults to every older state that lacks them. The historical
+(15 in MPE), 70% gate, four spread slots, and Atomic / Helium / Extended. Existing
+schema-3-or-earlier sessions migrate to Flow. Schema-5 input remains compatible;
+schema 6 discards its retired experimental fields during upgrade. The historical
 schema-2 Tonal and 1.x Atomic recovery rules remain active; verify the receiver's MPE
 bend range before a performance.
 

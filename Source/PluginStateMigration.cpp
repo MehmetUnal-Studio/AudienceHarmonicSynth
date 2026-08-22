@@ -58,6 +58,19 @@ namespace
         if (parameter.isValid())
             parameter.setProperty("value", value, nullptr);
     }
+
+    void removeParameterNodes (juce::ValueTree& state,
+                               const juce::String& parameterId)
+    {
+        for (int index = state.getNumChildren() - 1; index >= 0; --index)
+        {
+            auto child = state.getChild(index);
+            if (child.getProperty("id").toString() == parameterId)
+                state.removeChild(index, nullptr);
+            else
+                removeParameterNodes(child, parameterId);
+        }
+    }
 }
 
 juce::ValueTree findParameterNode (const juce::ValueTree& state,
@@ -184,22 +197,6 @@ void migrate (juce::ValueTree& state)
     if (! containsParameter(state, "temporalSpread"))
         appendParameterValue(state, "temporalSpread", 2.0f);       // 4 slots
 
-    // Schema 5 adds the Time Gate LFO. Keep the gate disabled for every
-    // existing session so loading an old project never changes its MIDI
-    // output. Missing nodes are also healed in schema-5 state blobs because
-    // hosts, hand-authored presets, and early development builds may save a
-    // partial APVTS tree.
-    if (! containsParameter(state, "timeGateEnabled"))
-        appendParameterValue(state, "timeGateEnabled", 0.0f);      // Off
-    if (! containsParameter(state, "timeGateWaveform"))
-        appendParameterValue(state, "timeGateWaveform", 2.0f);     // Square
-    if (! containsParameter(state, "timeGateRateMode"))
-        appendParameterValue(state, "timeGateRateMode", 0.0f);     // Sync
-    if (! containsParameter(state, "timeGateSyncDivision"))
-        appendParameterValue(state, "timeGateSyncDivision", 3.0f); // 1/4
-    if (! containsParameter(state, "timeGateRateHz"))
-        appendParameterValue(state, "timeGateRateHz", 1.0f);
-
     // State blobs are untrusted input. Clamp every choice touched by this
     // migration before APVTS publishes it to parameter atomics.
     const auto sanitizeChoice = [&state] (const char* id, int maximum, int fallback)
@@ -218,10 +215,6 @@ void migrate (juce::ValueTree& state)
     sanitizeChoice("clockSource", 1, 0);
     sanitizeChoice("gridDivision", 3, 2);
     sanitizeChoice("temporalSpread", 4, 2);
-    sanitizeChoice("timeGateEnabled", 1, 0);
-    sanitizeChoice("timeGateWaveform", 4, 2);
-    sanitizeChoice("timeGateRateMode", 1, 0);
-    sanitizeChoice("timeGateSyncDivision", 6, 3);
 
     const auto sanitizeNumeric = [&state] (const char* id,
                                            float minimum, float maximum,
@@ -240,7 +233,14 @@ void migrate (juce::ValueTree& state)
     sanitizeNumeric("maxAttacksPerStep", 1.0f, 16.0f, 4.0f, true);
     sanitizeNumeric("maxActiveVoices", 1.0f, 16.0f, 16.0f, true);
     sanitizeNumeric("gatePercent", 5.0f, 100.0f, 70.0f, false);
-    sanitizeNumeric("timeGateRateHz", 0.05f, 20.0f, 1.0f, false);
+    // Schema 6 retires the short-lived schema-5 gate experiment completely.
+    // Remove only those exact obsolete IDs; every established parameter and
+    // root routing property remains untouched.
+    removeParameterNodes(state, "timeGateEnabled");
+    removeParameterNodes(state, "timeGateWaveform");
+    removeParameterNodes(state, "timeGateRateMode");
+    removeParameterNodes(state, "timeGateSyncDivision");
+    removeParameterNodes(state, "timeGateRateHz");
 
     state.setProperty("cosmicMicrowaveSchema", currentSchema, nullptr);
 }

@@ -359,7 +359,6 @@ void CrowdTimeField::clearVoiceState() noexcept
 void CrowdTimeField::reset() noexcept
 {
     clearVoiceState();
-    externalGateOpen_ = true;
     config_ = {};
     domainInitialised_ = false;
     lastHostPrimary_ = false;
@@ -434,12 +433,10 @@ bool CrowdTimeField::domainChanged (const Config& config,
         || std::abs(actualSeconds - expectedSeconds) > toleranceSeconds;
 }
 
-int CrowdTimeField::rehydrate (const HeldVoice* held, int count,
-                               bool externalGateOpen) noexcept
+int CrowdTimeField::rehydrate (const HeldVoice* held, int count) noexcept
 {
     clearVoiceState();
     fairCursor_ = -1;
-    externalGateOpen_ = externalGateOpen;
 
     if (held == nullptr || count <= 0)
         return 0;
@@ -462,7 +459,6 @@ int CrowdTimeField::rehydrate (const HeldVoice* held, int count,
 
         voice.held = true;
         voice.pending = true;
-        voice.pendingFromExternalGate = ! externalGateOpen_;
         voice.sourceId = item.sourceId;
         voice.pendingSinceBeat = anchorBeat;
         voice.pendingDeadlineBeat = deferAnchor
@@ -549,17 +545,6 @@ void CrowdTimeField::handleTimedInput (const Config& config,
                                        double eventBeat,
                                        EventCollector& collector) noexcept
 {
-    if (event.type == InputEvent::Type::GateOpen
-        || event.type == InputEvent::Type::GateClose)
-    {
-        if (event.voiceId != -1 || event.sourceId != -1)
-            return;
-        setExternalGateOpen(config,
-                            event.type == InputEvent::Type::GateOpen,
-                            offset, eventBeat, collector);
-        return;
-    }
-
     if (! validIdentity(event.voiceId, event.sourceId))
         return;
     if (event.type != InputEvent::Type::On
@@ -588,11 +573,7 @@ void CrowdTimeField::handleTimedInput (const Config& config,
         }
 
         if (! voice.pending)
-        {
             setPending(event.voiceId, eventBeat, pendingLifetimeBeats(config));
-            if (! externalGateOpen_)
-                voice.pendingFromExternalGate = true;
-        }
         return;
     }
 
@@ -600,60 +581,12 @@ void CrowdTimeField::handleTimedInput (const Config& config,
         return;
 
     voice.held = false;
-    if (voice.pendingFromExternalGate)
-    {
-        clearPending(event.voiceId);
-        return;
-    }
     if (config.mode == Mode::Grid && voice.sounding)
         stopVoice(event.voiceId, offset, collector);
     // A pending Off remains as a one-shot for at least one beat; Ensemble extends
     // that lifetime to a full spread-lane cycle. This lets a tap shorter than the
     // quantisation wait produce a safe minimum gate. Ensemble voices already
     // sounding retain their fixed gate.
-}
-
-void CrowdTimeField::setExternalGateOpen (const Config& config, bool shouldOpen,
-                                          int offset, double eventBeat,
-                                          EventCollector& collector) noexcept
-{
-    if (externalGateOpen_ == shouldOpen)
-        return;
-
-    externalGateOpen_ = shouldOpen;
-    if (shouldOpen)
-        return;
-
-    // Requests that have not sounded yet belong to the closing window. Keep
-    // only currently held intent; completed taps must not emerge later as
-    // surprising ghost notes when a long LFO-low phase ends.
-    for (int voiceId = 0; voiceId < kMaxVoices; ++voiceId)
-    {
-        auto& voice = voices_[static_cast<std::size_t>(voiceId)];
-        if (! voice.pending)
-            continue;
-        if (voice.held)
-            voice.pendingFromExternalGate = true;
-        else
-            clearPending(voiceId);
-    }
-
-    // Timed mode owns at most sixteen sounding voices. A falling LFO edge can
-    // therefore release the complete set within the fixed 64-event contract.
-    // Held voices return to the fair pending pool and are admitted only on a
-    // later ordinary grid/lane tick after the gate opens again.
-    while (timedActiveCount_ > 0)
-    {
-        const int voiceId = timedActiveVoiceIds_[0];
-        auto& voice = voices_[static_cast<std::size_t>(voiceId)];
-        const bool shouldRequeue = voice.held;
-        stopVoice(voiceId, offset, collector);
-        if (shouldRequeue)
-        {
-            setPending(voiceId, eventBeat, pendingLifetimeBeats(config));
-            voice.pendingFromExternalGate = true;
-        }
-    }
 }
 
 void CrowdTimeField::stopVoice (int voiceId, int offset,
@@ -696,13 +629,9 @@ void CrowdTimeField::clearPending (int voiceId) noexcept
 {
     auto& voice = voices_[static_cast<std::size_t>(voiceId)];
     if (! voice.pending)
-    {
-        voice.pendingFromExternalGate = false;
         return;
-    }
 
     voice.pending = false;
-    voice.pendingFromExternalGate = false;
     voice.pendingDeadlineBeat = std::numeric_limits<double>::infinity();
     if (pendingCount_ > 0)
         --pendingCount_;
@@ -846,10 +775,8 @@ void CrowdTimeField::processGridTick (const Config& config,
                                       double tickBeat, int offset,
                                       EventCollector& collector) noexcept
 {
-    const int attackLimit = externalGateOpen_
-                          ? std::min(config.maxAttacksPerStep,
-                                     std::max(0, config.maxActive - activeCount_))
-                          : 0;
+    const int attackLimit = std::min(config.maxAttacksPerStep,
+                                     std::max(0, config.maxActive - activeCount_));
     const int activeLane = positiveModulo(stepIndex, config.spreadSlots);
     int selected = 0;
     int cursor = fairCursor_;
@@ -1103,15 +1030,9 @@ void CrowdTimeField::process (const Config& requestedConfig,
     int previousOffset = -1;
     for (int i = 0; i < inputCount; ++i)
     {
-        const bool participantEvent = inputs[i].type == InputEvent::Type::On
-                                   || inputs[i].type == InputEvent::Type::Off;
-        const bool gateEvent = inputs[i].type == InputEvent::Type::GateOpen
-                            || inputs[i].type == InputEvent::Type::GateClose;
-        if ((! participantEvent && ! gateEvent)
-            || (participantEvent
-                && ! validIdentity(inputs[i].voiceId, inputs[i].sourceId))
-            || (gateEvent
-                && (inputs[i].voiceId != -1 || inputs[i].sourceId != -1)))
+        if (! validIdentity(inputs[i].voiceId, inputs[i].sourceId)
+            || (inputs[i].type != InputEvent::Type::On
+                && inputs[i].type != InputEvent::Type::Off))
             continue;
 
         const int offset = clampedOffset(inputs[i].sampleOffset, clock.numSamples);

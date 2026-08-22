@@ -12,14 +12,14 @@ all visible controls are MIDI-only.
 
 ```
 +--------------------------------------------------------------------------+
-| COSMIC MICROWAVE   MIDI ONLY   v2.3.0   SOURCES | TOUCHES | NOTES | MPE VOICES |
+| COSMIC MICROWAVE   MIDI ONLY   v2.3.1   SOURCES | TOUCHES | NOTES | MPE VOICES |
 +----------------------+------------------------+--------------------------+
 | OSC INPUT            | SOURCE ROUTING         | SIMULATOR                |
 +----------------------+------------------------+--------------------------+
 | SOURCE MATRIX                  | TIME FIELD           | PITCH MAPPING    |
 | 256 IDs / 16 channel columns   | Flow/Grid/Ensemble   +------------------+
-|                                | clock/density/LFO    | MIDI ROUTING     |
-|                                | live P/A/M + gate    +------------------+
+|                                | clock/density/gate   | MIDI ROUTING     |
+|                                | live P/A/M           +------------------+
 |                                |                      | MIDI OUTPUT      |
 +-------------------------------------------------------+------------------+
 ```
@@ -31,7 +31,7 @@ the routing controls stay together in the right column.
 
 The header identifies the device as **COSMIC MICROWAVE**, labels its role as
 **OSC / MIDI ROUTING**, shows a **MIDI ONLY** badge, and permanently displays the
-build-derived product version (for example **v2.3.0**). Four live metrics appear on
+build-derived product version (for example **v2.3.1**). Four live metrics appear on
 the right:
 
 - **SOURCES** - OSC or simulator source IDs with an active `finger0` touch.
@@ -127,7 +127,7 @@ system while keeping every source's single-touch lifecycle intact.
   Attacks receive a fixed gate; a source that remains held is queued for a later pulse.
   This is the default for new sessions.
 
-New 2.3 sessions use **Ensemble**, **Host**, **1/16**, four attacks per step, an active
+New 2.3.1 sessions use **Ensemble**, **Host**, **1/16**, four attacks per step, an active
 limit of 16, a 70% gate, and a four-step spread. MPE can use only 15 member channels,
 so its effective active limit is 15 even if the control reads 16. State saved before
 schema 4 opens in **Flow**, avoiding an unexpected timing change in an older set.
@@ -159,37 +159,6 @@ In Ensemble, the instance's UDP port supplies a stable phase seed for the lane m
 Zones that reuse the same source IDs on different ports are therefore decorrelated
 instead of all attacking on the same host tick. A pending short tap remains eligible
 for at least one full lane cycle before it can expire.
-
-### Time Gate LFO
-
-The compact **LFO GATE** row rhythmically opens and closes scheduled OSC note flow.
-It is available only in **Grid** and **Ensemble**. In **Flow**, the controls are
-disabled and the status reads **LFO BYPASS**, because Flow remains the exact direct
-OSC-to-MIDI path. New and migrated sessions start with the LFO **Off**.
-
-- **LFO** enables the gate.
-- **Waveform** offers **Sine**, **Triangle**, **Square**, **Ramp Up**, and
-  **Ramp Down**. Square is the default.
-- **Rate mode** selects **Sync** or **Hz**.
-- **Sync rate** describes one complete LFO cycle: **2 Bars**, **1 Bar**, **1/2**,
-  **1/4**, **1/8**, **1/16**, or **1/32**. The default is **1/4**.
-- **Hz rate** covers **0.05..20 Hz** and defaults to **1.00 Hz**.
-
-The Time Field card's header chip reports **LFO OFF**, **LFO BYPASS**, **LFO OPEN**,
-or **LFO HOLD**, with a phase indicator. In Sync mode, a valid playing host PPQ
-timeline supplies the phase while the Time Field clock is **Host**. **Internal** or an
-unavailable host uses the process-wide monotonic clock and Internal BPM. Hz mode always
-derives phase from absolute
-process-wide monotonic seconds, keeping separate instances on the same wall-clock
-reference.
-
-Closing the gate releases every currently sounding Time Field OSC voice with its
-ordinary source-owned Note Off at the exact LFO edge. A still-held source remains
-pending. Opening the gate does not fire all held sources immediately: each waits for
-its next normal Grid boundary or Ensemble lane. The plugin continues to consume OSC
-On/Off and watchdog state while closed, so an Off cancels a pending short tap instead
-of creating a later ghost note. Explicit Off, watchdog release, Panic, and unchanged
-host MIDI thru are never blocked by this LFO.
 
 ### Live status
 
@@ -310,8 +279,7 @@ a sender disconnect, a routing change, or any suspected missing `off` packet.
 2. Set the instance's UDP port, for example `6060` for Zone A and `6061` for Zone B.
 3. Choose **Normal MIDI -> Per source 1-16** for channel-separated routing, or choose
    **MPE MIDI** for per-note expression.
-4. Leave **Ensemble / Host / 1/16** for the starting crowd-control preset, with
-   **LFO GATE Off**. Enable the LFO only after the basic route is verified, or use
+4. Leave **Ensemble / Host / 1/16** for the starting crowd-control preset, or use
    Flow while checking the raw end-to-end route.
 5. Select the port-named virtual destination for the clearest Ableton routing.
 6. Confirm the observed zone, Time Field status, source count, activity map, and

@@ -23,7 +23,7 @@ Audience controls map directly to MIDI:
 Normal MIDI can route every source deterministically across Channels 1-16. MPE instead
 allocates one member channel per active source touch for isolated expression.
 
-Cosmic Microwave 2.3 does not produce sound. It keeps a silent stereo instrument shell
+Cosmic Microwave 2.3.1 does not produce sound. It keeps a silent stereo instrument shell
 so Ableton can place it like the previous product and reopen existing sessions. The
 actual sound comes from instruments receiving its MIDI.
 
@@ -90,7 +90,7 @@ Useful CMake options:
   targets to the user VST3 folder. Set it to `OFF` for CI or a build-only workflow.
 - **`AUDIENCE_SYNTH_BUILD_TESTS`** - defaults to `ON` and builds the MIDI mapping,
   scale, MPE, OSC bridge, finger-router, audience-model, Tonal/Atomic pitch-map,
-  Atomic integration, Time Field, Time Gate LFO, timed MIDI integration, catalog, and
+  Atomic integration, Time Field, timed MIDI integration, catalog, and
   state-migration tests.
 
 The internal CMake target is still named `AudienceHarmonicSynth` for compatibility;
@@ -123,14 +123,13 @@ octaves. Select **Tonal** in **PITCH MAPPING** if the first test should use a fa
 12-TET scale such as Major. Normal MIDI rounds Atomic targets to the nearest semitone;
 MPE sends the exact target as a base note plus per-note pitch bend.
 
-New 2.3 sessions also begin with **Ensemble / Host / 1/16**, four attacks per step,
+New 2.3.1 sessions also begin with **Ensemble / Host / 1/16**, four attacks per step,
 16 active voices, a 70% gate, and a four-step spread. This is the performance preset:
 attacks from freely timed phones enter a shared grid and are distributed fairly. In
 MPE, the effective active limit is 15 because an MPE zone has 15 member channels.
 Projects saved before state schema 4 migrate to **Flow**, preserving their earlier
-direct timing. The 2.3 **Time Gate LFO** begins **Off** in every new or migrated state;
-enable it later in Grid or Ensemble if the crowd stream should alternate between
-musical open and hold windows.
+direct timing. Schema-5 input remains compatible; schema 6 discards its retired
+experimental fields during upgrade.
 
 If the counters move but the receiver does not, the OSC-to-MIDI path is working and
 the remaining issue is destination or receiver routing. See

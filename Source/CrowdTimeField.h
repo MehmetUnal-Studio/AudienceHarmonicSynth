@@ -70,10 +70,7 @@ public:
 
     struct InputEvent
     {
-        // GateOpen/GateClose are global Time Field control events. They carry
-        // no voice identity and are ordered in the same sample timeline as
-        // participant On/Off events.
-        enum class Type : std::uint8_t { On, Off, GateOpen, GateClose };
+        enum class Type : std::uint8_t { On, Off };
 
         Type type = Type::On;
         int voiceId = -1;
@@ -157,13 +154,11 @@ public:
     // Replaces voice state with the authoritative held set while retaining the
     // clock/config domain accepted by the last process() call. Held Flow voices
     // retrigger in bounded batches; Grid/Ensemble voices enter their next grid.
-    int rehydrate (const HeldVoice* held, int count,
-                   bool externalGateOpen = true) noexcept;
+    int rehydrate (const HeldVoice* held, int count) noexcept;
 
     int getPendingCount() const noexcept { return pendingCount_; }
     int getActiveCount() const noexcept { return activeCount_; }
     std::uint32_t getMergedCount() const noexcept { return mergedCount_; }
-    bool isExternalGateOpen() const noexcept { return externalGateOpen_; }
 
 private:
     struct VoiceState
@@ -171,7 +166,6 @@ private:
         bool held = false;
         bool sounding = false;
         bool pending = false;
-        bool pendingFromExternalGate = false;
         bool releaseReservedThisBlock = false;
         int sourceId = -1;
         double pendingSinceBeat = 0.0;
@@ -212,8 +206,6 @@ private:
                        const InputEvent*, int, EventCollector&) noexcept;
     void handleTimedInput (const Config&, const InputEvent&, int,
                            double, EventCollector&) noexcept;
-    void setExternalGateOpen (const Config&, bool, int, double,
-                              EventCollector&) noexcept;
     void processGateReleases (const Config&, double, int,
                               EventCollector&) noexcept;
     void processPendingExpiry (double) noexcept;
@@ -251,7 +243,6 @@ private:
     double nextGateEndBeat_ = std::numeric_limits<double>::infinity();
     double nextPendingExpiryBeat_ = std::numeric_limits<double>::infinity();
     bool pendingAnchorDeferred_ = false;
-    bool externalGateOpen_ = true;
     std::uint32_t mergedCount_ = 0;
     std::uint32_t droppedMotionCount_ = 0;
 };
