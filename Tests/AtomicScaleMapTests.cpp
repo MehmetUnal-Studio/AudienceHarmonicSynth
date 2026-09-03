@@ -98,7 +98,7 @@ int main()
         && approximately(microtone.centsFromNearestMidi, 0.5)
         && ! approximately(microtone.frequencyHz,
                            AtomicScaleMap::midiToFrequencyHz(microtone.midiNote), 1.0e-6),
-        "pitch exposes nearest Normal MIDI note and exact MPE microtonal frequency", failed);
+        "pitch exposes nearest Notes Only note plus exact catalog metadata", failed);
 
     const auto degreeSnapshot = map.getDegree(2);
     const double oldRootHz = map.getScaleFrequencyHz(0);

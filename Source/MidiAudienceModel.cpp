@@ -1,15 +1,25 @@
 #include "MidiAudienceModel.h"
+#include "SourceQualityController.h"
 
 #include <cmath>
+#include <limits>
 
 static_assert (MidiAudienceModel::MAX_SOURCES == SeatEventSink::MAX_OSC_SOURCES,
                "The audience model and OSC parser must share one source range");
+static_assert (MidiAudienceModel::MAX_SOURCES
+                   == SourceQualityController::MAX_SOURCES,
+               "The audience model and quality controller must share one source range");
+static_assert (MidiAudienceModel::MAX_FINGERS
+                   == SourceQualityController::MAX_FINGERS,
+               "The audience model and quality controller must share one finger range");
 
 MidiAudienceModel::MidiAudienceModel (OscFingerRouter& destination,
-                                      MonotonicClock clock) noexcept
+                                      MonotonicClock clock,
+                                      SourceQualityController* quality) noexcept
     : router(destination),
       monotonicClock(clock != nullptr ? clock
-                                      : &MidiAudienceModel::systemMonotonicMilliseconds)
+                                      : &MidiAudienceModel::systemMonotonicMilliseconds),
+      qualityController(quality)
 {
     for (auto& source : sources)
     {
@@ -43,6 +53,11 @@ void MidiAudienceModel::setFingerX (int, int sourceId, int finger, float xNorm) 
         return;
 
     const juce::SpinLock::ScopedLockType lock(producerLock);
+    if (! isSourceAdmittedLocked(sourceId))
+    {
+        incrementSaturating(capacityDroppedEvents);
+        return;
+    }
     setFingerXLocked(sourceId, finger, clampNormalized(xNorm));
 }
 
@@ -52,6 +67,11 @@ void MidiAudienceModel::setFingerY (int, int sourceId, int finger, float yNorm) 
         return;
 
     const juce::SpinLock::ScopedLockType lock(producerLock);
+    if (! isSourceAdmittedLocked(sourceId))
+    {
+        incrementSaturating(capacityDroppedEvents);
+        return;
+    }
     setFingerYLocked(sourceId, finger, clampNormalized(yNorm));
 }
 
@@ -61,6 +81,11 @@ void MidiAudienceModel::setFingerOn (int, int sourceId, int finger, bool on) noe
         return;
 
     const juce::SpinLock::ScopedLockType lock(producerLock);
+    if (! isSourceAdmittedLocked(sourceId))
+    {
+        incrementSaturating(capacityDroppedEvents);
+        return;
+    }
     setFingerOnLocked(sourceId, finger, on);
 }
 
@@ -73,8 +98,15 @@ void MidiAudienceModel::setLiveFingerX (
     const auto bit = static_cast<std::uint16_t>(
         1u << static_cast<unsigned int>(finger));
     const juce::SpinLock::ScopedLockType lock(producerLock);
+    if (! isSourceAdmittedLocked(sourceId))
+    {
+        incrementSaturating(capacityDroppedEvents);
+        return;
+    }
     auto& state = sources[(size_t) sourceId];
     const auto now = monotonicClock();
+    if (qualityController != nullptr)
+        qualityController->observeU(sourceId, finger, now);
     state.lastLiveSourceActivityMs.store(now, std::memory_order_release);
     state.hasLiveSourceActivity.store(true, std::memory_order_release);
     if ((state.liveTrackedFingerMask.load(std::memory_order_acquire) & bit) != 0)
@@ -92,8 +124,15 @@ void MidiAudienceModel::setLiveFingerY (
     const auto bit = static_cast<std::uint16_t>(
         1u << static_cast<unsigned int>(finger));
     const juce::SpinLock::ScopedLockType lock(producerLock);
+    if (! isSourceAdmittedLocked(sourceId))
+    {
+        incrementSaturating(capacityDroppedEvents);
+        return;
+    }
     auto& state = sources[(size_t) sourceId];
     const auto now = monotonicClock();
+    if (qualityController != nullptr)
+        qualityController->observeV(sourceId, finger, now);
     state.lastLiveSourceActivityMs.store(now, std::memory_order_release);
     state.hasLiveSourceActivity.store(true, std::memory_order_release);
     if ((state.liveTrackedFingerMask.load(std::memory_order_acquire) & bit) != 0)
@@ -111,8 +150,20 @@ void MidiAudienceModel::setLiveFingerOn (
     const auto bit = static_cast<std::uint16_t>(
         1u << static_cast<unsigned int>(finger));
     const juce::SpinLock::ScopedLockType lock(producerLock);
+    if (! isSourceAdmittedLocked(sourceId))
+    {
+        incrementSaturating(capacityDroppedEvents);
+        return;
+    }
     auto& state = sources[(size_t) sourceId];
     const auto now = monotonicClock();
+    if (qualityController != nullptr)
+    {
+        if (on)
+            qualityController->observeOn(sourceId, finger, now);
+        else
+            qualityController->observeOff(sourceId, finger, now);
+    }
     state.lastLiveSourceActivityMs.store(now, std::memory_order_release);
     state.hasLiveSourceActivity.store(true, std::memory_order_release);
 
@@ -206,7 +257,8 @@ int MidiAudienceModel::expireStaleLiveTouches (std::uint32_t timeoutMs) noexcept
     int expiredTotal = 0;
 
     const juce::SpinLock::ScopedLockType lock(producerLock);
-    for (int sourceId = 0; sourceId < MAX_SOURCES; ++sourceId)
+    const int admittedSources = sourceCapacity.load(std::memory_order_relaxed);
+    for (int sourceId = 0; sourceId < admittedSources; ++sourceId)
     {
         auto& state = sources[(size_t) sourceId];
         const auto active = state.activeFingerMask.load(std::memory_order_acquire);
@@ -260,7 +312,9 @@ int MidiAudienceModel::expireStaleLiveTouches (std::uint32_t timeoutMs) noexcept
 
             state.liveActivityMs[(size_t) finger].store(0,
                                                          std::memory_order_release);
-            router.pushOn(sourceId, finger, false);
+            if (qualityController != nullptr)
+                qualityController->observeWatchdogCancel(sourceId, finger, now);
+            router.pushCancel(sourceId, finger);
         }
     }
 
@@ -289,6 +343,8 @@ void MidiAudienceModel::clear() noexcept
     activeSourceCount.store(0, std::memory_order_release);
     activeFingerCount.store(0, std::memory_order_release);
     lastActiveSourceId.store(-1, std::memory_order_release);
+    if (qualityController != nullptr)
+        qualityController->clearLiveState();
     router.requestReset();
 }
 
@@ -340,6 +396,36 @@ int MidiAudienceModel::getLastActiveSourceId() const noexcept
     return lastActiveSourceId.load(std::memory_order_acquire);
 }
 
+int MidiAudienceModel::setSourceCapacity (int newCapacity) noexcept
+{
+    newCapacity = juce::jlimit(1, MAX_SOURCES, newCapacity);
+
+    const juce::SpinLock::ScopedLockType lock(producerLock);
+    const int previousCapacity = sourceCapacity.load(std::memory_order_relaxed);
+    if (newCapacity == previousCapacity)
+        return 0;
+
+    int releasedFingers = 0;
+    if (newCapacity < previousCapacity)
+    {
+        // The public limit is published only after canonical cleanup. Writers
+        // take this same lock and therefore either complete before retirement
+        // or observe the new limit and count a controlled capacity drop.
+        for (int sourceId = newCapacity; sourceId < previousCapacity; ++sourceId)
+            releasedFingers += retireSourceLocked(sourceId);
+
+        if (qualityController != nullptr)
+            qualityController->clearLiveStateForSources(newCapacity,
+                                                        previousCapacity);
+
+        if (lastActiveSourceId.load(std::memory_order_relaxed) >= newCapacity)
+            lastActiveSourceId.store(-1, std::memory_order_release);
+    }
+
+    sourceCapacity.store(newCapacity, std::memory_order_release);
+    return releasedFingers;
+}
+
 int MidiAudienceModel::getRecentLiveSourceCount (std::uint32_t windowMs) const noexcept
 {
     if (windowMs == 0)
@@ -348,8 +434,10 @@ int MidiAudienceModel::getRecentLiveSourceCount (std::uint32_t windowMs) const n
     windowMs = juce::jmin(windowMs, std::uint32_t { 0x7fffffffu });
     const auto now = monotonicClock();
     int count = 0;
-    for (const auto& source : sources)
+    const int admittedSources = sourceCapacity.load(std::memory_order_acquire);
+    for (int sourceId = 0; sourceId < admittedSources; ++sourceId)
     {
+        const auto& source = sources[(size_t) sourceId];
         if (! source.hasLiveSourceActivity.load(std::memory_order_acquire))
             continue;
 
@@ -388,6 +476,59 @@ bool MidiAudienceModel::validSource (int sourceId) noexcept
 bool MidiAudienceModel::validFinger (int finger) noexcept
 {
     return finger >= 0 && finger < MAX_FINGERS;
+}
+
+void MidiAudienceModel::incrementSaturating (
+    std::atomic<std::uint32_t>& counter) noexcept
+{
+    auto current = counter.load(std::memory_order_relaxed);
+    while (current != std::numeric_limits<std::uint32_t>::max())
+    {
+        if (counter.compare_exchange_weak(current, current + 1,
+                                          std::memory_order_relaxed,
+                                          std::memory_order_relaxed))
+            return;
+    }
+}
+
+bool MidiAudienceModel::isSourceAdmittedLocked (int sourceId) const noexcept
+{
+    return sourceId < sourceCapacity.load(std::memory_order_relaxed);
+}
+
+int MidiAudienceModel::retireSourceLocked (int sourceId) noexcept
+{
+    auto& state = sources[(size_t) sourceId];
+    const auto active = state.activeFingerMask.load(std::memory_order_acquire);
+    int releasedFingers = 0;
+
+    // setFingerOnLocked updates aggregate counts and publishes the ordered Off
+    // through the router. Its bounded FIFO requests a safety reset if an Off
+    // cannot be enqueued, so a capacity shrink cannot leave a stuck note.
+    for (int finger = 0; finger < MAX_FINGERS; ++finger)
+    {
+        const auto bit = static_cast<std::uint16_t>(
+            1u << static_cast<unsigned int>(finger));
+        if ((active & bit) == 0)
+            continue;
+
+        setFingerOnLocked(sourceId, finger, false);
+        ++releasedFingers;
+    }
+
+    state.x.store(0.0f, std::memory_order_relaxed);
+    state.y.store(0.0f, std::memory_order_relaxed);
+    for (auto& value : state.fingerX)
+        value.store(0.0f, std::memory_order_relaxed);
+    for (auto& value : state.fingerY)
+        value.store(0.0f, std::memory_order_relaxed);
+    for (auto& value : state.liveActivityMs)
+        value.store(0, std::memory_order_relaxed);
+    state.lastLiveSourceActivityMs.store(0, std::memory_order_relaxed);
+    state.hasLiveSourceActivity.store(false, std::memory_order_release);
+    state.activeFingerMask.store(0, std::memory_order_release);
+    state.liveTrackedFingerMask.store(0, std::memory_order_release);
+    return releasedFingers;
 }
 
 float MidiAudienceModel::clampNormalized (float value) noexcept

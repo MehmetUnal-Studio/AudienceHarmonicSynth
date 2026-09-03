@@ -1,4 +1,4 @@
-# Cosmic Microwave v2.5 Capture/Replay Chaos Lab
+# Cosmic Microwave v2.8.0 Capture/Replay Chaos Lab
 
 `tools/cosmic-chaos-lab.mjs`, Cosmic Microwave OSC trafiğini kaydetmek, aynı zaman
 akışıyla yeniden oynatmak ve kontrollü ağ hataları üretmek için bağımsız bir Node.js

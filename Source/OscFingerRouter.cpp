@@ -20,7 +20,12 @@ void OscFingerRouter::pushY (int sourceId, int finger, float value) noexcept
 
 void OscFingerRouter::pushOn (int sourceId, int finger, bool on) noexcept
 {
-    pushLifecycle(sourceId, finger, on);
+    pushLifecycle(sourceId, finger, on ? Event::On : Event::Off);
+}
+
+void OscFingerRouter::pushCancel (int sourceId, int finger) noexcept
+{
+    pushLifecycle(sourceId, finger, Event::Cancel);
 }
 
 int OscFingerRouter::voiceIndex (int sourceId, int finger) noexcept
@@ -109,16 +114,22 @@ void OscFingerRouter::pushMotion (Event::Type type, int sourceId, int finger,
                                             std::memory_order_acq_rel,
                                             std::memory_order_acquire);
         incrementSaturating(droppedEvents);
+        incrementSaturating(droppedMotionEvents);
     }
 }
 
-void OscFingerRouter::pushLifecycle (int sourceId, int finger, bool on) noexcept
+void OscFingerRouter::pushLifecycle (int sourceId, int finger,
+                                     Event::Type lifecycleType) noexcept
 {
     if (sourceId < 0 || sourceId >= MAX_SOURCES
-        || finger < 0 || finger >= MAX_FINGERS)
+        || finger < 0 || finger >= MAX_FINGERS
+        || (lifecycleType != Event::On
+            && lifecycleType != Event::Off
+            && lifecycleType != Event::Cancel))
         return;
 
     const juce::SpinLock::ScopedLockType lock(producerLock);
+    const bool on = lifecycleType == Event::On;
     auto& state = motionStates[(size_t) voiceIndex(sourceId, finger)];
     const auto epoch = nextEpoch(state.producerEpoch);
     state.producerEpoch = epoch;
@@ -142,7 +153,7 @@ void OscFingerRouter::pushLifecycle (int sourceId, int finger, bool on) noexcept
                                       state.latestY.load(std::memory_order_acquire) },
                                     epoch };
 
-    group[(size_t) count++] = { { (juce::uint8) (on ? Event::On : Event::Off),
+    group[(size_t) count++] = { { (juce::uint8) lifecycleType,
                                   (juce::uint8) finger,
                                   (juce::uint16) sourceId,
                                   on ? 1.0f : 0.0f },
@@ -151,6 +162,7 @@ void OscFingerRouter::pushLifecycle (int sourceId, int finger, bool on) noexcept
     if (! enqueueLifecycleGroup(group.data(), count))
     {
         incrementSaturating(droppedEvents, (uint32_t) count);
+        incrementSaturating(droppedLifecycleEvents, (uint32_t) count);
         // The canonical MidiAudienceModel is updated before it calls us. A
         // reset therefore recovers the exact held/released state without
         // allowing a dropped lifecycle to leave a stuck note.
@@ -222,7 +234,8 @@ int OscFingerRouter::drain (Event* destination, int maxEvents) noexcept
             auto copyLifecycle = [&] (const QueuedEvent& queued) noexcept
             {
                 const auto type = (Event::Type) queued.event.type;
-                if (type == Event::On || type == Event::Off)
+                if (type == Event::On || type == Event::Off
+                    || type == Event::Cancel)
                 {
                     const int voice = voiceIndex((int) queued.event.sourceId,
                                                  (int) queued.event.finger);

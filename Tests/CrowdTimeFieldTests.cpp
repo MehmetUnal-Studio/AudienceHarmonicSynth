@@ -186,6 +186,27 @@ int main()
                    && output.events[1].sampleOffset == 20,
                "invalid identity/type is ignored before valid FIFO-order checks");
     }
+    {
+        CrowdTimeField field;
+        const auto config = configFor(CrowdTimeField::Mode::Flow);
+        const auto frame = hostFrame(48000.0, 64);
+        const CrowdTimeField::InputEvent events[] {
+            input(CrowdTimeField::InputEvent::Type::On, 4, 0, 10),
+            input(CrowdTimeField::InputEvent::Type::Cancel, 4, 0, 20),
+            input(CrowdTimeField::InputEvent::Type::On, 4, 0, 30)
+        };
+        CrowdTimeField::OutputBlock output;
+        field.process(config, frame, events, 3, output);
+        expect(! output.resetRequested && output.count == 3
+                   && output.events[0].type == CrowdTimeField::OutputEvent::Type::Attack
+                   && output.events[0].sampleOffset == 10
+                   && output.events[1].type == CrowdTimeField::OutputEvent::Type::Cancel
+                   && output.events[1].sampleOffset == 20
+                   && output.events[2].type == CrowdTimeField::OutputEvent::Type::Attack
+                   && output.events[2].sampleOffset == 30
+                   && output.activeCount == 1,
+               "source cancel is mandatory, immediate and FIFO-ordered before a fresh On");
+    }
 
     // Zero and one-sample host blocks must never produce a negative timestamp or
     // divide by zero. A zero-sample Flow block still consumes lifecycle state.
@@ -328,6 +349,39 @@ int main()
                "timed held voice samples motion at later boundaries only");
     }
 
+    // Notes Only owns the audible tail independently from Grid's admission
+    // lease. Once that final tail ends, the next queued held source must be able
+    // to attack; the expired held source remains one-shot and is not requeued.
+    {
+        CrowdTimeField field;
+        auto config = configFor(CrowdTimeField::Mode::Grid);
+        config.maxAttacksPerStep = 1;
+        config.maxActive = 1;
+        auto frame = hostFrame(1000.0, 100);
+        const CrowdTimeField::InputEvent events[] {
+            input(CrowdTimeField::InputEvent::Type::On, 0, 0, 0),
+            input(CrowdTimeField::InputEvent::Type::On, 1, 0, 0)
+        };
+        CrowdTimeField::OutputBlock first;
+        field.process(config, frame, events, 2, first);
+        const int firstVoice = CrowdTimeField::voiceIdFor(0, 0);
+        const bool firstExpired = field.expireAudibleVoice(firstVoice);
+        const bool duplicateRejected = ! field.expireAudibleVoice(firstVoice)
+                                    && ! field.expireAudibleVoice(-1);
+
+        frame = nextFrame(frame, 50);
+        CrowdTimeField::OutputBlock second;
+        field.process(config, frame, nullptr, 0, second);
+        expect(countType(first, CrowdTimeField::OutputEvent::Type::Attack) == 1
+                   && first.events[0].sourceId == 0
+                   && first.activeCount == 1 && first.pendingCount == 1
+                   && firstExpired && duplicateRejected
+                   && countType(second, CrowdTimeField::OutputEvent::Type::Attack) == 1
+                   && firstOffset(second, CrowdTimeField::OutputEvent::Type::Attack, 1) == 25
+                   && field.getActiveCount() == 1 && field.getPendingCount() == 0,
+               "expired Grid tail releases capacity for the next held source exactly once");
+    }
+
     // Fair selection rotates over held voices, and fixed gates requeue them.
     {
         CrowdTimeField field;
@@ -361,7 +415,7 @@ int main()
     }
 
     // A 100% gate releases before its same-boundary held retrigger. Stable event
-    // order is essential because the consumer is a stateful MPE allocator.
+    // order is essential because the consumer owns stateful MIDI lifecycles.
     {
         CrowdTimeField field;
         auto config = configFor(CrowdTimeField::Mode::Ensemble);

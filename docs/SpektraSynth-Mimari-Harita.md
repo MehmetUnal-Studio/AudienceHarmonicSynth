@@ -1,20 +1,20 @@
-# Cosmic Microwave 2.5.0 Mimari Harita
+# Cosmic Microwave 2.8.0 Mimari Harita
 
-Bu belge, `AudienceHarmonicSynth` hedefinin güncel 2.5.0 kaynak sınırına göre yeniden
+Bu belge, `AudienceHarmonicSynth` hedefinin güncel 2.8.0 kaynak sınırına göre yeniden
 yazılmıştır. Eski SpektraSynth mimarisinin ses üretim yolu artık bayrak ürünün çalışma
 zamanına dahil değildir. Hangi dosyanın ürüne dahil olduğunu belirleyen otorite
 `CMakeLists.txt` içindeki `target_sources(AudienceHarmonicSynth ...)` listesidir.
 
 ## 1. Genel bakış
 
-Cosmic Microwave, izleyici sunucusundan OSC/UDP alan ve Normal MIDI veya MPE üreten
+Cosmic Microwave, izleyici sunucusundan OSC/UDP alan ve Normal Notes Only MIDI üreten
 tek-dokunuş odaklı bir JUCE ürünüdür.
 
 Temel çalışma modeli:
 
 ```text
-önceden ayrılmış Zone A -> UDP 6060 -> Cosmic Microwave 1 -> MIDI
-önceden ayrılmış Zone B -> UDP 6061 -> Cosmic Microwave 2 -> MIDI
+önceden ayrılmış Zone A -> UDP 6062 -> Cosmic Microwave 1 -> MIDI
+önceden ayrılmış Zone B -> UDP 6063 -> Cosmic Microwave 2 -> MIDI
 ```
 
 Her instance tek UDP portunu dinler ve kendi bağımsız MIDI kanal alanına sahiptir.
@@ -29,7 +29,7 @@ kimliği korunabilsin diye sessiz mono/stereo instrument bus sözleşmesi devam 
 
 | CMake hedefi | Ürün adı | Format | Rol |
 |---|---|---|---|
-| `AudienceHarmonicSynth` | Cosmic Microwave | VST3 + Standalone | Güncel tek-dokunuş Normal MIDI/MPE bayrak ürün. |
+| `AudienceHarmonicSynth` | Cosmic Microwave | VST3 + Standalone | Güncel tek-dokunuş Notes Only MIDI bayrak ürün. |
 | `AudienceHarmonicMidi` | Cosmic Microwave MIDI | VST3 + Standalone | Ayrı `MidiEngine` kullanan MIDI-effect. |
 | `AudienceMidiGenerator` | Cosmic Microwave MIDI Generator | VST3 | Scale correction/remap içeren Ableton odaklı MIDI-effect. |
 | `AudienceMidiDevice` | Cosmic Microwave MIDI Device | Standalone | Hafif UDP->MIDI uygulaması. |
@@ -78,22 +78,23 @@ veya dosya-formatı modülü yoktur.
 
 | Bileşen | Sorumluluk | Ana dosya |
 |---|---|---|
-| `AudienceProcessor` | APVTS, process lifecycle, MIDI thru, pitch map, touch durumu, Normal/MPE render, host/harici çıkış, state migration. | `PluginProcessor.*` |
-| `CosmicStateMigration` | Released 1.x'den schema 8'e kadar state'leri güvenli taşıma; eski state'lerde routing/Flow/Manual uyumluluğu. | `PluginStateMigration.*` |
+| `AudienceProcessor` | APVTS, process lifecycle, Note On/Off MIDI thru, pitch map, touch durumu, Notes Only render, host/harici çıkış, fresh A-H route allocation ve state migration. | `PluginProcessor.*` |
+| `CosmicFactoryPresets` | Zone A-H factory performance presetlerinin port/zone/performans baseline sabitleri. | `FactoryPresets.h` |
+| `CosmicStateMigration` | Released 1.x'den schema 11'e kadar state'leri güvenli taşıma; tarihsel schema-9 Notes Only coercion'ını, schema-10 Note Duration/Source Capacity ve schema-11 Same Note Tie fallback'ini koruma. | `PluginStateMigration.*` |
 | `AudienceEditor` | PERFORM/SHOW CONSOLE MIDI-only kontrol, izleme ve Venue Preflight arayüzü. | `PluginEditor.*` |
 | `OscBridge` | Paylaşımlı/exclusive UDP listener, strict OSC parse/validation, Expected Zone filtresi, değer clamp ve ownership/zone/traffic telemetrisi. | `OscBridge.*`, `OscWireFormat.h` |
-| `MidiAudienceModel` | 256 source için atomic UI/control snapshot, aktif `finger0` maskesi ve 3 saniyelik live-touch watchdog. | `MidiAudienceModel.*` |
-| `OscFingerRouter` | Ayrı lifecycle/motion FIFO'ları, On/Off önceliği ve latest U/V coalescing ile audio thread'e sabit kapasiteli aktarım. | `OscFingerRouter.*` |
+| `MidiAudienceModel` | Fiziksel 256 source için atomic UI/control snapshot, seçili 64/128/256 admission alanı, aktif `finger0` maskesi ve 3 saniyelik live-touch Cancel watchdog'u. | `MidiAudienceModel.*` |
+| `OscFingerRouter` | Ayrı lifecycle/motion FIFO'ları, On/Off/Cancel önceliği ve latest U/V coalescing ile audio thread'e sabit kapasiteli aktarım. | `OscFingerRouter.*` |
 | `CrowdTimeField` | Flow/Grid/Ensemble scheduling, host/monotonic clock çözümü, fairness, lane, gate ve telemetry. | `CrowdTimeField.*` |
 | `AdaptiveCrowdGovernor` | Son 8 saniyelik benzersiz live source ile held source yoğunluğunu yumuşatıp Grid/Ensemble admission profilini seçme. | `AdaptiveCrowdGovernor.*` |
 | `PressureAwareSafetyGovernor` | Ingress/queue/FIFO/deadline baskısından dört-state realtime güvenlik profili üretme. | `PressureAwareSafetyGovernor.*` |
 | `GlobalConductorHub` | En fazla 16 instance ve dört izole grupta process-local leader/yoğunluk/kota koordinasyonu. | `GlobalConductorHub.*` |
-| `CrowdExpressionMacros` | 256 sabit source üzerinden density, centroid X/Y ve motion CC snapshot'ı üretme. | `CrowdExpressionMacros.*` |
+| `CrowdExpressionMacros` | Legacy sabit-maliyetli analiz birimi; v2.7 product routing MIDI emission'ını kalıcı olarak kapalı tutar. | `CrowdExpressionMacros.*` |
 | `MidiPitchMap` | Yedi tonal 12-TET tablo ve normalize X lookup. | `MidiPitchMap.*` |
 | `AtomicScaleCatalog` | 29 element x 5 density için immutable, önceden üretilmiş degree katalogu. | `AtomicScaleCatalog.*`, `AtomicScaleCatalogData.h` |
-| `AtomicScaleMap` | En fazla 128 degree/768 pitch-step içeren exact-frequency lookup. | `AtomicScaleMap.*` |
-| `MpeMidiOutput` | Normal/MPE note ownership, CC, RPN/MCM, kanal allocation, ref-count ve safety reset. | `MpeMidiOutput.*` |
-| `Simulator` | UI thread üzerinde sahte source üretimi ve random movement. | `Simulator.*` |
+| `AtomicScaleMap` | En fazla 128 degree/768 pitch-step içeren lookup; runtime en yakın MIDI note'u kullanır. | `AtomicScaleMap.*` |
+| `MpeMidiOutput` | İsmi legacy kalan Notes Only ownership; sample-deadline Note Duration scheduler'ı, fixed/source channel, channel+note ref-count, bounded oldest steal, CancelVoice ve CC123/CC120 panic reset birimi; MPE/controller yolları runtime'da erişilemez. | `MpeMidiOutput.*` |
+| `Simulator` | UI thread üzerinde tek held test touch veya sabit kimlikli katılımcı havuzu; crowd üyeleri bounded Pad-style On/Off döngüsü üretir, yalnız aktif touch'lar opsiyonel hareket eder. | `Simulator.*` |
 
 ## 5. Uçtan uca veri akışı
 
@@ -122,9 +123,7 @@ OSC UDP callback                          Simulator / UI thread
                     /                 \
              MidiPitchMap       AtomicScaleMap
                             |
-                     MpeMidiOutput
-                            |
-            opsiyonel CrowdExpressionMacros CC
+          legacy-named MpeMidiOutput Notes Only
                       /                         \
              Host Only / Mirror       External Only / Mirror
              host MidiBuffer              external MIDI FIFO
@@ -133,7 +132,7 @@ OSC UDP callback                          Simulator / UI thread
                                       |
                           virtual / hardware output
 
-host MIDI input -> değişmeden MIDI thru (Output Off değilse), sonra seçili path'e gider
+host MIDI input -> yalnız Note On/Off MIDI thru (Output Off değilse), sonra seçili path'e gider
 audio buffer     -> sessiz uyumluluk çıkışı
 
 GlobalConductorHub -> process-local grup kotası (100 ms)
@@ -149,25 +148,26 @@ Chaos Lab          -> ayrı Node.js prosesi; plugin/audio thread dışı
 2. APVTS raw pointer değerlerinden Time Field ve Tonal `MidiPitchMap`
    veya Atomic `AtomicScaleMap` konfigürasyonunu günceller.
 3. Ingress/queue/FIFO/deadline snapshot'ını Safety Governor'dan geçirir ve hard
-   admission/motion/macro sınırlarını alır.
+   admission/motion sınırlarını alır.
 4. Held source ile son 8 saniyelik unique live source sayısının maksimumunu
    `AdaptiveCrowdGovernor` üzerinden geçirir; Adaptive ve timed mode seçiliyse soft
    attack/active/spread politikasını Time Field config'e uygular.
 5. Global Conductor snapshot'ı coherent ve fresh ise timed policy'yi instance kotasıyla
    sınırlar; değilse local politika kullanır.
-6. MIDI protokolü/kanal/zone/output path/route değişimlerini karşılaştırır.
+6. Notes Only routing/kanal/zone/output path/route değişimlerini karşılaştırır.
 7. Gerekirse safety reset üretir ve aktif OSC touch'larını yeniden kurmak üzere
    retrigger işaretler.
 8. Audio buffer'ı sessizler, host MIDI output buffer'ını yeniden kullanıma hazırlar.
-9. Output açıksa ve path host'u içeriyorsa host MIDI input'u değişmeden geçirir.
+9. Output açıksa ve path host'u içeriyorsa host MIDI input'unun yalnız Note On/Off
+   mesajlarını geçirir.
 10. Bir block'ta en fazla `min(64, max(1, block sample sayısı))` OSC lifecycle event'i
    drain eder. Flow hareket event'lerini doğrudan işler; Grid/Ensemble yalnız On/Off'u
    scheduler'a verir ve güncel U/V snapshot'ını grid sınırlarında örnekler.
 11. `CrowdTimeField`, direct veya sample-offset'li Attack/Release/SampleMotion istekleri
    üretir.
-12. Touch state değişimlerini `MpeMidiOutput::NoteEvent` dizisine çevirir.
-13. Normal MIDI veya MPE mesajlarını geçici üretim buffer'ına yazar; opsiyonel macro
-    tick'ini lifecycle sonrasına ekler.
+12. Touch state değişimlerini legacy isimli `MpeMidiOutput::NoteEvent` dizisine çevirir.
+13. Notes Only Note On/Off mesajlarını geçici üretim buffer'ına yazar; participant
+    controller, MPE veya Crowd Macro CC eklemez.
 14. Host Only/External Only/Mirror seçimine göre host buffer ve harici FIFO'yu ayrıştırır.
 
 ## 6. Kimlik modeli
@@ -224,21 +224,37 @@ Kritik invariant: **source 0, Channel 16'ya gider.**
 
 Canlı `finger0` touch source'un Normal MIDI kanalını kullanır.
 `normalNoteRefCounts[16 * 128]`, aynı channel/note'u tutan son
-semantic owner bırakana kadar fiziksel Note Off gönderilmesini erteler.
+scheduled owner deadline'a ulaşana veya safety Cancel alana kadar fiziksel Note Off
+gönderilmesini erteler.
 
-### 6.3 MPE kimliği
+Source Capacity yalnız admission alanını değiştirir; fiziksel MIDI kanal sayısı her
+zaman 16'dır:
 
-MPE kanalını source ID doğrudan belirlemez. Her aktif source touch bir member
-channel alır:
+| Source Capacity | Dense ID alanı | Source/channel |
+|---:|---:|---:|
+| 64 | `0..63` | 4 |
+| 128 | `0..127` | 8 |
+| 256 | `0..255` | 16 |
 
-| Zone | Master | Members |
-|---|---:|---|
-| Lower | 1 | 2..16 |
-| Upper | 16 | 1..15 |
+Out-of-capacity source drop-and-count edilir, modulo ile içeri alınmaz. Capacity
+shrink üst kimlikleri deterministik temizler; expand mevcut source-channel eşlemesini
+değiştirmez.
 
-15 member doluysa en yaşlı aktif MPE note önce düzgün biçimde bırakılır, sonra kanalı
-yeni source touch'a atanır. Free channel taraması round-robin'dir ve yeni bırakılan kanalı
-diğerlerinden sonra tekrar kullanır.
+### 6.3 Notes Only kimliği
+
+Her aktif source touch fixed channel veya yukarıdaki Per Source 1-16 kuralını kullanır.
+Aktif Time Field sınırı 16'dır; bu, 64/128/256 source admission alanından ve merkezi
+Note Duration tail kapasitesinden ayrıdır. U pitch'i, V yalnız yeni Note On velocity'sini
+belirler. Held V hareketi MIDI üretmez; held U mapped-note sınırı geçtiğinde yeni pitch
+için Note On yaratabilir ve eski pitch kendi deadline'ına kadar tail olarak yaşayabilir.
+
+Yeni her Note On `2n/4n/8n/16n/32n` seçiminden ve o andaki geçerli host BPM'den sample
+deadline hesaplar. Host BPM yoksa saved Internal BPM kullanılır. Daha sonraki tempo veya
+duration değişikliği eski deadline'ı değiştirmez; normal semantic Off tail'i erken
+kesmez. Aynı source/channel/note retrigger coalesce edilir. Sabit 4096-entry scheduler
+sessiz block'lar dahil her audio block'ta ilerler ve global/per-channel/per-source hard
+limitlerinde deterministik oldest steal uygular. Watchdog kaynaklı internal Cancel,
+Panic, route/transport reset ve capacity shrink safety cleanup tail'i hemen bitirebilir.
 
 ## 7. OSC ingress
 
@@ -259,7 +275,7 @@ diğerlerinden sonra tekrar kullanır.
 
 ### Port ownership
 
-`OscBridge::PortPolicy` Shared veya Exclusive'dir. Yeni schema-8 session Exclusive
+`OscBridge::PortPolicy` Shared veya Exclusive'dir. Schema-8 ve sonrası session Exclusive
 başlar: aynı process'teki ikinci owner `OWNERSHIP CONFLICT` alır ve bounded aralıkta
 yeniden dener. Schema 7 ve eski state Released davranışı korumak için Shared'a migrate
 eder. Shared modda maksimum 16 client vardır. Callback client listesini
@@ -304,7 +320,7 @@ Ortak root hesabı:
 root_midi = (root_octave + 1) * 12 + pitch_class
 ```
 
-Yeni session varsayılanı C2 (`36`), Atomic, Helium, Extended ve 4 octave'dır. Tonal
+Yeni session varsayılanı C2 (`36`), Atomic, Zinc, Core ve 4 octave'dır. Tonal
 seçildiğinde saklanan varsayılan scale Major'dır.
 
 Atomic katalog Hydrogen'dan Zinc'e uzanan 29 element içerir; uygun veri seti olmadığı
@@ -326,7 +342,8 @@ runtime target'ında derlenmez.
 Bunlar üst sınırdır; elementte daha az kullanılabilir çizgi varsa gerçek degree sayısı
 daha düşüktür. `AtomicScaleMap` degree bank'ini 1..6 octave tekrarlar ve en fazla
 `128 x 6 = 768` pitch step saklar. Atomic target için exact frequency, en yakın MIDI
-note ve bu note'a göre cents offset birlikte tutulur.
+note ve bu note'a göre cents offset metadata olarak birlikte tutulur. v2.7 runtime
+yalnız en yakın MIDI note'u gönderir; cents offset için Pitch Bend veya RPN üretmez.
 
 X her iki sistemde eşit genişlikli pitch-step bölgelerine bölünür; X=0 ilk, X=1 son
 geçerli step'i seçer. Üst MIDI sınırını aşan tablo güvenli biçimde truncate edilir.
@@ -348,13 +365,12 @@ yapmaz.
 | Mod | Davranış |
 |---|---|
 | Flow | On/Off'u block offset'inde doğrudan üretir; U/V mevcut hareket event hattından geçer. Timing kontrolleri bypass edilir. |
-| Grid | Attack'i seçili division sınırına kuyruğa alır; fair cursor ile pending voice seçer; attacks/step ve active limit uygular. Held note ordered Off ile, admission alan kısa tap minimum gate ile bırakılır. |
-| Ensemble | Source'u spread içindeki deterministik lane'e koyar, fixed gate uygular ve hâlâ held olan voice'u sonraki pulse için yeniden pending yapar. |
+| Grid | Attack'i seçili division sınırına kuyruğa alır; fair cursor ile pending voice seçer; attacks/step ve active limit uygular. Ordered Off semantic scheduled voice'ı bitirir, mevcut MIDI tail deadline'ını kesmez; admission alan kısa tap minimum gate alır. |
+| Ensemble | Source'u spread içindeki deterministik lane'e koyar, fixed gate uygular ve hâlâ held olan voice'u sonraki pulse için yeniden pending yapar. Same Note Tie ownership'ı korur; Retrigger her kabul edilen pulse'ta Note Off ardından Note On üretir. |
 
-Yeni 2.5.0 instance varsayılanları Ensemble, Host, 1/16, %70 gate ve Adaptive Crowd
-Governor'dır. Manual değerler attack 4, active 16 ve spread 4 olarak saklanır. MPE
-seçildiğinde her efektif aktif limit 15'e clamp edilir; çünkü Lower/Upper zone yalnız
-15 member channel sağlar. Schema 6 ve önceki session'lara Manual Governor atanır;
+Yeni 2.8.0 instance varsayılanları Flow, Host, 1/32, %100 gate, Same Note Tie ve Manual Crowd
+Governor'dır. Manual değerler attack 16, active 16 ve spread 16 olarak saklanır. Her
+efektif aktif limit ürün maksimumu olan 16'ya clamp edilir. Schema 6 ve önceki session'lara Manual Governor atanır;
 schema 4 öncesi session'lara ayrıca Flow eklenir ve mevcut doğrudan timing grid'e
 taşınmaz.
 
@@ -377,7 +393,7 @@ Inclusive profil tablosu:
 | 65-128 | 2 | 8 | 14 |
 | 129-256 | 2 | 16 | 16 |
 
-MPE'de Active sonucu 15'e clamp edilir. Density envelope 0.5 saniyede hızlı yükselir,
+Active sonucu en fazla 16'dır. Density envelope 0.5 saniyede hızlı yükselir,
 6 saniyede yavaş düşer; 0.5 saniyelik promotion hold, 4 saniyelik demotion hold ve
 %20 aşağı hysteresis band chatter'ını bastırır.
 
@@ -394,12 +410,12 @@ Bu Governor müzikal density Governor'ından bağımsızdır. 10 Hz kontrol snap
 validated ingress rate, lifecycle queue pressure, motion-drop delta, Time Field pending,
 external FIFO pressure/age ve process deadline ratio okunur. Profil:
 
-| State | Motion divisor | Attack cap | Active cap | Min spread | Admission | Macro |
-|---|---:|---:|---:|---:|---|---|
-| NORMAL | 1 | 16 | 16 | 1 | açık | açık |
-| HIGH | 2 | 8 | 12 | 2 | açık | açık |
-| CRITICAL | 4 | 2 | 8 | 4 | açık | kapalı |
-| EMERGENCY | 8 | 1 | 4 | 8 | kapalı | kapalı |
+| State | Motion divisor | Attack cap | Active cap | Min spread | Admission |
+|---|---:|---:|---:|---:|---|
+| NORMAL | 1 | 16 | 16 | 1 | açık |
+| HIGH | 2 | 8 | 12 | 2 | açık |
+| CRITICAL | 4 | 2 | 8 | 4 | açık |
+| EMERGENCY | 8 | 1 | 4 | 8 | kapalı |
 
 Yükselme anlıktır. Düşüş %15 hysteresis, state'e göre 2/3/5 saniye hold ve her hold'da
 yalnız bir basamak ile gerçekleşir. Invalid numeric/clock EMERGENCY'e fail-closed olur.
@@ -417,14 +433,12 @@ Audio thread tek coherent atomik policy snapshot'ı okur. Registration kaybı, i
 publication veya 1500 ms'den eski leader/allocation local policy'ye beklemeden fallback
 eder. Sistem network/cross-machine conductor değildir.
 
-### Crowd Expression macro'ları
+### Legacy Crowd Macro state
 
-`CrowdExpressionMacros`, seçili 5/10/20/30 Hz tick'te 256 sabit source slotunu tarar.
-Density, valid active centroid X/Y ve smoothed motion değerleri varsayılan CC20/21/22/23
-olarak Channel 1..16 veya Broadcast'a gönderilir. İlk/re-enabled tick tam snapshot,
-sonrakiler change-only'dir. Empty centroid MIDI 64'tür. Non-finite position centroid ve
-motion'dan çıkarılır. CRITICAL/EMERGENCY MIDI macro emission'ı durdurur; telemetry ve
-Off işleme sürer.
+`CrowdExpressionMacros` kaynak birimi ve `crowdMacro*` APVTS kimlikleri eski set/state
+uyumluluğu için korunur. v2.7 routing `effectiveEnabled=false` uygular; CC20/21/22/23
+veya başka bir Crowd Macro CC hiçbir profile'da çıkışa eklenmez. Schema-9 migration
+eski `crowdMacrosEnabled` değerini Off'a zorlar.
 
 ### Clock domain
 
@@ -462,45 +476,41 @@ eder, fakat her hareket paketi için FIFO event'i üretmez. Attack ve grid-bound
 best-effort hareket update'lerinden daha önceliklidir; source/touch ownership ile
 Normal MIDI channel kuralı değişmez.
 
-PENDING bekleyen attack, ACTIVE çalan scheduler voice sayısıdır. MERGED, kapasite
+PENDING bekleyen attack, ACTIVE çalan scheduler voice sayısıdır. MERGED, admission
+window'u dolan pending işi sayar; held niyet yenilenir, release edilmiş kısa tap
+expire olabilir. Paket kaybı değildir. Kapasite
 bulamayıp coalesce veya expire edilen scheduled work için saturating telemetry
 counter'ıdır. Herhangi bir CC, Crowd Energy değeri ya da başka MIDI mesajı üretmez.
+UI load hesabı raw slider veya yalnız Adaptive önerisini kullanmaz: audio thread,
+Manual/Adaptive -> Safety Governor -> Global Conductor -> block clamp zincirinden
+sonra kalan attacks/active/spread/admission politikasını tek packed `uint64` atomikte
+yayınlar. Message thread tek acquire-load ile aynı callback'e ait tutarlı snapshot
+okur.
 
 ## 10. MIDI emission
 
-### Normal MIDI
+### Notes Only
 
-- Note On velocity doğrudan V/Y'den gelir (`1..127`).
-- CC74 doğrudan U/X'ten gelir (`0..127`).
-- CC11 doğrudan V/Y'den gelir (`0..127`).
-- OSC touch'ları için pitch wheel gönderilmez.
-- Tonal map exact 12-TET note üretir; Atomic map exact target'ın en yakın semitone'unu
-  gönderir.
-- Fixed Channel veya Per source 1-16 seçilebilir.
+- U/X mapped pitch'i seçer.
+- Note On velocity yalnız V/Y'den gelir:
+  `clamp(round(clamp(V, 0, 1) * 127), 1, 127)`.
+- Held V update yalnız state'i günceller; tek başına MIDI üretmez.
+- Aynı mapped-note bölgesindeki held U update MIDI üretmez; sınır geçişi aynı owner
+  channel üzerinde ordered Note Off/Note On retrigger üretebilir.
+- Tonal map 12-TET note, Atomic map exact-frequency metadata'sının en yakın MIDI
+  semitone'unu gönderir.
+- Fixed Channel veya Per Source 1-16 seçilebilir; efektif active limit 16'dır.
+- Participant performans mesajları yalnız Note On ve Note Off'tur.
 
-Normal CC'ler channel-wide olduğu için Channel 1'i paylaşan source 1 ve 17 birbirinin
-son CC74/CC11 değerini etkileyebilir. Per-source-touch expression izolasyonu için MPE gerekir.
+Cosmic Microwave CC11, CC74, CC20-23, Channel Pressure, Pitch Bend, RPN, MPE setup veya
+Crowd Macro CC üretmez; mesaj akışını açıp kapatan veya modüle eden bir LFO yolu yoktur.
+Panic tek controller istisnasıdır: Channel 1..16'nın her birine
+bir CC123 ve bir CC120 gönderir (toplam 32 controller mesajı). Host MIDI thru da yalnız
+gelen Note On/Off mesajlarını geçirir; controller'ları çıkışa kopyalamaz.
 
-### MPE
-
-Setup açıkken master'da RPN6 MPE Configuration Message, her member'da RPN0 bend range
-gönderilir. Note On mesaj sırası:
-
-```text
-Pitch Wheel -> CC74 -> CC11 -> Note On -> Channel Pressure
-```
-
-Note Off sırası:
-
-```text
-Note Off -> Channel Pressure 0 -> Pitch Wheel 8192
-```
-
-Tonal map exact 12-TET MIDI note üretir; dolayısıyla pitch wheel normalde center'dır.
-Atomic map nearest base note'u ve element-derived exact target frequency'ye ulaşan
-per-note bend'i üretir. Exact target MIDI pitch wheel'in 14-bit çözünürlüğüyle temsil
-edilir. Bend range seçenekleri 2/12/24/48 semitone, varsayılan 2'dir ve receiver aynı
-aralığa ayarlanmalıdır.
+Legacy `MpeMidiOutput` sınıf adı ile MPE APVTS parametre ID'leri kaynak/state/automation
+uyumluluğu için tutulur. Runtime config `outputType` değerini `0..1` ile sınırlar ve setup'ı kapalı
+tutar; eski state veya automation MPE/controller hattını yeniden açamaz.
 
 ### Host ve harici destination
 
@@ -520,12 +530,29 @@ Bu nedenle host çıkışı block/sample pozisyonunu korurken harici/virtual ç�
 granülaritesine sahiptir. Hassas timestamp gerektiren kullanımda host yolu daha
 deterministiktir.
 
+### Ableton/Omnisphere 2 x 8 receiver topolojisi
+
+Üretim template'i, Cosmic'in sabit 16 MIDI kanalını downstream'de iki Omnisphere Multi
+instance'ına böler:
+
+```text
+MIDI Ch 1..8  -> OMNI1 / Part 1..8
+MIDI Ch 9..16 -> OMNI2 / Part 1..8
+```
+
+Bu yapı `64/128/256` capacity'de Omnisphere Part başına sırasıyla `4/8/16` source
+kimliği taşır. İki Omnisphere x sekiz Part, 16 ayrı Omnisphere instance'ı veya tek
+değişken MIDI domain değildir; Cosmic tarafı daima aynı 16 channel mapping'ini korur.
+CPU bölünmesi host scheduler'ı, patch/FX maliyeti, buffer ve show makinesine bağlıdır;
+iki instance'ın paralel çekirdek kullanacağı garanti edilmez. Tam zone template'i CPU,
+dropout ve tail soak testinden geçirilmeden zone sayısı kesinleştirilmez.
+
 ## 11. Thread modeli
 
 | Thread/context | İş | Senkronizasyon |
 |---|---|---|
 | OSC realtime callback | Parse, Expected Zone admission, telemetry, source atomic update, event enqueue. | Shared/exclusive client boundary + producer `SpinLock`; audio thread değil. |
-| Audio processing | MIDI input copy, host clock, Safety/Conductor snapshot, bounded lifecycle, Time Field, Normal/MPE, macro ve seçili host/external yayın. | Fixed array/FIFO/scheduler, coherent atomics ve pre-reserved `MidiBuffer`; parse, dosya ve device I/O yok. |
+| Audio processing | Note On/Off input filter, host clock, Safety/Conductor snapshot, bounded lifecycle, Time Field, Notes Only render ve seçili host/external yayın. | Fixed array/FIFO/scheduler, coherent atomics ve pre-reserved `MidiBuffer`; parse, dosya ve device I/O yok. |
 | Message/UI | Editor 8 Hz telemetry/Preflight, simulator/watchdog, route/state/conductor publication; harici MIDI için 2 ms sender. | Atomics, kısa pending-state lock; destructive route işlemlerinde processor suspension. |
 | External Node.js | Chaos proxy/capture/replay/generate. | Ayrı process/socket/file sınırı; plugin audio thread'ine girmez. |
 
@@ -534,8 +561,11 @@ Kapasiteler:
 | Kaynak | Kapasite |
 |---|---:|
 | Source | 256 |
+| Seçili Source Capacity | 64 / 128 / 256 |
+| MIDI channel / source-channel | 16 / 4, 8 veya 16 |
 | Canlı touch/source | 1 (`finger0`); core rezervi 10 slot/source |
 | Semantic MIDI state | 2560 |
+| Scheduled duration tail | global 4096 / channel başına 512 / source başına 16 |
 | OSC lifecycle FIFO | 8192 |
 | OSC latest-motion marker FIFO | 8192 (voice/axis/epoch başına en fazla bir bekleyen marker) |
 | Audio block lifecycle drain | `min(64, max(1, block sample sayısı))` |
@@ -545,7 +575,6 @@ Kapasiteler:
 | MIDI scratch reserve | buffer başına 262144 byte |
 | SharedPort client | 16 |
 | Global Conductor | 16 instance / 4 izole grup / 100 ms tick / 1500 ms timeout |
-| Crowd macro | 256 sabit slot / 5, 10, 20 veya 30 Hz |
 | Atomic degree | element/mode başına en fazla 128 |
 | Atomic pitch step | en fazla 768 |
 
@@ -559,50 +588,48 @@ isteğini message timer'a yayınlar.
 
 | ID | Değerler | Varsayılan |
 |---|---|---|
-| `midiOutputType` | Off / Normal MIDI / MPE MIDI | Normal MIDI |
-| `midiOutputPath` | Host Only / External Only / Mirror | Host Only |
-| `expectedZone` | Any / A..Z | Any |
+| `midiOutputType` | Off / Notes Only | Notes Only |
+| `midiOutputPath` | Host Only / External Only / Mirror | External Only |
+| `expectedZone` | Any / A..Z | A |
 | `exclusiveUdpPort` | bool | On |
-| `safetyGovernorEnabled` | bool | On |
+| `safetyGovernorEnabled` | bool | Off |
 | `normalMidiRoutingMode` | Single Channel / Per Source 1-16 | Per Source 1-16 |
 | `normalMidiChannel` | 1..16 | 1 |
-| `mpeZone` | Lower / Upper | Lower |
-| `mpePitchBendRange` | 2 / 12 / 24 / 48 st | 2 st |
-| `mpeSendSetupMessages` | bool | On |
-| `mpePitchMode` | Retrigger / Glide | Retrigger |
-| `timeMode` | Flow / Grid / Ensemble | Ensemble |
+| `timeMode` | Flow / Grid / Ensemble | Flow |
 | `clockSource` | Host / Internal | Host |
 | `internalBpm` | 40..240 BPM | 120 |
-| `gridDivision` | 1/4 / 1/8 / 1/16 / 1/32 | 1/16 |
-| `maxAttacksPerStep` | 1..16 | 4 |
-| `maxActiveVoices` | 1..16 | 16; MPE efektif en fazla 15 |
-| `gatePercent` | %5..100 | %70 |
-| `temporalSpread` | 1 / 2 / 4 / 8 / 16 | 4 |
-| `crowdGovernorEnabled` | Manual / Adaptive | Adaptive |
-| `conductorRole` | Off / Leader / Follower | Off |
+| `gridDivision` | 1/4 / 1/8 / 1/16 / 1/32 | 1/32 |
+| `maxAttacksPerStep` | 1..16 | 16 |
+| `maxActiveVoices` | 1..16 | 16 |
+| `gatePercent` | %5..100 | %100 |
+| `temporalSpread` | 1 / 2 / 4 / 8 / 16 | 16 |
+| `crowdGovernorEnabled` | Manual / Adaptive | Manual |
+| `noteDuration` | 2n / 4n / 8n / 16n / 32n | 16n |
+| `sourceCapacity` | 64 / 128 / 256 | 64 |
+| `conductorRole` | Off / Leader / Follower | Leader |
 | `conductorGroup` | 1..4 | 1 |
 | `conductorAttackBudget` | 1..64 | 16 |
-| `conductorVoiceBudget` | 1..128 | 64 |
-| `crowdMacrosEnabled` | bool | Off |
-| `crowdMacroChannel` | Ch 1..16 / Broadcast | Ch 1 |
-| `crowdMacroDensityCc` | 0..127 | 20 |
-| `crowdMacroCentroidXCc` | 0..127 | 21 |
-| `crowdMacroCentroidYCc` | 0..127 | 22 |
-| `crowdMacroMotionCc` | 0..127 | 23 |
-| `crowdMacroRate` | 5 / 10 / 20 / 30 Hz | 10 Hz |
+| `conductorVoiceBudget` | 1..128 | 16 |
 | `pitchSystem` | Tonal / Atomic | Atomic |
 | `scaleRoot` | C..B | C |
 | `scaleRootOctave` | 0..6 | 2 |
 | `scaleMode` | 7 tonal map | Major |
-| `spectralElement` | 29 element, H..Zn | Helium |
-| `atomicScaleMode` | Core / Extended / Microtonal / Scientific / Raw 128 | Extended |
+| `spectralElement` | 29 element, H..Zn | Zinc |
+| `atomicScaleMode` | Core / Extended / Microtonal / Scientific / Raw 128 | Core |
 | `scaleOctaves` | 1..6 | 4 |
+
+Legacy state/automation lookup için şu APVTS ID'leri korunur fakat v2.7 runtime'da
+inerttir: `mpeZone`, `mpePitchBendRange`, `mpeSendSetupMessages`, `mpePitchMode`,
+`crowdMacrosEnabled`, `crowdMacroChannel`, `crowdMacroDensityCc`,
+`crowdMacroCentroidXCc`, `crowdMacroCentroidYCc`, `crowdMacroMotionCc` ve
+`crowdMacroRate`. Bunlar görünür ürün kontrolü değildir ve MIDI çıkışını değiştiremez.
 
 ValueTree ek alanları:
 
-- `udpPort` (6060)
-- `midiOutputOption` (Host)
-- `cosmicMicrowaveSchema` (8)
+- `udpPort` (schema/fallback baseline: 6062; fresh runtime A-H allocation: 6062-6069)
+- `midiOutputOption` (fallback baseline: `Virtual: Cosmic Microwave 6062 Out`; fresh
+  runtime endpoint'i kazanılan porta göre seçilir)
+- `cosmicMicrowaveSchema` (10)
 
 Eski state migration:
 
@@ -620,12 +647,57 @@ Eski state migration:
 - schema-5 state kabul edilir ve kaldırılmış deneysel alanları atılır;
 - schema 6 ve daha eski state'lere Manual Governor atanır; mevcut attack, active,
   spread, gate, clock ve mode değerleri değiştirilmez;
-- schema 7 ve eski state'ler released davranışı korumak için Mirror, Expected Zone Any,
-  Shared ownership, Safety Off, Conductor Off ve Macro Off alır;
-- yeni/partial schema-8 state Host Only, Exclusive, Safety On; Conductor/Macro Off
-  varsayımlarını alır ve schema 8 olarak damgalanır;
+- schema 7 ve eski state'ler released routing davranışı için Mirror, Expected Zone Any,
+  Shared ownership, Safety Off ve Conductor Off alır;
+- schema-8 routing varsayımları korunur; schema 9 former MPE `midiOutputType=2`
+  değerini Notes Only/Per Source'a çevirir, legacy Crowd Macro enable değerini Off'a
+  zorlar; bu tarihsel migration kaydı korunur;
+- schema 10 Note Duration ve Source Capacity ekler: eksik duration 16n olur; schema 9
+  veya daha eski state'te eksik capacity eski implicit alanı korumak için 256 olur;
+  partial schema-10 state ise fresh varsayılan 64'ü alır;
 - bozuk/non-finite choice değerleri güvenli sınırlara clamp edilir;
 - UDP port ve destination'ın dış dünyaya etkisi message timer üzerinden uygulanır.
+
+### Factory performance preset sözleşmesi
+
+`FactoryPresets.h`, APVTS layout, processor fallback'leri, preset recall ve regresyon
+testlerinin drift etmemesi için factory baseline'ı tek yerde tanımlar. Ortak baseline:
+
+- Notes Only / Per Source 1-16;
+- External Only ve porttan türeyen `Cosmic Microwave <port> Out` endpoint'i;
+- Flow / Host / 1/32, Manual attack 16 / active 16 / gate %100 / spread 16;
+- Note Duration 16n ve Source Capacity 64 (MIDI channel başına 4 source);
+- Atomic / Zinc / Core / C2 / 4 octave;
+- exclusive ownership, Safety Governor Off, Crowd Macro Off;
+- Conductor Group 1, attack/voice budget 16/16.
+
+Zone A preset'i UDP 6062, Expected Zone A ve Leader kullanır. Zone B-H sırasıyla UDP
+6063-6069, eşleşen zone ve Follower kullanır. Recall message/UI thread'inde yapılır;
+önce Panic gönderir, geçici simulator/live kartlarını temizler, simulator profilini
+Human'a döndürür ve sonra routing identity'sini yeniden bind eder. Audio callback
+dosya/device recall işi yapmaz.
+
+Gerçekten fresh bir instance aynı tabloyu atomik allocation pool olarak kullanır. Timer,
+6062/A'dan 6069/H'ye kadar en düşük boş complete route'u retained exclusive OSC bind
+ile claim eder; ancak bundan sonra matching Expected Zone, sanal MIDI endpoint ve
+Leader/Follower rolünü yayınlar. Tüm A-H doluysa OSC receiver, virtual endpoint ve
+Global Conductor registration açılmaz. Background'da sürekli tarama yapılmaz; bir route
+boşaltıldıktan sonra operatör **RETRY AUTO** kullanır.
+
+State/preset recall, APVTS listener'larının iç içe yeni bir recall başlatabildiği durumda
+tam `ValueTree` snapshot'larını latest-wins kuyruğunda seri uygular; parameter/host
+callback'i boyunca state lock tutulmaz. APVTS generation ile external route-ready
+generation ayrıdır: headless/offline restore'da Host MIDI tam state hazır olduğunda
+çalışabilir, fakat OSC ve external MIDI doğru message-thread route'u açılana kadar
+fail-closed kalır.
+
+Factory recall host state restore'un yerine geçmez. Ableton/host tarafından yüklenen
+tam state otoritedir; fresh allocation çalışmaz ve dolu olsa bile exact saved route
+başka zone'a kaydırılmaz, o route üzerinde fail-closed kalır. Doğrudan route edit'i ve
+explicit preset de fresh allocation'ı kapatır ve tam olarak kazanır. Factory ile
+eşleşmeyen state UI'da **CUSTOM / SAVED PROJECT STATE** görünür. Partial legacy blob'da
+yalnız eksik değerler Zone A baseline'a döner. Factory Safety-Off seçimi görünür bir
+operatör kararıdır; Safety açılana kadar Venue Preflight blocker gösterir.
 
 ## 13. UI mimarisi
 
@@ -635,25 +707,28 @@ Eski state migration:
 Arayüz 1280x760 varsayılan, 1000x650 minimum boyutta iki sayfadır: **PERFORM** ve
 **SHOW CONSOLE**. Görünür modüller:
 
-- Header: build'den türetilen kalıcı versiyon etiketi (`v2.5.0`), SOURCES, TOUCHES,
-  NOTES, MPE VOICES;
+- Header: build'den türetilen kalıcı versiyon etiketi (`v2.7.1`), SOURCES, TOUCHES,
+  NOTES ve ACTIVE NOTES;
 - OSC INPUT;
 - SOURCE ROUTING + observed zones;
 - SIMULATOR;
-- 256-source / 16-channel SOURCE MATRIX;
+- seçili capacity'ye göre 64/128/256 source gösteren, 16-channel sabit SOURCE MATRIX;
 - TIME FIELD: Flow/Grid/Ensemble, Host/Internal, BPM/division, tek Manual/Adaptive
-  anahtarı, manual veya efektif attack/active/spread, gate ve
+  anahtarı, Note Duration, manual veya efektif attack/active/spread, gate ve
   PENDING/ACTIVE/MERGED telemetry;
 - PITCH MAPPING: Tonal/Atomic selector, ortak root/octave/range ve moda göre
   Scale veya Element/Density;
-- Normal/MPE mode-specific MIDI ROUTING;
+- Notes Only MIDI ROUTING: Off/Notes Only, Fixed/Per Source 1-16, fixed channel ve
+  Source Capacity 64/128/256 + türetilmiş 4/8/16 source/channel;
 - MIDI OUTPUT, Rescan, Panic;
-- Routing Safety: Host/External/Mirror, Expected Zone, exclusive ownership;
+- Routing Safety: Host/External/Mirror, Expected Zone, exclusive ownership, Zone A-H
+  factory performance preset selector, fresh allocation durumu ve **RETRY AUTO**;
 - Safety Governor state/reason ile ingress/deadline/FIFO/queue telemetrisi;
 - OSC, zone, ownership, MIDI route, Safety, Time Field ve Conductor için yedi satırlı
   Venue Preflight;
 - Global Conductor role/group/budget/live quota;
-- Crowd Expression enable/channel/rate/CC mapping ve suspension status;
+- U=PITCH, V=NOTE-ON VELOCITY ve yalnız Note On/Off politikasını; yasak controller/MPE
+  çıkışlarını ve CC120/123 Panic istisnasını gösteren read-only durum kartı;
 - harici Chaos Lab CLI komutu ve audio-thread isolation açıklaması.
 
 UI timer'ı 8 Hz'de bounded telemetry snapshot'ı çeker. Paint yolu network receiver'a,
@@ -669,8 +744,8 @@ de otomatik eklenir:
 |---|---|
 | `AudienceMidiMappingTests` | Yardımcı `MidiEngine` mapping/channel/CC. |
 | `AudienceMidiScaleModuleTests` | Yardımcı scale correction/remap/note-off pairing. |
-| `AudienceMidiPitchTests` | Frequency -> MIDI note/bend hesabı. |
-| `AudienceMpeOutputTests` | MPE setup/order/zones/allocation/steal/reset, 2560 ID, Normal source mapping/ref-count. |
+| `AudienceMidiPitchTests` | Frequency -> nearest note ve retained bend metadata utility; bayrak ürün Pitch Bend göndermez. |
+| `AudienceMidiOutputTests` | Beş exact Note Duration deadline'ı, BPM snapshot, retrigger coalesce, pitch tail, same-note ref-count, hard limit/steal/overflow, CancelVoice ve yalnız CC123/CC120 Panic. |
 | `AudienceOscBridgeTests` | Parser boundary/scaling/bundle/fan-out/telemetry/client cap. |
 | `AudienceOscFingerRouterTests` | FIFO order/reset. |
 | `AudienceMidiAudienceModelTests` | Finger masks/counts/boundary/source mapping (`0 -> 16`). |
@@ -678,15 +753,15 @@ de otomatik eklenir:
 | `AudienceAtomicScaleBuilderTests` | Offline wavelength normalize/seçim, density cap ve hostile numeric input. |
 | `AudienceAtomicScaleMapTests` | Fixed exact-frequency map, 768-step sınırı ve hostile numeric input. |
 | `AudienceAtomicScaleCatalogTests` | 29x5 generated katalog bütünlüğü, metadata ve mode cap'leri. |
-| `AudienceAtomicMidiIntegrationTests` | Atomic exact-frequency map'in Normal/MPE renderer ile entegrasyonu. |
-| `AudienceAdaptiveCrowdGovernorTests` | Beş exact profil, smoothing, hysteresis, MPE cap, hostile input, reset ve allocation-free update. |
+| `AudienceAtomicMidiIntegrationTests` | Atomic map'in nearest-note Notes Only renderer entegrasyonu; Pitch Bend yokluğu. |
+| `AudienceAdaptiveCrowdGovernorTests` | Beş exact profil, smoothing, hysteresis, active limit 16, hostile input, reset ve allocation-free update. |
 | `AudienceCrowdTimeFieldTests` | Flow/Grid/Ensemble, host/internal/fallback clock, fairness, lane seed, short tap, gate, overflow, reset/rehydrate. |
-| `AudienceCrowdMidiIntegrationTests` | Host PPQ sample offset'i ve timed path içinde değişmeyen source-channel ownership. |
+| `AudienceCrowdMidiIntegrationTests` | Host PPQ sample offset'i, fixed tail, source-channel ownership ve watchdog Cancel'ın timed path entegrasyonu. |
 | `AudiencePressureAwareSafetyGovernorTests` | Dört profil, her pressure signal, hostile input, recovery hold/hysteresis ve allocation-free update. |
 | `AudienceGlobalConductorHubTests` | Registration/lifetime, group isolation, election, fair quota, stale fallback ve coherent read. |
-| `AudienceCrowdExpressionMacrosTests` | Density/centroid/motion, rate/change-only, hostile position/clock, reset ve allocation-free scan. |
+| `AudienceCrowdExpressionMacrosTests` | Yalnız legacy analiz birimi regresyonu; product routing Crowd Macro CC üretmez. |
 | `AudienceChaosLabTests` | Harici CLI'nin deterministik chaos, mapping ve bounded capture/replay yardımcıları. |
-| `AudiencePluginStateMigrationTests` | Released channel/scale, schema-2 Tonal, schema-4 Flow, schema-5 cleanup, schema-6 Manual, schema-7 routing compatibility, schema-8 stamp, clamp/idempotence. |
+| `AudiencePluginStateMigrationTests` | Released channel/scale, schema-2 Tonal, schema-4 Flow, schema-5 cleanup, schema-6 Manual, schema-7/8 routing, tarihsel schema-9 Notes Only coercion, schema-10 duration/capacity default'ları, clamp/idempotence. |
 
 Önemli kalan entegrasyon boşlukları:
 
@@ -702,8 +777,9 @@ de otomatik eklenir:
 1. **Zone source collision:** Expected Zone Any kullanılan legacy/diagnostic durumda iki
    zone aynı porta gelirse aynı ID'ler ortak state kullanabilir. Çözüm upstream split +
    explicit Expected Zone + exclusive ownership'tür.
-2. **MPE 15-channel limiti:** Timed modlarda active limit efektif 15'e clamp edilir.
-   Flow'da 16. aktif source touch oldest-note steal tetikleyebilir; bu allocation sınırıdır.
+2. **Aynı pitch/channel örtüşmesi:** Source'lar 16 kanala wrap olur. Aynı channel ve
+   pitch'i paylaşan touch'lar ref-count ile korunur; yine de downstream instrument'ın
+   repeated-note semantiği venue testinde doğrulanmalıdır. Efektif active limit 16'dır.
 3. **Event overflow:** Bütün modlar redundant U/V burst'ünü latest-value olarak
    coalesce eder; buna rağmen aşırı On/Off lifecycle burst'ü ayrı 8192-event priority
    FIFO'da safety reset üretebilir.
@@ -726,26 +802,36 @@ de otomatik eklenir:
 - Simulator source aralığını konfigüre edilebilir bir test namespace'ine taşımak.
 - Plugin validation ve farklı hostlarda MIDI-output lifecycle matrisi.
 
-## 16. 2.5.0 yükseltme notu
+## 16. 2.7.1 yükseltme notu
 
 1. Eski VST3 bundle'ını scanned plugin klasörü dışına yedekle.
-2. Cosmic Microwave 2.5.0'ı kur ve host'u rescan et.
+2. Cosmic Microwave 2.7.1'ü kur ve host'u rescan et.
 3. Önce Ableton set'in bir kopyasını aç.
 4. Her instance için UDP port/Expected Zone/ownership, MIDI Output Path/endpoint,
-   Time Field/clock, MIDI Format/source routing, Conductor ve Pitch map'i doğrula.
+   Time Field/clock, Notes Only source routing, Conductor ve Pitch map'i doğrula.
 5. MIDI alan instrument track'lerini kur; bayrak ürünün kendisi ses üretmez.
-6. Show Console Venue Preflight fail'lerini çöz, Safety NORMAL ve global kotaları/macro
-   mapping'i doğrula; server bağlanmadan Simulator, her channel ve Panic'i test et.
+6. Show Console Venue Preflight fail'lerini çöz, Safety NORMAL, global kotalar ve Notes
+   Only policy kartını doğrula; server bağlanmadan Simulator, her channel ve Panic'i test et.
 
-Yeni session'lar Ensemble / Host / 1/16, Adaptive Governor, gate %70 ve Atomic / Helium /
-Extended açılır. Manual politika attack 4, active 16 (MPE'de 15) ve spread 4 olarak
-saklanır. Schema 6 ve eski session'lar mevcut davranışı korumak için Manual alır;
+Fresh session'lar en düşük boş complete A-H route'u claim eder: ilk route UDP 6062 /
+Expected Zone A / Group 1 Leader, sonraki route'lar UDP 6063-6069 / Zone B-H /
+Follower'dır. Ortak baseline External Only, Flow / Host / 1/32 / Note Duration 16n,
+Manual attack 16 / active 16 / gate %100 / spread 16, Source Capacity 64, Atomic /
+Zinc / Core, Safety Off ve 16/16 bütçedir.
+A-H doluysa instance **RETRY AUTO** kullanılana kadar receiver/endpoint/Conductor
+açmadan fail-closed kalır. Host'tan restore edilen tam state, direct route edit'i ve
+explicit preset her zaman otoritedir ve başka route'a kaydırılmaz; partial legacy state
+yalnız eksik değerlerde Zone A baseline'a döner. Schema 6 ve eski
+session'lar mevcut davranışı korumak için Manual alır;
 schema 3 ve daha eski session'lar ayrıca Time Field için Flow alır. Schema-5 içindeki
 kaldırılmış deneysel alanlar yükseltmede atılır. Schema 7 ve eski state Mirror/Shared/
-Safety-Off davranışını korur; yeni session Host Only/Exclusive/Safety-On ve schema 8'dir.
-Global Conductor ile Crowd Expression opt-in'dir.
-Önceki schema-2 Tonal ve released 1.x Atomic migration kuralları korunur. Atomic MPE
-kullanılıyorsa receiver bend range performans öncesi yeniden doğrulanmalıdır.
+Safety-Off davranışını korur; yeni session External Only/Exclusive/Safety-Off ve schema
+10'dur. Factory Safety-Off seçimi Preflight'ta açılana kadar blocker olarak görünür.
+Tarihsel schema 9 legacy MPE state'ini Notes Only/Per Source'a çevirir ve eski Crowd
+Macro parametrelerini inert/Off tutar. Schema 10 fresh 16n/64 default'larını ekler;
+capacity alanı olmayan schema-9 veya eski proje, eski 256 alanını korur.
+Önceki schema-2 Tonal ve released 1.x Atomic migration kuralları korunur. Atomic
+performans çıkışı yalnız nearest MIDI note'tur.
 
 Kullanıcı akışları için `docs/manual/README.md`, ayrıntılı İngilizce teknik referans
 için kökteki `WIKI.md` kullanılmalıdır.

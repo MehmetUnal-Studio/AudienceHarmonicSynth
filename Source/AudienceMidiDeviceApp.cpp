@@ -470,7 +470,7 @@ public:
         moveButton.setClickingTogglesState(true);
 
         addButton.onClick = [this] { model.simulator.addRandomSeat(); };
-        crowdButton.onClick = [this] { model.simulator.addRandomSeats(25); };
+        crowdButton.onClick = [this] { model.simulator.addCrowdParticipants(25); };
         removeButton.onClick = [this] { model.simulator.removeRandomSeat(); };
         clearButton.onClick = [this] { model.panic(); };
         moveButton.onClick = [this] { model.simulator.setRandomMovement(moveButton.getToggleState()); };

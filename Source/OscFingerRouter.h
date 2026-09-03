@@ -18,7 +18,7 @@ public:
 
     struct Event
     {
-        enum Type : juce::uint8 { X, Y, On, Off };
+        enum Type : juce::uint8 { X, Y, On, Off, Cancel };
 
         juce::uint8 type = X;
         juce::uint8 finger = 0;
@@ -31,6 +31,10 @@ public:
     void pushX (int sourceId, int finger, float value) noexcept;
     void pushY (int sourceId, int finger, float value) noexcept;
     void pushOn (int sourceId, int finger, bool on) noexcept;
+    // Watchdog/disconnect release. Unlike an ordinary musical Off, this tells
+    // the downstream duration scheduler to cancel only this semantic voice's
+    // outstanding tails immediately.
+    void pushCancel (int sourceId, int finger) noexcept;
 
     // Message/control-thread request. The audio thread gives this priority over
     // queued data, discards stale packets and emits a safety reset.
@@ -44,6 +48,16 @@ public:
     uint32_t getDroppedEventCount() const noexcept
     {
         return droppedEvents.load(std::memory_order_relaxed);
+    }
+
+    uint32_t getDroppedMotionEventCount() const noexcept
+    {
+        return droppedMotionEvents.load(std::memory_order_relaxed);
+    }
+
+    uint32_t getDroppedLifecycleEventCount() const noexcept
+    {
+        return droppedLifecycleEvents.load(std::memory_order_relaxed);
     }
 
     uint32_t getCoalescedMotionEventCount() const noexcept
@@ -98,7 +112,8 @@ private:
                                  int depth) noexcept;
 
     void pushMotion (Event::Type type, int sourceId, int finger, float value) noexcept;
-    void pushLifecycle (int sourceId, int finger, bool on) noexcept;
+    void pushLifecycle (int sourceId, int finger,
+                        Event::Type lifecycleType) noexcept;
     bool enqueueLifecycleGroup (const QueuedEvent* group, int count) noexcept;
     bool enqueueMotionMarker (Event::Type type, int sourceId, int finger,
                               uint32_t epoch) noexcept;
@@ -123,6 +138,8 @@ private:
 
     std::atomic<bool> resetPending { false };
     std::atomic<uint32_t> droppedEvents { 0 };
+    std::atomic<uint32_t> droppedMotionEvents { 0 };
+    std::atomic<uint32_t> droppedLifecycleEvents { 0 };
     std::atomic<uint32_t> coalescedMotionEvents { 0 };
     std::atomic<uint32_t> lifecycleHighWater { 0 };
     std::atomic<uint32_t> motionHighWater { 0 };

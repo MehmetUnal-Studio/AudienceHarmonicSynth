@@ -146,16 +146,16 @@ int main()
                "density envelope rises in 0.5 s and falls in 6 s at 10 Hz");
     }
 
-    // MPE gives the governor its member-channel capacity. The attack/spread
-    // profile remains musical while active voices cannot exceed that capacity.
+    // Notes Only has all 16 channels available. The attack/spread profile
+    // remains musical while hostile limits are clamped to that capacity.
     {
-        const auto mpe = Governor::profileForDensity(256, 7);
+        const auto notesOnly = Governor::profileForDensity(256, 16);
         const auto hostileLow = Governor::profileForDensity(256, -99);
         const auto hostileHigh = Governor::profileForDensity(256, 999);
-        expect(mpe.band == 4 && mpe.maxAttacksPerStep == 2
-                   && mpe.spreadSlots == 16 && mpe.maxActive == 7
+        expect(notesOnly.band == 4 && notesOnly.maxAttacksPerStep == 2
+                   && notesOnly.spreadSlots == 16 && notesOnly.maxActive == 16
                    && hostileLow.maxActive == 1 && hostileHigh.maxActive == 16,
-               "MPE voice capacity and hostile limits are clamped safely");
+               "Notes Only voice capacity and hostile limits are clamped safely");
     }
 
     // Reset must discard clock, candidate and envelope history.

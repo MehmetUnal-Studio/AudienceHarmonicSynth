@@ -11,6 +11,7 @@
 #include "AtomicScaleMap.h"
 #include "CrowdExpressionMacros.h"
 #include "CrowdTimeField.h"
+#include "FactoryPresets.h"
 #include "GlobalConductorHub.h"
 #include "MidiAudienceModel.h"
 #include "MidiPitchMap.h"
@@ -19,22 +20,35 @@
 #include "OscFingerRouter.h"
 #include "PressureAwareSafetyGovernor.h"
 #include "Simulator.h"
+#include "SourceQualityController.h"
 
 // Cosmic Microwave is intentionally a silent instrument shell: keeping the
 // existing stereo instrument contract preserves Ableton placement and VST3
 // session identity, while all runtime output is MIDI.
 class AudienceProcessor : public juce::AudioProcessor,
                           private juce::Timer,
-                          private juce::HighResolutionTimer
+                          private juce::HighResolutionTimer,
+                          private juce::AsyncUpdater
 {
 public:
+    enum class FreshRouteAssignmentState
+    {
+        pending = 0,
+        assigned,
+        exhausted,
+        preserved
+    };
+
     AudienceProcessor();
     ~AudienceProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
+    void reset() override;
     bool isBusesLayoutSupported (const BusesLayout&) const override;
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&,
+                               juce::MidiBuffer&) override;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -50,12 +64,15 @@ public:
     }
     bool producesMidi() const override { return true; }
     bool isMidiEffect() const override { return false; }
-    double getTailLengthSeconds() const override { return 0.0; }
+    double getTailLengthSeconds() const override { return 120.0; }
 
     int getNumPrograms() override                            { return 1; }
     int getCurrentProgram() override                         { return 0; }
     void setCurrentProgram (int) override                    {}
-    const juce::String getProgramName (int) override         { return {}; }
+    const juce::String getProgramName (int index) override
+    {
+        return index == 0 ? juce::String { "Default" } : juce::String {};
+    }
     void changeProgramName (int, const juce::String&) override {}
 
     void getStateInformation (juce::MemoryBlock&) override;
@@ -64,6 +81,7 @@ public:
     // Message-thread/editor surface.
     juce::AudioProcessorValueTreeState apvts;
     OscFingerRouter fingerRouter;
+    SourceQualityController sourceQualityController;
     MidiAudienceModel audienceModel;
     OscBridge osc;
     Simulator simulator;
@@ -74,8 +92,14 @@ public:
     void panic();
 
     int getMidiNotesSent() const noexcept    { return mpeOut.getMidiNotesSent(); }
-    int getActiveMpeVoices() const noexcept  { return mpeOut.getActiveMpeVoices(); }
-    int getAvailableMpeChannels() const noexcept { return mpeOut.getAvailableMpeChannels(); }
+    int getScheduledMidiNoteCount() const noexcept
+    {
+        return mpeOut.getScheduledNoteCount();
+    }
+    int getPhysicalMidiNoteCount() const noexcept
+    {
+        return mpeOut.getPhysicalNoteCount();
+    }
     int getActiveExternalMidiKeys() const noexcept { return activeExternalMidiKeys.load(std::memory_order_relaxed); }
     int getLastExternalMidiNote() const noexcept { return lastExternalMidiNote.load(std::memory_order_relaxed); }
     int getLastExternalMidiChannel() const noexcept { return lastExternalMidiChannel.load(std::memory_order_relaxed); }
@@ -98,6 +122,10 @@ public:
     {
         return timeFieldBpm.load(std::memory_order_relaxed);
     }
+    double getNoteDurationBpm() const noexcept
+    {
+        return noteDurationBpm.load(std::memory_order_relaxed);
+    }
     int getTimeFieldPending() const noexcept
     {
         return timeFieldPending.load(std::memory_order_relaxed);
@@ -114,6 +142,19 @@ public:
     {
         return timeFieldClockLocked.load(std::memory_order_relaxed);
     }
+    struct EffectiveTimeFieldPolicy
+    {
+        CrowdTimeField::Mode mode = CrowdTimeField::Mode::Flow;
+        int attacksPerStep = CosmicFactoryPresets::maxAttacksPerStep;
+        int activeLimit = CosmicFactoryPresets::maxActiveVoices;
+        int spreadSlots = 16;
+        bool admissionOpen = true;
+    };
+    // One coherent audio-thread snapshot after Adaptive, Safety Governor,
+    // Global Conductor and per-block Flow clamps have all been applied.
+    // Packing the fields into one atomic prevents the editor from combining
+    // limits published by different callbacks.
+    EffectiveTimeFieldPolicy getEffectiveTimeFieldPolicy() const noexcept;
     int getGovernorRecentSourceCount() const noexcept
     {
         return governorRecentSourceCount.load(std::memory_order_relaxed);
@@ -161,6 +202,18 @@ public:
     double getExternalFifoOldestAgeSeconds() const noexcept
     {
         return externalFifoOldestAgeSeconds.load(std::memory_order_relaxed);
+    }
+    SourceQualityController::Output getSourceQualityOutput() const noexcept
+    {
+        // Both the processor timer and editor timer are message-thread owned.
+        // The audio callback consumes only sourceQualityAdmissionOpen below.
+        return sourceQualityController.getOutput();
+    }
+    void startSourceQualityCheck();
+    void stopSourceQualityCheck();
+    bool isSourceQualityCheckArmed() const noexcept
+    {
+        return sourceQualityController.isArmed();
     }
     int getConductorSnapshotSource() const noexcept
     {
@@ -230,52 +283,107 @@ public:
         return crowdMacroMotionCcValue.load(std::memory_order_relaxed);
     }
     int getMidiOutputOptionIndex() const noexcept { return midiOutputOptionIndex.load(std::memory_order_relaxed); }
+    bool isMidiOutputReady() const noexcept { return midiOutputReady.load(std::memory_order_acquire); }
     int getResolvedMidiOutputOptionIndex();
     uint32_t getMidiOutputRouteRevision() const noexcept { return midiOutputRouteRevision.load(std::memory_order_acquire); }
     void setMidiOutputOptionIndex (int index);
     int getMidiOutputPath() const noexcept;
     int getExpectedZone() const noexcept { return osc.getExpectedZone(); }
 
+    // Message-thread factory presets. Zone A is the new-instance default;
+    // B-H keep the same musical setup while selecting sequential UDP ports and
+    // follower roles. Host-restored state remains authoritative.
+    static int getNumFactoryPresets() noexcept;
+    static juce::String getFactoryPresetName (int index);
+    void applyFactoryPreset (int index);
+    int getMatchingFactoryPresetIndex() const noexcept;
+    FreshRouteAssignmentState getFreshRouteAssignmentState() const noexcept
+    {
+        return static_cast<FreshRouteAssignmentState> (
+            freshRouteAssignmentState.load (std::memory_order_acquire));
+    }
+    void retryFreshRouteAssignment();
+
 private:
+    friend struct ProcessorMidiHotplugTestAccess;
+    friend struct ProcessorAutoRoutingTestAccess;
+
     void timerCallback() override;
     void hiResTimerCallback() override;
+    void handleAsyncUpdate() override;
     juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     void cacheParameterPointers();
     void updatePitchMap();
     bool processIncomingMidi (const juce::MidiBuffer&, int numSamples);
     void releaseAllIncomingMidiNotes() noexcept;
-    void renderOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples,
-                             bool outputEnabled,
-                             const MpeMidiOutput::MpeConfig& midiConfig,
-                             const CrowdTimeField::Config& timeConfig,
-                             const CrowdTimeField::ClockFrame& clockFrame,
-                             bool resetAlreadyEmitted);
-    void renderTimedOutgoingMidi (juce::MidiBuffer& midiMessages, int numSamples,
-                                  bool outputEnabled,
-                                  const MpeMidiOutput::MpeConfig& midiConfig,
-                                  const CrowdTimeField::Config& timeConfig,
-                                  const CrowdTimeField::ClockFrame& clockFrame,
-                                  bool resetAlreadyEmitted);
+    struct WatchdogCancelRenderResult
+    {
+        int processedCount = 0;
+        std::uint64_t resetAcknowledgedTarget = 0;
+    };
+    WatchdogCancelRenderResult renderOutgoingMidi (
+        juce::MidiBuffer& midiMessages, int numSamples, bool outputEnabled,
+        const MpeMidiOutput::MpeConfig& midiConfig,
+        const CrowdTimeField::Config& timeConfig,
+        const CrowdTimeField::ClockFrame& clockFrame,
+        bool resetAlreadyEmitted);
+    WatchdogCancelRenderResult renderTimedOutgoingMidi (
+        juce::MidiBuffer& midiMessages, int numSamples, bool outputEnabled,
+        const MpeMidiOutput::MpeConfig& midiConfig,
+        const CrowdTimeField::Config& timeConfig,
+        const CrowdTimeField::ClockFrame& clockFrame,
+        bool resetAlreadyEmitted);
+    void acknowledgeWatchdogCancelRenderResult (
+        const WatchdogCancelRenderResult& result) noexcept;
     MpeMidiOutput::MpeConfig buildMpeConfig() const;
     CrowdTimeField::Config buildTimeFieldConfig (
         const MpeMidiOutput::MpeConfig& midiConfig) const noexcept;
     CrowdTimeField::ClockFrame captureTimeFieldClock (int numSamples,
                                                        double monotonicSeconds) const noexcept;
+    void requestTimeFieldRehydrate() noexcept;
+    std::uint64_t snapshotTimeFieldRehydrateRequest() const noexcept;
+    bool isTimeFieldRehydratePending (std::uint64_t requestTarget) const noexcept;
+    void acknowledgeTimeFieldRehydrate (std::uint64_t requestTarget) noexcept;
     void rehydrateTimeFieldFromCanonical() noexcept;
     void recordIncomingMidiDebugEvents (const juce::MidiBuffer& midiMessages) noexcept;
     void queueMidiToExternalOutput (const juce::MidiBuffer& midiMessages,
                                     double blockStartTimeMs,
-                                    int numSamples) noexcept;
+                                    int numSamples,
+                                    std::uint32_t blockResetGeneration) noexcept;
+    void requestExternalMidiReset (std::atomic<bool>& resetFlag) noexcept;
+    void serviceExternalWatchdogFallback (std::uint32_t now,
+                                          int expiredLiveTouches) noexcept;
+    bool isExternalMidiResetPending() const noexcept;
+    void acknowledgeExternalMidiReset() noexcept;
     void drainExternalMidiOutputQueue();
     void discardExternalMidiOutputQueue() noexcept;
     void sendExternalResetSweep();
     void sendImmediateAllNotesOffToExternal (bool processingAlreadySuspended = false);
+    void sendImmediateExternalAllNotesOffOnly();
     void closeMidiOutput();
+    void setMidiOutputOptionIndexInternal (int index);
+    void setUdpPortInternal (int port, bool reopenVirtualEndpoint = true);
     void restoreMidiOutputRoute (int routeKind,
                                  const juce::String& deviceIdentifier,
                                  int legacyOptionIndex);
+    void withholdVirtualMidiOutputForUnavailableUdp();
+    void commitExplicitRouteEditLocked();
+    bool applyPendingRouteSnapshotLocked();
+    void drainPendingApvtsStateQueue();
+    void performPendingRuntimeResetLocked (std::uint32_t generation);
+    void maintainPhysicalMidiOutputRouteLocked (std::uint32_t nowMs);
+    void maintainVirtualMidiOutputRouteLocked (std::uint32_t nowMs);
     void refreshGlobalConductor();
+    void updateSourceQualityController (std::uint32_t nowMs) noexcept;
+    void restartSourceQualityEpoch (std::uint32_t nowMs) noexcept;
+    SourceQualityController::ExternalCounters
+        getSourceQualityExternalCounters() const noexcept;
     void unregisterGlobalConductor() noexcept;
+    void deactivateExternalMidiForRestoreLocked();
+    bool deactivatePendingOscForRestoreLocked();
+    bool handleFreshRouteAssignment();
+    bool freshRouteAssignmentIsEligibleLocked (bool requireUnclaimedOsc = true);
+    void disableFreshRouteAssignmentLocked() noexcept;
 
     struct CrowdMacroRoutingConfig
     {
@@ -298,14 +406,18 @@ private:
     static constexpr size_t realtimeMidiInputBudgetBytes = 131072;
     static constexpr int realtimeMidiInputEventLimit = 256;
     static constexpr int midiLifecycleEventBudget = 64;
-    // The audio path emits at most 64 OSC/retrigger lifecycles, 64 broadcast
-    // macro CCs and 256 MIDI-thru events per block. Leave several blocks of
+    // The audio path emits at most 64 OSC/retrigger lifecycles and 256 filtered
+    // MIDI note-thru events per block. Leave several blocks of
     // headroom for timestamped output while the dedicated sender catches up;
     // overflow still has ordered panic recovery and held-finger rehydration.
     static constexpr int externalMidiQueueSize = 16384;
     juce::MidiBuffer midiInputScratch;
     juce::MidiBuffer midiRenderScratch;
     bool midiRenderScratchLoanedToHost = false;
+    // Audio-thread-owned transition latch. reset() mutates it only while the
+    // callback gate is closed, so bypass can publish one bounded reset without
+    // repeating the 16-channel sweep on every bypassed block.
+    bool bypassResetEmitted = false;
     std::array<OscFingerRouter::Event, midiLifecycleEventBudget> fingerEventScratch {};
     std::array<int, midiLifecycleEventBudget> flowMotionVoiceScratch {};
     std::array<MpeMidiOutput::NoteEvent, midiLifecycleEventBudget> midiNoteEventScratch {};
@@ -337,19 +449,24 @@ private:
     PressureAwareSafetyGovernor::Output safetyOutput {};
     double governorLastUpdateSeconds = 0.0;
     bool governorControlClockInitialised = false;
-    int governorLastVoiceLimit = 16;
+    int governorLastVoiceLimit = CosmicFactoryPresets::maxActiveVoices;
     double safetyLastUpdateSeconds = 0.0;
     uint32_t safetyLastOscMessages = 0;
     uint32_t safetyLastDroppedMotion = 0;
     bool safetyClockInitialised = false;
     bool pitchMapChangedThisBlock = false;
-    bool timeFieldRehydratePending = true;
+    // Control/state paths may request a canonical rebuild while processBlock is
+    // already running. A monotonic request/ack pair avoids both a plain-bool
+    // data race and the lost-wakeup ABA where audio clears a newer request.
+    std::atomic<std::uint64_t> timeFieldRehydrateRequestGeneration { 1 };
+    std::uint64_t timeFieldRehydrateAcknowledgedGeneration = 0; // audio owner
 
     struct PackedMidiEvent
     {
         juce::uint8 size = 0;
         juce::uint8 data[3] {};
         double dueTimeMs = 0.0;
+        std::uint32_t resetGeneration = 0;
     };
 
     juce::AbstractFifo externalMidiFifo { externalMidiQueueSize };
@@ -358,6 +475,12 @@ private:
     std::atomic<bool> externalMidiPanicPending { false };
     std::atomic<bool> externalMidiProducerQuarantined { false };
     std::atomic<bool> externalTransportResetPending { false };
+    // A monotonically tagged request/ack pair closes the boolean ABA window
+    // where releaseResources can publish a second reset while the sender is
+    // completing the first. The audio path only performs lock-free loads and
+    // one fetch_add when it requests overflow/path-change recovery.
+    std::atomic<std::uint32_t> externalMidiResetRequestGeneration { 0 };
+    std::atomic<std::uint32_t> externalMidiResetAcknowledgedGeneration { 0 };
     std::atomic<bool> midiOutputRouteChangedPending { false };
 
 #if COSMIC_MIDI_DIAGNOSTICS
@@ -377,46 +500,130 @@ private:
 #endif
 
     std::unique_ptr<juce::MidiOutput> midiOutput;
-    std::atomic<int> midiOutputOptionIndex { 0 };
+    std::atomic<int> midiOutputOptionIndex { CosmicFactoryPresets::midiOutputOption };
+    std::atomic<bool> midiOutputReady { false };
     std::atomic<uint32_t> midiOutputRouteRevision { 0 };
-    juce::String midiOutputStatus { "Host MIDI Output" };
+    juce::String midiOutputStatus { "Virtual MIDI port pending" };
     int midiOutputRouteKind = 0; // 0 host, 1 virtual, 2 physical
     juce::String midiOutputDeviceIdentifier;
 
+    // Serialises publication of complete host-state/factory-preset snapshots
+    // and route mutations. The audio thread never takes either lock. Locks are
+    // deliberately released before APVTS/host callbacks are invoked.
+    juce::CriticalSection stateTransactionLock;
     juce::CriticalSection pendingStateLock;
-    std::atomic<bool> pendingStateApply { false };
-    std::atomic<int> udpPort { 6060 };
-    int pendingUdpPort = 6060;
-    int pendingMidiOutputOption = 0;
-    int pendingMidiOutputRouteKind = -1;
+    // A host may synchronously request state while a factory recall or APVTS
+    // restore is notifying parameters. Serve the complete target snapshot
+    // instead of a partially applied tree. Protected by stateTransactionLock.
+    bool stateSnapshotOverrideInProgress = false;
+    std::uint32_t stateSnapshotOverrideGeneration = 0;
+    juce::ValueTree stateSnapshotOverride;
+    // APVTS replacement can synchronously re-enter setStateInformation. The
+    // outermost owner drains this latest-wins queue after every callback has
+    // unwound, preventing an older replaceState from overwriting a nested one.
+    bool stateMutationOwnerActive = false;
+    juce::ValueTree pendingApvtsState;
+    std::uint32_t pendingApvtsGeneration = 0;
+    bool routeSnapshotApplyInProgress = false;
+    std::uint32_t pendingRuntimeResetGeneration = 0;
+    std::uint32_t pendingFactoryRuntimeGeneration = 0;
+    // A newly inserted instance owns no route until its first message-thread
+    // timer tick. The tick claims the lowest free A-H factory UDP port with a
+    // retained exclusive bind. Any host restore or explicit route edit turns
+    // this off permanently so saved Ableton projects never reshuffle zones.
+    bool freshRouteAssignmentEligible = true; // guarded by stateTransactionLock
+    std::atomic<int> freshRouteAssignmentState {
+        static_cast<int> (FreshRouteAssignmentState::pending)
+    };
+    std::uint32_t lastFreshRouteAssignmentAttemptMs = 0;
+
+    // Publish restore intent before XML parsing. The first message-thread
+    // timer can then quarantine automatic route assignment while a host worker
+    // is still decoding a saved snapshot. The counter supports nested or
+    // concurrent host callbacks without letting an earlier invalid blob clear
+    // a later valid restore's intent.
+    std::atomic<std::uint32_t> hostStateRestoreIntentCount { 0 };
+
+    // A valid state generation retires the previous complete route in two
+    // phases. CoreMIDI and Conductor can be made fail-closed synchronously on
+    // the host control thread; OscBridge's UI-visible state is mutated only by
+    // the message thread through AsyncUpdater (with Timer as a fallback).
+    // Guarded by stateTransactionLock.
+    std::uint32_t pendingOscDeactivationGeneration = 0;
+
+    // The APVTS and the external route complete in two phases. Host MIDI may
+    // resume after the complete parameter tree is installed; OSC/external MIDI
+    // remains fail-closed until the message-thread route generation is ready.
+    // This also delays fresh-instance endpoint ownership by one timer tick,
+    // giving an Ableton-restored B-H instance a chance to avoid transiently
+    // claiming the Zone A endpoint.
+    std::atomic<std::uint32_t> stateRestoreGeneration { 1 };
+    std::atomic<std::uint32_t> stateRestoreCompletedGeneration { 1 };
+    std::atomic<std::uint32_t> stateRouteReadyGeneration { 0 };
+    // Audio-thread acknowledgement for the bounded Host/Mirror reset that
+    // terminates notes emitted by the previous state generation. Unlike the
+    // message-thread runtime reset, this must still work in a headless/offline
+    // host whose JUCE Timer never gets a tick.
+    std::atomic<std::uint32_t> pendingHostMidiResetGeneration { 0 };
+    std::atomic<bool> pendingStateApply { true };
+    std::uint32_t pendingStateGeneration = 1;
+    std::atomic<int> udpPort { CosmicFactoryPresets::firstUdpPort };
+    int pendingUdpPort = CosmicFactoryPresets::firstUdpPort;
+    int pendingMidiOutputOption = CosmicFactoryPresets::midiOutputOption;
+    int pendingMidiOutputRouteKind = CosmicFactoryPresets::midiOutputRouteKind;
     juce::String pendingMidiOutputDeviceIdentifier;
 
     MpeMidiOutput mpeOut;
+    // Control-thread panic/route mutation handshake. processBlock increments
+    // before consulting the gate; a control mutation closes the gate and
+    // waits for the bounded in-flight callback to retire before touching any
+    // audio-owned scheduler, Time Field, Governor or FIFO state.
+    std::atomic<bool> controlAudioMutationGate { false };
+    std::atomic<int> audioCallbacksInFlight { 0 };
+    std::atomic<std::uint32_t> latestAudioBlockDurationMs { 0 };
+    // Watchdog Cancel acknowledgement crosses message/audio threads through
+    // cumulative counters, so a 256-source expiry cannot be mistaken for done
+    // after the first 64-event realtime block.
+    std::atomic<std::uint64_t> watchdogCancelsPublished { 0 };
+    std::atomic<std::uint64_t> watchdogCancelsProcessed { 0 };
+    // Message-timer-only fallback state.
+    bool externalWatchdogCancelPending = false;
+    bool externalWatchdogResetRequested = false;
+    std::uint64_t externalWatchdogCancelTargetCount = 0;
+    std::uint32_t externalWatchdogCancelSinceMs = 0;
+    std::uint32_t externalWatchdogCancelDrainBlocks = 1;
+    std::uint32_t externalWatchdogResetAckGeneration = 0;
     double currentSampleRate = 44100.0;
-    int lastMidiOutputType = 1;
-    int lastMidiOutputPath = 0;
-    int lastNormalMidiRoutingMode = 1;
-    int lastNormalMidiChannel = 0;
+    int lastMidiOutputType = CosmicFactoryPresets::midiOutputType;
+    int lastMidiOutputPath = CosmicFactoryPresets::midiOutputPath;
+    int lastNormalMidiRoutingMode = CosmicFactoryPresets::normalMidiRoutingMode;
+    int lastNormalMidiChannel = CosmicFactoryPresets::normalMidiChannel;
     int lastMpeBendRange = 2;
     int lastMpeMaster = 1;
     int lastMpeMemberFirst = 2;
     int lastMpeMemberLast = 16;
     int lastMpeSetupEnabled = 1;
     int lastMpePitchMode = 0;
-    int lastTimeMode = 2;
-    int lastClockSource = 0;
-    int lastGridDivision = 2;
-    float lastInternalBpm = 120.0f;
-    float lastGatePercent = 70.0f;
-    bool lastExclusiveUdpPort = true;
+    int lastTimeMode = CosmicFactoryPresets::timeMode;
+    int lastClockSource = CosmicFactoryPresets::clockSource;
+    int lastGridDivision = CosmicFactoryPresets::gridDivision;
+    float lastInternalBpm = CosmicFactoryPresets::internalBpm;
+    float lastGatePercent = CosmicFactoryPresets::gatePercent;
+    bool hostTransportStateInitialised = false;
+    bool lastHostTransportPlaying = false;
+    bool lastExclusiveUdpPort = CosmicFactoryPresets::exclusiveUdpPort != 0;
     int lastExpectedZoneChoice = -1;
     std::uint32_t lastOscRetryMs = 0;
+    std::uint32_t lastMidiHotplugScanMs = 0;
+    std::uint32_t lastVirtualMidiRetryMs = 0;
 
-    std::atomic<double> timeFieldBpm { 120.0 };
+    std::atomic<double> timeFieldBpm { CosmicFactoryPresets::internalBpm };
+    std::atomic<double> noteDurationBpm { CosmicFactoryPresets::internalBpm };
     std::atomic<int> timeFieldPending { 0 };
     std::atomic<int> timeFieldActive { 0 };
     std::atomic<uint32_t> timeFieldMerged { 0 };
     std::atomic<bool> timeFieldClockLocked { false };
+    std::atomic<std::uint64_t> effectiveTimeFieldPolicyPacked { 0 };
     std::atomic<int> governorRecentSourceCount { 0 };
     std::atomic<int> governorObservedDensity { 0 };
     std::atomic<int> governorEffectiveAttacks { 4 };
@@ -427,6 +634,11 @@ private:
     std::atomic<uint32_t> safetyGovernorReasons { 0 };
     std::atomic<double> safetyIngressRate { 0.0 };
     std::atomic<double> safetyExternalFifoPressure { 0.0 };
+    // Runtime-only Ready Gate. Fresh/saved projects always start open/BYPASS;
+    // the operator explicitly arms a new 64/128/256 source census.
+    std::atomic<bool> sourceQualityAdmissionOpen { true };
+    std::uint32_t sourceQualityLastUpdateMs = 0;
+    bool sourceQualityUpdateClockInitialised = false;
     std::atomic<double> externalFifoOldestAgeSeconds { 0.0 };
     std::atomic<double> lastProcessDeadlineRatio { 0.0 };
     std::atomic<bool> crowdMacroEffectiveEnabled { false };
@@ -510,6 +722,9 @@ private:
         std::atomic<float>* crowdMacroCentroidYCc = nullptr;
         std::atomic<float>* crowdMacroMotionCc = nullptr;
         std::atomic<float>* crowdMacroRate = nullptr;
+        std::atomic<float>* noteDuration = nullptr;
+        std::atomic<float>* sourceCapacity = nullptr;
+        std::atomic<float>* ensembleSameNoteMode = nullptr;
     } rawParams;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudienceProcessor)

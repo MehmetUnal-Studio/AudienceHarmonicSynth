@@ -71,15 +71,16 @@ public:
         int sourceIndex = -1;
     };
 
-    // Pitch keeps the MidiPitchMap-compatible step/midiNote/frequencyHz fields
-    // and adds exact microtonal information for MPE output.
+    // Pitch keeps the MidiPitchMap-compatible step/midiNote/frequencyHz fields.
+    // Cosmic Microwave 2.6 emits midiNote only; exact fields remain catalog/UI
+    // metadata for downstream tuning workflows and scientific inspection.
     struct Pitch
     {
         int step = -1;
         int degreeIndex = -1;
         int octave = 0;
-        int midiNote = -1;                // Nearest 7-bit MIDI note (Normal MIDI).
-        double frequencyHz = 0.0;          // Exact atomic target frequency (MPE).
+        int midiNote = -1;                // Nearest 7-bit Notes Only MIDI note.
+        double frequencyHz = 0.0;          // Exact atomic target metadata.
         double exactMidiNote = 0.0;
         double centsFromNearestMidi = 0.0;
         double degreeWeight = 0.0;

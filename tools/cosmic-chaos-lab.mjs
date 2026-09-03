@@ -1147,7 +1147,7 @@ export function parseCli(argv) {
 }
 
 export function formatHelp() {
-    return `Cosmic Microwave v2.5 Capture/Replay Chaos Lab
+    return `Cosmic Microwave v2.8.0 Capture/Replay Chaos Lab
 
 Usage:
   cosmic-chaos-lab.mjs proxy   --map LISTEN=HOST:PORT [--map ...] --capture FILE [options]

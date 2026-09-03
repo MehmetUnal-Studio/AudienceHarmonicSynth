@@ -51,11 +51,11 @@ DebugPanel::DebugPanel (AudienceProcessor& p) : proc(p)
     };
     addAndMakeVisible(copyReportButton);
 
-    // Dedicated copy for the outgoing MIDI / MPE stream. Grabs the full ring
+    // Dedicated copy for the outgoing Notes Only MIDI stream. Grabs the full ring
     // buffer (not just the on-screen tail), so the hard-to-screenshot event log
     // can be pasted as text. Flashes "Copied" briefly for feedback.
     styleButton(copyMidiButton);
-    copyMidiButton.setTooltip("Copy the full outgoing MIDI / MPE event stream to the clipboard");
+    copyMidiButton.setTooltip("Copy the full outgoing notes-only MIDI event stream to the clipboard");
     copyMidiButton.onClick = [this]
     {
         juce::SystemClipboard::copyTextToClipboard(proc.getOutgoingMidiDebugText(256));
@@ -142,11 +142,11 @@ void DebugPanel::paint (juce::Graphics& g)
 
     g.setColour(kText);
     g.setFont(juce::Font(juce::FontOptions(15.5f)));
-    g.drawText("outgoing MIDI / MPE", 18, 30, 260, 22, juce::Justification::left);
+    g.drawText("outgoing MIDI notes", 18, 30, 260, 22, juce::Justification::left);
 
     g.setColour(kText3);
     g.setFont(juce::Font(juce::FontOptions(10.5f)));
-    g.drawText("host / virtual port / MPE stream", 18, 56, 320, 14, juce::Justification::left);
+    g.drawText("host / virtual port / notes-only stream", 18, 56, 320, 14, juce::Justification::left);
 
     g.setColour(kText);
     g.setFont(juce::Font(juce::FontOptions(15.5f)));
@@ -159,7 +159,7 @@ void DebugPanel::paint (juce::Graphics& g)
 
     g.setColour(kText3);
     g.setFont(juce::Font(juce::FontOptions(10.5f)));
-    g.drawText("incoming MIDI / keyboard slots / active MPE voices", 18, topBottom + 38, 420, 14, juce::Justification::left);
+    g.drawText("incoming MIDI / keyboard slots / active notes", 18, topBottom + 38, 420, 14, juce::Justification::left);
 
     g.setColour(kHairline);
     g.drawLine((float) thirdW, 30.0f,

@@ -54,7 +54,9 @@ namespace
                        const PressureAwareSafetyGovernor::TripPoints& points,
                        PressureAwareSafetyGovernor::ReasonBits reason,
                        PressureAwareSafetyGovernor::State& requestedState,
-                       std::uint32_t& reasons) noexcept
+                       std::uint32_t& reasons,
+                       PressureAwareSafetyGovernor::State maximumValidSeverity
+                           = PressureAwareSafetyGovernor::State::EMERGENCY) noexcept
     {
         using Governor = PressureAwareSafetyGovernor;
         const auto reasonMask = static_cast<std::uint32_t>(reason);
@@ -74,6 +76,9 @@ namespace
             severity = Governor::State::CRITICAL;
         else if (value >= points.high)
             severity = Governor::State::HIGH;
+
+        if (stateRank(severity) > stateRank(maximumValidSeverity))
+            severity = maximumValidSeverity;
 
         if (severity != Governor::State::NORMAL)
             reasons |= reasonMask;
@@ -159,7 +164,7 @@ PressureAwareSafetyGovernor::Output PressureAwareSafetyGovernor::update (
                  requestedState, reasons);
     assessSignal(input.timeFieldPendingPressure, 1.0,
                  config.timeFieldPendingPressure, ReasonTimeFieldPending,
-                 requestedState, reasons);
+                 requestedState, reasons, State::CRITICAL);
     assessSignal(input.externalFifoPressure, 1.0,
                  config.externalFifoPressure, ReasonExternalFifo,
                  requestedState, reasons);
@@ -319,19 +324,33 @@ bool PressureAwareSafetyGovernor::allSignalsBelowRecoveryBoundary (
 {
     const double multiplier = 1.0 - config.recoveryHysteresis;
     const auto below = [this, multiplier] (double value,
-                                            const TripPoints& points) noexcept
+                                            const TripPoints& points,
+                                            State maximumValidSeverity) noexcept
     {
+        // A valid signal cannot justify retaining a state above its declared
+        // severity ceiling. In particular, full Time Field pending pressure is
+        // capped at CRITICAL so an unrelated EMERGENCY can recover far enough
+        // to reopen admission and let that bounded work drain.
+        if (stateRank(state_) > stateRank(maximumValidSeverity))
+            return true;
+
         return value < thresholdForState(points, state_) * multiplier;
     };
 
-    return below(input.ingressEventsPerSecond, config.ingressEventsPerSecond)
-        && below(input.lifecycleQueuePressure, config.lifecycleQueuePressure)
-        && below(input.motionDropDelta, config.motionDropDelta)
-        && below(input.timeFieldPendingPressure, config.timeFieldPendingPressure)
-        && below(input.externalFifoPressure, config.externalFifoPressure)
+    return below(input.ingressEventsPerSecond, config.ingressEventsPerSecond,
+                 State::EMERGENCY)
+        && below(input.lifecycleQueuePressure, config.lifecycleQueuePressure,
+                 State::EMERGENCY)
+        && below(input.motionDropDelta, config.motionDropDelta,
+                 State::EMERGENCY)
+        && below(input.timeFieldPendingPressure, config.timeFieldPendingPressure,
+                 State::CRITICAL)
+        && below(input.externalFifoPressure, config.externalFifoPressure,
+                 State::EMERGENCY)
         && below(input.externalFifoOldestAgeSeconds,
-                 config.externalFifoOldestAgeSeconds)
-        && below(input.processDeadlineRatio, config.processDeadlineRatio);
+                 config.externalFifoOldestAgeSeconds, State::EMERGENCY)
+        && below(input.processDeadlineRatio, config.processDeadlineRatio,
+                 State::EMERGENCY);
 }
 
 void PressureAwareSafetyGovernor::clearRecoveryCandidate() noexcept

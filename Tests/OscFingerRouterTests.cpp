@@ -47,6 +47,12 @@ int main()
         && events[3].type == OscFingerRouter::Event::Off,
         "on and off remain distinct lifecycle events");
 
+    router.pushCancel(1, 0);
+    expect(router.drain(events.data(), (int) events.size()) == 1
+               && events[0].type == OscFingerRouter::Event::Cancel
+               && events[0].sourceId == 1 && events[0].finger == 0,
+           "watchdog cancel is a distinct ordered lifecycle event");
+
     router.pushOn(255, 9, true);
     expect(router.drain(events.data(), 1) == 1
         && events[0].sourceId == 255 && events[0].finger == 9,
@@ -240,6 +246,39 @@ int main()
                "256-source 60 Hz crowd load is bounded to 512 latest-value motion events");
     }
 
+    // Motion and lifecycle loss have different safety consequences. Force the
+    // marker FIFO past capacity while keeping the priority lifecycle queue
+    // below its ceiling, then verify only the motion counter moves and no
+    // canonical reset is requested.
+    {
+        OscFingerRouter motionOverflowRouter;
+        for (int source = 0; source < OscFingerRouter::MAX_SOURCES; ++source)
+            for (int finger = 0; finger < OscFingerRouter::MAX_FINGERS; ++finger)
+            {
+                motionOverflowRouter.pushX(source, finger, 0.25f);
+                motionOverflowRouter.pushY(source, finger, 0.75f);
+            }
+
+        for (int source = 0; source < OscFingerRouter::MAX_SOURCES; ++source)
+            for (int finger = 0; finger < OscFingerRouter::MAX_FINGERS; ++finger)
+                motionOverflowRouter.pushOn(source, finger, true);
+
+        for (int source = 0; source < OscFingerRouter::MAX_SOURCES; ++source)
+            for (int finger = 0; finger < OscFingerRouter::MAX_FINGERS; ++finger)
+            {
+                motionOverflowRouter.pushX(source, finger, 0.5f);
+                motionOverflowRouter.pushY(source, finger, 0.5f);
+            }
+
+        const auto motionDrops =
+            motionOverflowRouter.getDroppedMotionEventCount();
+        expect(motionDrops > 0
+                   && motionOverflowRouter.getDroppedLifecycleEventCount() == 0
+                   && motionOverflowRouter.getDroppedEventCount() == motionDrops
+                   && ! motionOverflowRouter.takeResetRequest(),
+               "motion FIFO loss increments only the soft motion-drop counter");
+    }
+
     // Lifecycle overflow still fails safe: unlike motion coalescing, an On/Off
     // transition is never silently discarded without requesting canonical
     // rehydration on the audio thread.
@@ -248,9 +287,13 @@ int main()
         for (int i = 0; i < OscFingerRouter::EVENT_QUEUE_SIZE + 32; ++i)
             overflowRouter.pushOn(1, 0, (i & 1) != 0);
 
-        expect(overflowRouter.getDroppedEventCount() > 0
+        const auto lifecycleDrops =
+            overflowRouter.getDroppedLifecycleEventCount();
+        expect(lifecycleDrops > 0
+                   && overflowRouter.getDroppedMotionEventCount() == 0
+                   && overflowRouter.getDroppedEventCount() == lifecycleDrops
                    && overflowRouter.takeResetRequest(),
-               "lifecycle queue overflow requests a safety reset instead of risking a stuck note");
+               "lifecycle overflow increments only its hard counter and requests reset");
         overflowRouter.discardPendingEvents();
     }
 

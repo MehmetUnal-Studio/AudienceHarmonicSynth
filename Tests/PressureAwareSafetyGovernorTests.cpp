@@ -157,6 +157,55 @@ int main()
                "signals promote immediately, retain reasons, and worst wins");
     }
 
+    // Pending is work the Time Field must be allowed to drain. A valid full
+    // queue therefore applies the strict CRITICAL ceilings without closing
+    // attack admission; malformed pressure still fails closed below.
+    {
+        Governor governor;
+        Governor::Input input;
+        input.timeFieldPendingPressure = 1.0;
+        const auto output = governor.update({}, input);
+        expect(output.state == Governor::State::CRITICAL
+                   && output.admitNewAttacks
+                   && has(output, Governor::ReasonTimeFieldPending)
+                   && ! has(output, Governor::ReasonInvalidInput),
+               "valid full pending pressure remains drainable at CRITICAL");
+    }
+
+    // A different signal may close admission at EMERGENCY while Time Field work
+    // is still queued. Since valid pending pressure is capped at CRITICAL, it
+    // must not prevent the EMERGENCY -> CRITICAL recovery step that reopens the
+    // queue's only drain path.
+    {
+        Governor governor;
+        const auto config = quickRecoveryConfig();
+        Governor::Input input;
+        input.lifecycleQueuePressure = 0.95;
+        input.timeFieldPendingPressure = 1.0;
+        auto output = governor.update(config, input);
+        bool recovered = output.state == Governor::State::EMERGENCY
+                      && ! output.admitNewAttacks
+                      && has(output, Governor::ReasonLifecycleQueue)
+                      && has(output, Governor::ReasonTimeFieldPending);
+
+        input.lifecycleQueuePressure = 0.0;
+        input.monotonicSeconds = 0.10;
+        output = governor.update(config, input); // Starts the recovery hold.
+        recovered = recovered && output.state == Governor::State::EMERGENCY;
+        input.monotonicSeconds = 0.35;
+        output = governor.update(config, input);
+        recovered = recovered && output.state == Governor::State::EMERGENCY;
+        input.monotonicSeconds = 0.60;
+        output = governor.update(config, input);
+
+        expect(recovered && output.state == Governor::State::CRITICAL
+                   && output.admitNewAttacks
+                   && has(output, Governor::ReasonTimeFieldPending)
+                   && has(output, Governor::ReasonRecoveryHeld)
+                   && ! has(output, Governor::ReasonLifecycleQueue),
+               "capped pending pressure cannot latch an unrelated EMERGENCY");
+    }
+
     // HIGH does not recover while merely below the entry threshold; it must be
     // below the 20% hysteresis boundary for the complete hold.
     {

@@ -141,6 +141,30 @@ int main()
     }
 
     {
+        auto state = makeState(CosmicStateMigration::currentSchema);
+        addParam(state, "normalMidiChannel", 7.0f);
+        addParam(state, "crowdGovernorEnabled", 1.0f);
+        const auto xml = state.createXml();
+        auto xmlRoundTrip = xml != nullptr
+                          ? juce::ValueTree::fromXml(*xml) : juce::ValueTree{};
+        CosmicStateMigration::migrate(xmlRoundTrip);
+        expect(sameValue(valueOf(xmlRoundTrip, "normalMidiChannel"), 7.0f)
+                   && sameValue(valueOf(xmlRoundTrip, "crowdGovernorEnabled"), 1.0f)
+                   && (int) xmlRoundTrip.getProperty("cosmicMicrowaveSchema", 0)
+                        == CosmicStateMigration::currentSchema,
+               "current-schema XML text marker preserves channel and Adaptive policy");
+    }
+
+    {
+        auto state = makeState(CosmicStateMigration::currentSchema);
+        state.setProperty("cosmicMicrowaveSchema", "9 trailing", nullptr);
+        addParam(state, "normalMidiChannel", 7.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "normalMidiChannel"), 6.0f),
+               "malformed schema text cannot bypass legacy-safe migration");
+    }
+
+    {
         auto state = makeState(2);
         addParam(state, "scaleMode", 6.0f);
         addParam(state, "spectralElement", 8.0f);
@@ -459,6 +483,79 @@ int main()
                    && sameValue(valueOf(state, "conductorVoiceBudget"), 1.0f)
                    && sameValue(valueOf(state, "crowdMacroMotionCc"), 127.0f),
                "hostile schema-8 venue values clamp before APVTS publication");
+    }
+
+    {
+        auto state = makeState(8);
+        addParam(state, "midiOutputType", 2.0f);       // retired MPE
+        addParam(state, "normalMidiRoutingMode", 0.0f);
+        addParam(state, "crowdMacrosEnabled", 1.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "midiOutputType"), 1.0f)
+                   && sameValue(valueOf(state, "normalMidiRoutingMode"), 1.0f)
+                   && sameValue(valueOf(state, "crowdMacrosEnabled"), 0.0f),
+               "schema-8 MPE and Crowd Macro state migrates to per-source Notes Only");
+
+        const int children = state.getNumChildren();
+        CosmicStateMigration::migrate(state);
+        expect(state.getNumChildren() == children
+                   && sameValue(valueOf(state, "midiOutputType"), 1.0f)
+                   && sameValue(valueOf(state, "crowdMacrosEnabled"), 0.0f),
+               "schema-9 Notes Only migration is idempotent");
+    }
+
+    {
+        auto state = makeState(CosmicStateMigration::currentSchema);
+        addParam(state, "midiOutputType", 0.0f);
+        addParam(state, "exclusiveUdpPort", 0.0f);
+        addParam(state, "mpeSendSetupMessages", 0.0f);
+        addParam(state, "crowdMacrosEnabled", 1.0f);
+        addParam(state, "ensembleSameNoteMode", 1.0f);
+        CosmicStateMigration::migrate(state);
+        expect(sameValue(valueOf(state, "midiOutputType"), 0.0f)
+                   && sameValue(valueOf(state, "exclusiveUdpPort"), 0.0f)
+                   && sameValue(valueOf(state, "mpeSendSetupMessages"), 0.0f)
+                   && sameValue(valueOf(state, "crowdMacrosEnabled"), 1.0f)
+                   && sameValue(valueOf(state, "ensembleSameNoteMode"), 1.0f),
+               "current-schema discrete compatibility parameters round-trip without migration loss");
+    }
+
+    {
+        auto legacy = makeState(9);
+        addParam(legacy, "normalMidiRoutingMode", 1.0f);
+        CosmicStateMigration::migrate(legacy);
+        expect(sameValue(valueOf(legacy, "noteDuration"), 3.0f)
+                   && sameValue(valueOf(legacy, "sourceCapacity"), 2.0f)
+                   && sameValue(valueOf(legacy, "ensembleSameNoteMode"), 0.0f)
+                   && sameValue(valueOf(legacy, "normalMidiRoutingMode"), 1.0f),
+               "schema-9 projects gain 16n duration, 256-source capacity and Tie articulation");
+    }
+
+    {
+        auto partialCurrent = makeState(CosmicStateMigration::currentSchema);
+        CosmicStateMigration::migrate(partialCurrent);
+        expect(sameValue(valueOf(partialCurrent, "noteDuration"), 3.0f)
+                   && sameValue(valueOf(partialCurrent, "sourceCapacity"), 0.0f)
+                   && sameValue(valueOf(partialCurrent, "ensembleSameNoteMode"), 0.0f),
+               "partial current state receives fresh 16n, 64-source and Tie defaults");
+    }
+
+    {
+        auto hostile = makeState(CosmicStateMigration::currentSchema);
+        addParam(hostile, "noteDuration", 999.0f);
+        addParam(hostile, "sourceCapacity", -999.0f);
+        addParam(hostile, "ensembleSameNoteMode", 999.0f);
+        CosmicStateMigration::migrate(hostile);
+        expect(sameValue(valueOf(hostile, "noteDuration"), 4.0f)
+                   && sameValue(valueOf(hostile, "sourceCapacity"), 0.0f)
+                   && sameValue(valueOf(hostile, "ensembleSameNoteMode"), 0.0f),
+               "duration/capacity clamp while hostile same-note state falls back to Tie");
+
+        auto hostileNegative = makeState(CosmicStateMigration::currentSchema);
+        addParam(hostileNegative, "ensembleSameNoteMode", -999.0f);
+        CosmicStateMigration::migrate(hostileNegative);
+        expect(sameValue(valueOf(hostileNegative, "ensembleSameNoteMode"), 0.0f),
+               "negative same-note state also falls back to Tie");
     }
 
     {

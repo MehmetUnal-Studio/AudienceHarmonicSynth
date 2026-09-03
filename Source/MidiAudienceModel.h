@@ -7,6 +7,8 @@
 #include "OscFingerRouter.h"
 #include "SeatEventSink.h"
 
+class SourceQualityController;
+
 // MIDI-only audience state shared by the OSC/control and UI threads.
 //
 // The incoming OSC row/zone is intentionally not part of source identity: a
@@ -40,7 +42,8 @@ public:
     };
 
     explicit MidiAudienceModel (OscFingerRouter& destination,
-                                MonotonicClock clock = nullptr) noexcept;
+                                MonotonicClock clock = nullptr,
+                                SourceQualityController* quality = nullptr) noexcept;
 
     void setX  (int row, int sourceId, float xNorm) noexcept override;
     void setY  (int row, int sourceId, float yNorm) noexcept override;
@@ -55,7 +58,7 @@ public:
 
     // Message/control-thread watchdog. Live OSC On arms a touch; U/V/Line only
     // refresh an already-armed touch. Stationary simulator voices never arm and
-    // therefore never expire. Returns the number of ordered synthetic Off
+    // therefore never expire. Returns the number of ordered synthetic Cancel
     // events published during this bounded pass.
     int expireStaleLiveTouches (
         std::uint32_t timeoutMs = liveTouchTimeoutMs) noexcept;
@@ -70,10 +73,26 @@ public:
     int getActiveFingerCount() const noexcept;
     int getLastActiveSourceId() const noexcept;
 
+    // Message/control-thread-only runtime admission limit for dense, zone-local
+    // source IDs. Physical storage remains fixed at MAX_SOURCES; changing this
+    // value never allocates or remaps an already-admitted source. Shrinking
+    // takes the producer lock, retires upper sources in source/finger order and
+    // returns the number of active fingers released. Never call from audio.
+    int setSourceCapacity (int newCapacity) noexcept;
+    int getSourceCapacity() const noexcept
+    {
+        return sourceCapacity.load(std::memory_order_acquire);
+    }
+    std::uint32_t getCapacityDroppedEventCount() const noexcept
+    {
+        return capacityDroppedEvents.load(std::memory_order_relaxed);
+    }
+
     // Message/control-thread crowd telemetry. A live source remains recent for
     // a short window after release so brief, asynchronous taps still represent
-    // the audience size seen by the Adaptive Crowd Governor. Simulator-held
-    // sources are represented separately by getActiveSourceCount().
+    // the audience size seen by the Adaptive Crowd Governor. The processor
+    // combines this window with Simulator::getSimSeatCount(), while current
+    // active sources remain available through getActiveSourceCount().
     int getRecentLiveSourceCount (
         std::uint32_t windowMs = recentSourceWindowMs) const noexcept;
 
@@ -109,12 +128,17 @@ private:
     static float clampNormalized (float value) noexcept;
     static int countSetBits (std::uint16_t bits) noexcept;
     static std::uint32_t systemMonotonicMilliseconds() noexcept;
+    static void incrementSaturating (
+        std::atomic<std::uint32_t>& counter) noexcept;
+    bool isSourceAdmittedLocked (int sourceId) const noexcept;
+    int retireSourceLocked (int sourceId) noexcept;
     void setFingerXLocked (int sourceId, int finger, float value) noexcept;
     void setFingerYLocked (int sourceId, int finger, float value) noexcept;
     void setFingerOnLocked (int sourceId, int finger, bool on) noexcept;
 
     OscFingerRouter& router;
     MonotonicClock monotonicClock;
+    SourceQualityController* qualityController = nullptr;
     // Live OSC and the message-thread simulator may publish concurrently.
     // Serialise each canonical-ledger mutation with its matching FIFO event so
     // those two representations always have the same total order. The audio
@@ -125,4 +149,8 @@ private:
     std::atomic<int> activeFingerCount { 0 };
     std::atomic<int> lastActiveSourceId { -1 };
     std::atomic<bool> forwardMotionEvents { true };
+    // Existing callers retain the historical 256-source behaviour until the
+    // owning processor applies its fresh/restored 64/128/256 setting.
+    std::atomic<int> sourceCapacity { MAX_SOURCES };
+    std::atomic<std::uint32_t> capacityDroppedEvents { 0 };
 };

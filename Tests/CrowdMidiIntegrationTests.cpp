@@ -96,6 +96,9 @@ namespace
                 case CrowdTimeField::OutputEvent::Type::Release:
                     destination.type = MpeMidiOutput::NoteEvent::NoteOff;
                     break;
+                case CrowdTimeField::OutputEvent::Type::Cancel:
+                    destination.type = MpeMidiOutput::NoteEvent::CancelVoice;
+                    break;
                 case CrowdTimeField::OutputEvent::Type::SampleMotion:
                     destination.type = MpeMidiOutput::NoteEvent::Expression;
                     break;
@@ -211,8 +214,21 @@ int main()
     juce::MidiBuffer noteOffs;
     midi.render(midiConfig, midiOffs.data(), (int) midiOffs.size(), noteOffs, 512);
     int physicalOffs = 0;
-    bool channelsCorrect = true;
     for (const auto metadata : noteOffs)
+    {
+        const auto* bytes = metadata.data;
+        if (metadata.numBytes < 3 || (bytes[0] & 0xf0) != 0x80)
+            continue;
+        ++physicalOffs;
+    }
+    expect(physicalOffs == 0 && midi.getScheduledNoteCount() == 3,
+           "semantic releases preserve the three fixed-duration tails");
+
+    juce::MidiBuffer deadlineOffs;
+    midi.render(midiConfig, nullptr, 0, deadlineOffs, 2217);
+    physicalOffs = 0;
+    bool channelsCorrect = true;
+    for (const auto metadata : deadlineOffs)
     {
         const auto* bytes = metadata.data;
         if (metadata.numBytes < 3 || (bytes[0] & 0xf0) != 0x80)
@@ -223,15 +239,16 @@ int main()
         channelsCorrect = channelsCorrect
                        && ((channel == 1 && (note == 69 || note == 71))
                            || (channel == 2 && note == 70));
-        expect(metadata.samplePosition == 10,
-               "every NoteOff retains its lifecycle sample offset");
+        expect(metadata.samplePosition == 2216,
+               "every duration NoteOff retains its exact sample deadline");
     }
-    expect(physicalOffs == 3 && channelsCorrect,
-           "NoteOffs return on the stored source channels with no stuck owner");
+    expect(physicalOffs == 3 && channelsCorrect
+               && midi.getScheduledNoteCount() == 0,
+           "deadline NoteOffs return on the stored source channels");
 
     // Live-phone disconnect watchdog: the canonical model publishes an ordered
-    // synthetic Off after exactly 3 s. Verify both immediate Flow and a timed
-    // Grid path close the same source-owned MIDI channel.
+    // synthetic Cancel after exactly 3 s. Verify both immediate Flow and a
+    // timed Grid path close only the same source-owned MIDI tail.
     for (const auto mode : { CrowdTimeField::Mode::Flow,
                              CrowdTimeField::Mode::Grid })
     {
@@ -286,42 +303,43 @@ int main()
         const int routedOffCount = liveRouter.drain(routed.data(),
                                                     (int) routed.size());
         CrowdTimeField::InputEvent offInput;
-        bool foundRoutedOff = false;
+        bool foundRoutedCancel = false;
         for (int index = 0; index < routedOffCount; ++index)
         {
-            if (routed[(size_t) index].type != OscFingerRouter::Event::Off)
+            if (routed[(size_t) index].type != OscFingerRouter::Event::Cancel)
                 continue;
-            offInput.type = CrowdTimeField::InputEvent::Type::Off;
+            offInput.type = CrowdTimeField::InputEvent::Type::Cancel;
             offInput.sourceId = routed[(size_t) index].sourceId;
             offInput.voiceId = CrowdTimeField::voiceIdFor(offInput.sourceId, 0);
-            foundRoutedOff = true;
+            foundRoutedCancel = true;
         }
 
         CrowdTimeField::OutputBlock watchdogRelease;
         scheduler.process(watchdogTiming,
                           frameAt(512.0 * 120.0 / (60.0 * 48000.0)),
-                          &offInput, foundRoutedOff ? 1 : 0,
+                          &offInput, foundRoutedCancel ? 1 : 0,
                           watchdogRelease);
+        bool timeFieldCancelSeen = false;
+        for (int index = 0; index < watchdogRelease.count; ++index)
+            timeFieldCancelSeen = timeFieldCancelSeen
+                || watchdogRelease.events[(size_t) index].type
+                    == CrowdTimeField::OutputEvent::Type::Cancel;
         MpeMidiOutput::NoteEvent release;
-        release.type = MpeMidiOutput::NoteEvent::NoteOff;
+        release.type = MpeMidiOutput::NoteEvent::CancelVoice;
         release.sourceId = CrowdTimeField::voiceIdFor(17, 0);
         release.participantId = 17;
         juce::MidiBuffer watchdogOffMidi;
-        for (int index = 0; index < watchdogRelease.count; ++index)
-        {
-            if (watchdogRelease.events[(size_t) index].type
-                != CrowdTimeField::OutputEvent::Type::Release)
-                continue;
-            release.sampleOffset = watchdogRelease.events[(size_t) index].sampleOffset;
-            watchdogMidi.render(midiConfig, &release, 1, watchdogOffMidi, 512);
-        }
+        watchdogMidi.render(midiConfig, &release,
+                            foundRoutedCancel ? 1 : 0, watchdogOffMidi, 512);
 
-        expect(foundRoutedOn && expired == 1 && foundRoutedOff
+        expect(foundRoutedOn && expired == 1 && foundRoutedCancel
+                   && timeFieldCancelSeen
                    && hasPhysicalNote(watchdogOnMidi, true, 1)
-                   && hasPhysicalNote(watchdogOffMidi, false, 1),
+                   && hasPhysicalNote(watchdogOffMidi, false, 1)
+                   && watchdogMidi.getScheduledNoteCount() == 0,
                mode == CrowdTimeField::Mode::Flow
-                   ? "watchdog Off closes the source-owned channel in Flow"
-                   : "watchdog Off closes the source-owned channel in timed Grid");
+                   ? "watchdog cancels only the disconnected Flow voice immediately"
+                   : "watchdog cancels only the disconnected Grid voice immediately");
     }
 
     // A large audience selects the densest policy, while the effective active
@@ -480,8 +498,8 @@ int main()
         juce::MidiBuffer canonicalOffMidi;
         releaseSource(3, 0.256, canonicalOffMidi);
         expect(queuedAboveCap
-                   && hasPhysicalNote(canonicalOffMidi, false, 3),
-               "canonical Off still releases its stored channel under Governor control");
+                   && ! hasPhysicalNote(canonicalOffMidi, false, 3),
+               "canonical Off preserves its fixed tail under Governor control");
 
         juce::MidiBuffer releaseOne;
         juce::MidiBuffer releaseTwo;
@@ -628,8 +646,9 @@ int main()
                    && countOutputType(
                         safeFlowOutput,
                         CrowdTimeField::OutputEvent::Type::Release) == 1
-                   && hasPhysicalNote(emergencyMidi, false, 2),
-               "Emergency Flow blocks attacks but never blocks the owned NoteOff");
+                   && ! hasPhysicalNote(emergencyMidi, false, 2)
+                   && safeFlowMidi.getScheduledNoteCount() == 4,
+               "Emergency Flow blocks attacks while normal Off preserves its tail");
     }
 
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";

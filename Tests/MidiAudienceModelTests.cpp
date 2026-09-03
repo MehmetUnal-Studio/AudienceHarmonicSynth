@@ -1,9 +1,11 @@
 #include "../Source/MidiAudienceModel.h"
+#include "../Source/SourceQualityController.h"
 
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <thread>
 
 namespace
@@ -80,6 +82,113 @@ int main()
                && MidiAudienceModel::midiChannelForSourceId(256) == 0
                && model.getSourceSnapshot(-1).midiChannel == 0,
            "invalid source IDs do not masquerade as routable MIDI channels");
+
+    {
+        bool balanced = true;
+        for (const int capacity : { 64, 128, 256 })
+        {
+            std::array<int, 16> channelCounts {};
+            for (int sourceId = 0; sourceId < capacity; ++sourceId)
+            {
+                const int channel = MidiAudienceModel::midiChannelForSourceId(sourceId);
+                balanced = balanced && channel >= 1 && channel <= 16;
+                if (channel >= 1 && channel <= 16)
+                    ++channelCounts[(size_t) (channel - 1)];
+            }
+
+            for (const int count : channelCounts)
+                balanced = balanced && count == capacity / 16;
+        }
+
+        expect(balanced
+                   && MidiAudienceModel::midiChannelForSourceId(0) == 16,
+               "64/128/256 dense domains balance at 4/8/16 sources per channel with source 0 on channel 16");
+    }
+
+    // Capacity rejects only syntactically valid events above the dense domain.
+    // Malformed protocol identities and non-finite values remain ordinary
+    // validation failures and do not pollute overload telemetry.
+    {
+        OscFingerRouter capacityRouter;
+        MidiAudienceModel capacityModel(capacityRouter, &fakeMonotonicClock);
+        expect(capacityModel.getSourceCapacity() == MidiAudienceModel::MAX_SOURCES
+                   && capacityModel.setSourceCapacity(64) == 0,
+               "existing model callers retain 256 until a runtime capacity is applied");
+
+        capacityModel.setFingerX(0, 63, 0, 0.25f);
+        capacityModel.setFingerY(0, 63, 0, 0.75f);
+        capacityModel.setFingerOn(0, 63, 0, true);
+        capacityModel.setFingerX(0, 64, 0, 0.25f);
+        capacityModel.setFingerY(0, 64, 0, 0.75f);
+        capacityModel.setFingerOn(0, 64, 0, true);
+        capacityModel.setFingerOn(0, 64, 0, false);
+        capacityModel.setLiveFingerX(0, 64, 0, 0.5f);
+        capacityModel.setFingerOn(0, 256, 0, true);
+        capacityModel.setFingerX(0, 64, 0,
+            std::numeric_limits<float>::quiet_NaN());
+
+        std::array<OscFingerRouter::Event, 8> capacityEvents {};
+        const int capacityEventCount = capacityRouter.drain(
+            capacityEvents.data(), (int) capacityEvents.size());
+        expect(capacityEventCount == 3
+                   && capacityModel.getFingerSnapshot(63, 0).active
+                   && ! capacityModel.getFingerSnapshot(64, 0).active
+                   && capacityModel.getActiveSourceCount() == 1
+                   && capacityModel.getRecentLiveSourceCount() == 0
+                   && capacityModel.getCapacityDroppedEventCount() == 5,
+               "capacity admits 0..63 and counts bounded valid-event rejection separately");
+    }
+
+    // Shrink cleanup is source/finger ordered, preserves lower identities and
+    // clears upper live provenance as well as canonical positions.
+    {
+        OscFingerRouter shrinkRouter;
+        MidiAudienceModel shrinkModel(shrinkRouter, &fakeMonotonicClock);
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        shrinkModel.setFingerOn(0, 0, 0, true);
+        shrinkModel.setFingerOn(0, 63, 0, true);
+        shrinkModel.setFingerX(0, 64, 2, 0.7f);
+        shrinkModel.setFingerOn(0, 64, 0, true);
+        shrinkModel.setFingerOn(0, 64, 2, true);
+        shrinkModel.setLiveFingerOn(0, 127, 1, true);
+        shrinkModel.setFingerOn(0, 255, 9, true);
+        shrinkRouter.discardPendingEvents();
+
+        const int released = shrinkModel.setSourceCapacity(64);
+        std::array<OscFingerRouter::Event, 8> shrinkEvents {};
+        const int shrinkEventCount = shrinkRouter.drain(
+            shrinkEvents.data(), (int) shrinkEvents.size());
+        const bool ordered = shrinkEventCount == 4
+            && shrinkEvents[0].type == OscFingerRouter::Event::Off
+            && shrinkEvents[0].sourceId == 64 && shrinkEvents[0].finger == 0
+            && shrinkEvents[1].sourceId == 64 && shrinkEvents[1].finger == 2
+            && shrinkEvents[2].sourceId == 127 && shrinkEvents[2].finger == 1
+            && shrinkEvents[3].sourceId == 255 && shrinkEvents[3].finger == 9;
+        expect(released == 4 && ordered
+                   && shrinkModel.getSourceCapacity() == 64
+                   && shrinkModel.getActiveSourceCount() == 2
+                   && shrinkModel.getActiveFingerCount() == 2
+                   && shrinkModel.getFingerSnapshot(0, 0).active
+                   && shrinkModel.getFingerSnapshot(63, 0).active
+                   && ! shrinkModel.getFingerSnapshot(64, 0).active
+                   && nearlyEqual(shrinkModel.getFingerSnapshot(64, 2).x, 0.0f)
+                   && shrinkModel.getRecentLiveSourceCount() == 0,
+               "runtime shrink deterministically releases and erases only retired sources");
+
+        const auto dropsBeforeExpansion =
+            shrinkModel.getCapacityDroppedEventCount();
+        shrinkModel.setFingerOn(0, 64, 0, true);
+        const bool rejectedWhileSmall = ! shrinkModel.getFingerSnapshot(64, 0).active
+            && shrinkModel.getCapacityDroppedEventCount()
+                   == dropsBeforeExpansion + 1;
+        const int releasedOnExpansion = shrinkModel.setSourceCapacity(128);
+        shrinkModel.setFingerOn(0, 64, 0, true);
+        expect(rejectedWhileSmall && releasedOnExpansion == 0
+                   && shrinkModel.getFingerSnapshot(64, 0).active
+                   && shrinkModel.getFingerSnapshot(0, 0).active
+                   && MidiAudienceModel::midiChannelForSourceId(0) == 16,
+               "capacity expansion preserves lower sources and admits new IDs without remapping");
+    }
 
     model.setFingerOn(8, 17, 2, false);
     source17 = model.getSourceSnapshot(17);
@@ -189,6 +298,109 @@ int main()
                "stationary simulator touch is not enrolled in the live OSC watchdog");
     }
 
+    // Production readiness observes only accepted live OSC APIs. Simulator
+    // state may exercise the musical engine but cannot certify a venue signal
+    // path, and a source outside the selected dense capacity becomes a hard
+    // capacity incident rather than false coverage.
+    {
+        OscFingerRouter qualityRouter;
+        SourceQualityController qualityController;
+        MidiAudienceModel qualityModel(qualityRouter, &fakeMonotonicClock,
+                                       &qualityController);
+        SourceQualityController::Config config;
+        config.expectedSources = 1;
+        config.readinessHoldMs = 0;
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        qualityController.arm(100u, {});
+
+        qualityModel.setFingerX(0, 0, 0, 0.2f);
+        qualityModel.setFingerY(0, 0, 0, 0.8f);
+        qualityModel.setFingerOn(0, 0, 0, true);
+        qualityModel.setFingerOn(0, 0, 0, false);
+        auto output = qualityController.update(config, {}, 200u);
+        const bool simulatorExcluded = output.observedSources == 0
+                                    && output.qualifiedSources == 0
+                                    && ! output.admissionOpen;
+
+        fakeNowMs.store(300, std::memory_order_relaxed);
+        qualityModel.setLiveFingerX(0, 0, 0, 0.2f);
+        qualityModel.setLiveFingerY(0, 0, 0, 0.8f);
+        qualityModel.setLiveFingerOn(0, 0, 0, true);
+        output = qualityController.update(config, {}, 300u);
+        const bool liveQualified = output.observedSources == 1
+                                && output.qualifiedSources == 1
+                                && output.activeSources == 1
+                                && output.state
+                                    == SourceQualityController::State::READY
+                                && output.admissionOpen;
+
+        qualityModel.setLiveFingerOn(0, 0, 0, false);
+
+        qualityModel.setSourceCapacity(64);
+        SourceQualityController::ExternalCounters baseline;
+        baseline.capacityDroppedEvents =
+            qualityModel.getCapacityDroppedEventCount();
+        qualityController.arm(400u, baseline);
+        fakeNowMs.store(500, std::memory_order_relaxed);
+        qualityModel.setLiveFingerX(0, 64, 0, 0.5f);
+        SourceQualityController::ExternalCounters afterDrop;
+        afterDrop.capacityDroppedEvents =
+            qualityModel.getCapacityDroppedEventCount();
+        config.expectedSources = 64;
+        output = qualityController.update(config, afterDrop, 500u);
+        expect(simulatorExcluded && liveQualified
+                   && output.capacityDropCount == 1u
+                   && SourceQualityController::hasReason(
+                       output.reasonBits,
+                       SourceQualityController::ReasonCapacityDrop)
+                   && ! output.admissionOpen,
+               "Ready Gate excludes simulator traffic and rejects live source 64 at capacity 64");
+    }
+
+    // Retiring a capacity range must also erase the controller's live masks.
+    // Otherwise shrink -> expand can resurrect a stale source or classify its
+    // next legitimate On as a duplicate.
+    {
+        OscFingerRouter rangeRouter;
+        SourceQualityController rangeController;
+        MidiAudienceModel rangeModel(rangeRouter, &fakeMonotonicClock,
+                                     &rangeController);
+        rangeModel.setSourceCapacity(128);
+        SourceQualityController::Config config;
+        config.expectedSources = 128;
+        config.readinessHoldMs = 0;
+        config.requireAllSourcesActiveForReady = false;
+
+        fakeNowMs.store(100, std::memory_order_relaxed);
+        rangeController.arm(100u, {});
+        rangeModel.setLiveFingerX(0, 100, 0, 0.25f);
+        rangeModel.setLiveFingerY(0, 100, 0, 0.75f);
+        rangeModel.setLiveFingerOn(0, 100, 0, true);
+        auto output = rangeController.update(config, {}, 100u);
+        const bool upperWasActive = output.activeSources == 1
+                                 && output.duplicateOnCount == 0u;
+
+        rangeRouter.discardPendingEvents();
+        const int released = rangeModel.setSourceCapacity(64);
+        rangeRouter.discardPendingEvents();
+        const int releasedOnExpansion = rangeModel.setSourceCapacity(128);
+        output = rangeController.update(config, {}, 200u);
+        const bool didNotResurrect = released == 1
+                                  && releasedOnExpansion == 0
+                                  && output.activeSources == 0
+                                  && output.duplicateOnCount == 0u;
+
+        fakeNowMs.store(300, std::memory_order_relaxed);
+        rangeModel.setLiveFingerX(0, 100, 0, 0.4f);
+        rangeModel.setLiveFingerY(0, 100, 0, 0.6f);
+        rangeModel.setLiveFingerOn(0, 100, 0, true);
+        output = rangeController.update(config, {}, 300u);
+        expect(upperWasActive && didNotResurrect
+                   && output.activeSources == 1
+                   && output.duplicateOnCount == 0u,
+               "capacity shrink/expand clears retired Ready Gate live ownership");
+    }
+
     // Governor participation uses a rolling unique-source window rather than
     // only the instantaneous held count. Any valid live packet refreshes that
     // source, releases remain visible for eight seconds, and simulator-only
@@ -215,7 +427,7 @@ int main()
     }
 
     // Live OSC starts tracking explicitly. Refresh packets preserve the touch,
-    // the exact 3 s boundary expires it, and the synthetic Off is ordered.
+    // the exact 3 s boundary expires it, and the synthetic Cancel is ordered.
     {
         OscFingerRouter watchdogRouter;
         MidiAudienceModel watchdogModel(watchdogRouter, &fakeMonotonicClock);
@@ -240,9 +452,9 @@ int main()
         const int expiryCount = watchdogRouter.drain(expiryEvents.data(),
                                                       (int) expiryEvents.size());
         expect(beforeBoundary && atBoundary && expiryCount == 1
-                   && expiryEvents[0].type == OscFingerRouter::Event::Off
+                   && expiryEvents[0].type == OscFingerRouter::Event::Cancel
                    && expiryEvents[0].sourceId == 7 && expiryEvents[0].finger == 0,
-               "1 Hz live heartbeat expires once at the exact 3 s boundary with ordered Off");
+               "1 Hz live heartbeat expires once at the exact 3 s boundary with ordered Cancel");
 
         // Refresh after expiry updates position only. It cannot reactivate or
         // re-enrol the voice; a new explicit live On is required.
@@ -306,7 +518,8 @@ int main()
         bool fifoActive = false;
         for (int i = 0; i < raceCount; ++i)
             if (raceEvents[(size_t) i].type == OscFingerRouter::Event::On
-                || raceEvents[(size_t) i].type == OscFingerRouter::Event::Off)
+                || raceEvents[(size_t) i].type == OscFingerRouter::Event::Off
+                || raceEvents[(size_t) i].type == OscFingerRouter::Event::Cancel)
                 fifoActive = raceEvents[(size_t) i].type == OscFingerRouter::Event::On;
         expect(raceCount >= 1 && fifoActive
                    && raceModel.getFingerSnapshot(9, 0).active,

@@ -7,6 +7,8 @@
 #include "PluginProcessor.h"
 
 class SourceActivityMap;
+class SegmentedChoice;
+class PitchSpectrumDisplay;
 
 // MIDI-only editor for Cosmic Microwave. The plug-in intentionally keeps a
 // silent audio shell for host compatibility, but every visible control here is
@@ -55,11 +57,11 @@ private:
     juce::Label activeSourcesValue;
     juce::Label activeFingersValue;
     juce::Label notesSentValue;
-    juce::Label mpeVoicesValue;
+    juce::Label activeNotesValue;
     juce::Label activeSourcesCaption;
     juce::Label activeFingersCaption;
     juce::Label notesSentCaption;
-    juce::Label mpeVoicesCaption;
+    juce::Label activeNotesCaption;
 
     // OSC input card
     juce::Label portLabel;
@@ -74,11 +76,13 @@ private:
     juce::Label zoneStatusLabel;
 
     // Simulator card
-    juce::TextButton simAddButton { "+ Source" };
-    juce::TextButton simCrowdButton { "+ 25" };
-    juce::TextButton simRemoveButton { "Remove" };
+    juce::TextButton simAddButton { "+1 Held" };
+    juce::TextButton simCrowdButton { "+25 Crowd" };
+    juce::TextButton simRemoveButton { "Remove 1" };
     juce::TextButton simClearButton { "Clear" };
-    juce::ToggleButton simMoveButton { "Random movement" };
+    juce::ComboBox simProfileCombo;
+    juce::Label simStatusLabel;
+    juce::ToggleButton simMoveButton { "Move active U/V" };
 
     // Pitch mapping card
     juce::Label rootLabel, rootOctaveLabel, scaleLabel, octavesLabel;
@@ -92,17 +96,16 @@ private:
     juce::Label timeTelemetryLabel;
     juce::TextButton governorModeButton { "ADAPTIVE" };
     juce::Label timeModeLabel, clockSourceLabel, internalBpmLabel, gridDivisionLabel;
+    juce::Label noteDurationLabel, ensembleSameNoteLabel;
     juce::Label maxAttacksLabel, maxActiveVoicesLabel, gatePercentLabel, temporalSpreadLabel;
     juce::Label governorAttacksValue, governorActiveVoicesValue, governorSpreadValue;
     juce::ComboBox timeModeCombo, clockSourceCombo, gridDivisionCombo, temporalSpreadCombo;
+    juce::ComboBox noteDurationCombo, ensembleSameNoteCombo;
     juce::Slider internalBpmSlider, maxAttacksSlider, maxActiveVoicesSlider, gatePercentSlider;
 
     // MIDI mode / channel routing card
-    juce::Label midiTypeLabel, normalRoutingLabel, normalChannelLabel;
-    juce::Label mpeZoneLabel, mpeBendRangeLabel, mpePitchModeLabel;
-    juce::ComboBox midiTypeCombo, normalRoutingCombo, normalChannelCombo;
-    juce::ComboBox mpeZoneCombo, mpeBendRangeCombo, mpePitchModeCombo;
-    juce::ToggleButton mpeSetupButton { "Send MPE setup" };
+    juce::Label midiTypeLabel, normalRoutingLabel, normalChannelLabel, sourceCapacityLabel;
+    juce::ComboBox midiTypeCombo, normalRoutingCombo, normalChannelCombo, sourceCapacityCombo;
 
     // MIDI destination card
     juce::Label destinationLabel;
@@ -117,6 +120,10 @@ private:
     juce::ComboBox outputPathCombo, expectedZoneCombo;
     juce::ToggleButton exclusivePortButton { "Exclusive UDP ownership" };
     juce::Label routeConsoleStatusLabel;
+    juce::Label factoryPresetLabel;
+    juce::ComboBox factoryPresetCombo;
+    juce::TextButton autoAssignRetryButton { "RETRY AUTO" };
+    juce::Label factoryPresetStatusLabel;
 
     // Show Console: pressure-aware safety governor + telemetry
     juce::ToggleButton safetyGovernorButton { "Safety Governor enabled" };
@@ -127,7 +134,7 @@ private:
     // Show Console: venue preflight. Every row includes a text state so status
     // is never communicated by colour alone.
     juce::Label preflightSummaryLabel;
-    std::array<juce::Label, 7> preflightRows;
+    std::array<juce::Label, 8> preflightRows;
 
     // Show Console: process-local Global Conductor
     juce::Label conductorRoleLabel, conductorGroupLabel;
@@ -145,6 +152,13 @@ private:
     juce::Slider macroDensityCcSlider, macroCentroidXCcSlider;
     juce::Slider macroCentroidYCcSlider, macroMotionCcSlider;
     juce::Label macroStatusLabel;
+
+    // Show Console: runtime-only 64/128/256 live-source signal census.
+    juce::TextButton sourceQualityButton { "START 64 CHECK" };
+    juce::Label sourceQualityGateLabel;
+    juce::Label sourceQualityCoverageLabel;
+    juce::Label sourceQualityTimingLabel;
+    juce::Label sourceQualityFaultLabel;
 
     // Show Console: Capture/Replay Chaos Lab is intentionally an external tool
     // so file and UDP I/O can never enter the plug-in audio callback.
@@ -165,10 +179,19 @@ private:
     juce::Rectangle<int> macrosCardBounds;
     juce::Rectangle<int> chaosCardBounds;
 
+    // Presentation-only proxies. The hidden ComboBoxes remain the APVTS
+    // attachment owners; these focusable segmented controls mirror them so
+    // automation/state recall keeps the exact existing parameter semantics.
+    std::unique_ptr<SegmentedChoice> timeModeSegments;
+    std::unique_ptr<SegmentedChoice> clockSourceSegments;
+    std::unique_ptr<SegmentedChoice> pitchSystemSegments;
+    std::unique_ptr<PitchSpectrumDisplay> pitchSpectrumDisplay;
+
     bool showConsolePage = false;
     bool updatingPortEditor = false;
     bool portEditorDirty = false;
     bool refreshingDestination = false;
+    bool refreshingFactoryPreset = false;
     bool destinationRouteUnresolved = false;
     int lastUdpPort = -1;
     int lastVisibilityKey = -1;
@@ -192,6 +215,8 @@ private:
     std::unique_ptr<ComboAttachment> clockSourceAttachment;
     std::unique_ptr<SliderAttachment> internalBpmAttachment;
     std::unique_ptr<ComboAttachment> gridDivisionAttachment;
+    std::unique_ptr<ComboAttachment> noteDurationAttachment;
+    std::unique_ptr<ComboAttachment> ensembleSameNoteAttachment;
     std::unique_ptr<SliderAttachment> maxAttacksAttachment;
     std::unique_ptr<SliderAttachment> maxActiveVoicesAttachment;
     std::unique_ptr<SliderAttachment> gatePercentAttachment;
@@ -200,10 +225,7 @@ private:
     std::unique_ptr<ComboAttachment> midiTypeAttachment;
     std::unique_ptr<ComboAttachment> normalRoutingAttachment;
     std::unique_ptr<ComboAttachment> normalChannelAttachment;
-    std::unique_ptr<ComboAttachment> mpeZoneAttachment;
-    std::unique_ptr<ComboAttachment> mpeBendRangeAttachment;
-    std::unique_ptr<ComboAttachment> mpePitchModeAttachment;
-    std::unique_ptr<ButtonAttachment> mpeSetupAttachment;
+    std::unique_ptr<ComboAttachment> sourceCapacityAttachment;
     std::unique_ptr<ComboAttachment> outputPathAttachment;
     std::unique_ptr<ComboAttachment> expectedZoneAttachment;
     std::unique_ptr<ButtonAttachment> exclusivePortAttachment;

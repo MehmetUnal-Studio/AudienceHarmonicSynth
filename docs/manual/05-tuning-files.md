@@ -1,6 +1,6 @@
 # 05 - Pitch Systems and External Tuning
 
-Cosmic Microwave 2.5.0 maps normalized horizontal position through one of two pitch
+Cosmic Microwave 2.8.0 maps normalized horizontal position through one of two pitch
 systems. **Tonal** provides seven conventional 12-TET scale tables. **Atomic** projects
 stored element emission spectra into playable one-octave degree banks. Both systems
 share **ROOT**, **OCTAVE**, and **RANGE**.
@@ -15,7 +15,7 @@ The selector in the **PITCH MAPPING** card switches between:
 - **Tonal** - choose a familiar scale under **SCALE**.
 - **Atomic** - choose an **ELEMENT** and a **DENSITY**.
 
-New sessions default to **Atomic / Helium / Extended**. The historical 2.0-to-2.1
+New sessions default to **Atomic / Zinc / Core**. The historical 2.0-to-2.1
 migration still restores schema-2 sessions as Tonal so their established pitch mapping
 does not change.
 
@@ -33,8 +33,7 @@ Tonal degrees are semitone offsets from the selected root:
 | Harmonic Minor | `0, 2, 3, 5, 7, 8, 11` | 7 |
 | Whole Tone | `0, 2, 4, 6, 8, 10` | 6 |
 
-These entries are exact 12-TET MIDI notes. In MPE, their pitch wheel is normally
-centered.
+These entries are exact 12-TET MIDI notes and require no tuning messages.
 
 ## Atomic elements
 
@@ -108,28 +107,25 @@ step = min(step, table_size - 1)
 U=`0` selects the first step and U=`1` selects the last. Every source touch stores its own
 current U/X position. Send U before `on` so the first note starts at the intended step.
 
-Movement inside one region updates CC74 but keeps the same pitch. Crossing a region
-selects a new pitch. Changing Pitch System, Root, Octave, Scale, Element, Density, or
+Movement inside one region emits no MIDI message and keeps the same pitch. Crossing a
+region starts a new Note On at the new pitch while the old pitch keeps its captured
+Note Duration tail. Changing Pitch System, Root, Octave, Scale, Element, Density, or
 Range safely re-resolves held source touches in bounded batches.
 
-## Normal MIDI versus MPE pitch
+## Notes Only Atomic pitch
 
-Tonal maps produce the same base note in both output models. Atomic maps expose an
-important difference:
+Tonal maps produce their configured 12-TET notes. Atomic maps are derived from
+element spectra and can contain fractional-semitone degrees, but the v2.8.0 output
+contract contains no Pitch Bend:
 
 | Output | Atomic result |
 |---|---|
-| Normal MIDI | Send the nearest 12-TET MIDI note. No per-note pitch wheel is sent for OSC touches. |
-| MPE MIDI | Keep the element-derived target frequency. Send the nearest MIDI base note plus a per-note pitch-wheel offset before Note On. |
+| Notes Only | Send the nearest 12-TET MIDI note as Note On/Off. |
 
-MPE pitch wheel has finite 14-bit resolution, so “exact” means the catalog's exact
-frequency is the target and is represented to MIDI pitch-wheel resolution. Match the
-receiver's bend range to Cosmic Microwave. The Atomic offset is measured from the
-nearest semitone, but an incorrect receiver range still produces the wrong pitch.
-
-With **Retrigger**, crossing to another pitch step releases the old note and starts the
-new one. **Glide** can move by pitch bend without retriggering only while the target
-can remain on the same nearest base note; changing the required base note retriggers.
+The exact element-derived frequency remains part of the catalog and UI description,
+but only the nearest MIDI note number leaves Cosmic Microwave. Crossing to another
+pitch step starts the new note while the old note keeps its captured duration tail;
+there is no bend/glide path.
 
 ## Applying tuning in a receiving instrument
 
@@ -137,23 +133,23 @@ A receiving instrument can reinterpret Cosmic Microwave's MIDI note numbers usin
 own tuning system. Keep these ownership boundaries in mind:
 
 - Cosmic Microwave selects the outgoing base note and owns matching Note Off messages.
-- In Atomic MPE, Cosmic Microwave also owns the element-derived pitch-wheel offset.
 - The receiver owns the final sounding result after applying its tuning map, transpose,
-  and pitch-bend configuration.
-- Adding receiver tuning on top of Atomic MPE compounds both tunings; do this only when
-  intentional.
-- CC74, CC11, velocity, pressure, source channels, and touch lifecycles are unaffected.
+  and any receiver-side pitch configuration.
+- Cosmic Microwave emits no MPE, Pitch Bend, CC11, CC74, Channel Pressure, RPN, or
+  Crowd Macro CC data.
+- Note-On velocity, source channels, and touch lifecycles remain owned by Cosmic
+  Microwave.
 
-For Normal MIDI, receiver-side microtuning is one way to reinterpret the nearest notes.
-For MPE, ensure the receiver applies tuning independently per member channel and does
-not discard Cosmic Microwave's pitch wheel.
+Receiver-side microtuning is one way to reinterpret the nearest notes. Keep the same
+tuning configuration on every receiving channel that should sound alike.
 
 ## Session migration
 
-Cosmic Microwave 2.5.0 uses state schema 8. Pitch migration remains compatible with the
-earlier schema-3 Pitch System transition:
+Cosmic Microwave 2.8.0 writes state schema 11 and remains compatible with earlier
+state. Pitch migration remains compatible with the earlier schema-3 Pitch System
+transition:
 
-- new sessions start at Atomic / Helium / Extended;
+- new sessions start at Atomic / Zinc / Core;
 - existing schema-2 MIDI-only sessions receive an explicit Tonal selection;
 - released 1.x sessions whose old 36-choice Scale selected an element migrate to
   Atomic and recover that corresponding element;
@@ -161,15 +157,21 @@ earlier schema-3 Pitch System transition:
   `atomicScaleMode` choice where possible; and
 - invalid or non-finite stored choice values are clamped to safe defaults.
 
-Schema 4 added the Time Field. New 2.5.0 sessions start in Ensemble with Adaptive Crowd
-Governor enabled; any state that lacks the schema-4 timing parameters receives Flow so
-an older session's attacks stay direct. Schema-5 input remains compatible and its
-retired experimental fields are discarded. Every schema-6-or-earlier state receives
-Manual Governor mode while retaining its saved Time Field values; new state is stamped
-as schema 8. Schema 8 also adds routing safety, the pressure-aware Safety Governor,
-Global Conductor, and Crowd Expression parameters. Schema-7-and-earlier sessions keep
-their historical Mirror/shared-port behaviour with Safety Governor disabled; these
-compatibility defaults do not change any saved pitch selection.
+Schema 4 added the Time Field. New 2.8.0 sessions start in Flow with Manual Crowd
+Governor; any older state that lacks the timing parameters also receives Flow so its
+attacks stay direct. Schema-5 input remains compatible and its retired experimental
+fields are discarded. Every schema-6-or-earlier state receives Manual Governor mode
+while retaining its saved Time Field values. Schema 8 added routing safety, the
+pressure-aware Safety Governor, Global Conductor, and now-retired Crowd Expression
+parameters. Schema 9 stores the Notes Only and route-safety contract and remains a
+historical migration step. Schema 10 adds the saved Note Duration and Source Capacity
+choices: missing duration becomes 16n, schema-9-or-earlier state restores the former
+implicit 256-source domain, and fresh/schema-10 partial state uses capacity 64.
+Schema 11 adds the Ensemble Same Note choice; absent, malformed, or out-of-range values
+restore Tie so older pitch and timing behaviour remains unchanged.
+Schema-7-and-earlier sessions keep their historical Mirror/shared-port behaviour with
+Safety Governor disabled; these compatibility defaults do not change any saved pitch
+selection.
 
-This migration restores pitch intent only. Removed sample, granular, timbre, and
-internal sound-generation controls do not return in the 2.5.0 flagship.
+This migration restores pitch intent only. Removed sample, granular, timbre, expression,
+MPE, and internal sound-generation controls do not return in the 2.8.0 flagship.

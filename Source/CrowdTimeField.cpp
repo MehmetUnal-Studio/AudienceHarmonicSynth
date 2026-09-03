@@ -107,7 +107,8 @@ struct CrowdTimeField::EventCollector
         tagged.event = { type, voiceId, sourceId, sampleOffset };
         tagged.sequence = nextSequence++;
 
-        if (type == OutputEvent::Type::Release)
+        if (type == OutputEvent::Type::Release
+            || type == OutputEvent::Type::Cancel)
         {
             if (releaseCount < kMaxOutputEvents)
                 releases[static_cast<std::size_t>(releaseCount++)] = tagged;
@@ -520,12 +521,19 @@ void CrowdTimeField::processFlow (const Config& config,
         if (! validIdentity(event.voiceId, event.sourceId))
             continue;
         if (event.type != InputEvent::Type::On
-            && event.type != InputEvent::Type::Off)
+            && event.type != InputEvent::Type::Off
+            && event.type != InputEvent::Type::Cancel)
             continue;
 
         const int offset = clampedOffset(event.sampleOffset, clock.numSamples);
         auto& voice = voices_[static_cast<std::size_t>(event.voiceId)];
         voice.sourceId = event.sourceId;
+
+        if (event.type == InputEvent::Type::Cancel)
+        {
+            cancelVoice(event.voiceId, offset, collector);
+            continue;
+        }
 
         if (event.type == InputEvent::Type::On)
         {
@@ -598,11 +606,18 @@ void CrowdTimeField::handleTimedInput (const Config& config,
     if (! validIdentity(event.voiceId, event.sourceId))
         return;
     if (event.type != InputEvent::Type::On
-        && event.type != InputEvent::Type::Off)
+        && event.type != InputEvent::Type::Off
+        && event.type != InputEvent::Type::Cancel)
         return;
 
     auto& voice = voices_[static_cast<std::size_t>(event.voiceId)];
     voice.sourceId = event.sourceId;
+
+    if (event.type == InputEvent::Type::Cancel)
+    {
+        cancelVoice(event.voiceId, offset, collector);
+        return;
+    }
 
     if (event.type == InputEvent::Type::On)
     {
@@ -658,6 +673,57 @@ void CrowdTimeField::stopVoice (int voiceId, int offset,
     removeTimedActive(voiceId);
     if (activeCount_ > 0)
         --activeCount_;
+}
+
+bool CrowdTimeField::expireAudibleVoice (int voiceId) noexcept
+{
+    if (voiceId < 0 || voiceId >= kMaxVoices)
+        return false;
+
+    auto& voice = voices_[static_cast<std::size_t>(voiceId)];
+    if (! voice.sounding)
+        return false;
+
+    // This hand-off runs only after process() has returned and its collector is
+    // no longer live. Clear the defensive reservation bit without synthesising
+    // another semantic Release: MpeMidiOutput has already emitted the real tail.
+    voice.releaseReservedThisBlock = false;
+    voice.sounding = false;
+    voice.gateEndBeat = std::numeric_limits<double>::infinity();
+    removeTimedActive(voiceId);
+    if (activeCount_ > 0)
+        --activeCount_;
+    return true;
+}
+
+void CrowdTimeField::cancelVoice (int voiceId, int offset,
+                                  EventCollector& collector) noexcept
+{
+    auto& voice = voices_[static_cast<std::size_t>(voiceId)];
+    const int sourceId = voice.sourceId;
+    voice.held = false;
+    clearPending(voiceId);
+
+    if (voice.releaseReservedThisBlock)
+    {
+        voice.releaseReservedThisBlock = false;
+        if (collector.reservedReleaseCount > 0)
+            --collector.reservedReleaseCount;
+    }
+
+    if (voice.sounding)
+    {
+        voice.sounding = false;
+        removeTimedActive(voiceId);
+        if (activeCount_ > 0)
+            --activeCount_;
+    }
+    voice.gateEndBeat = std::numeric_limits<double>::infinity();
+    refreshNextGateEnd();
+
+    // Always forward the semantic cancel: the fixed-duration MIDI scheduler
+    // may still own an earlier tail even after Time Field stopped sounding.
+    collector.push(OutputEvent::Type::Cancel, voiceId, sourceId, offset);
 }
 
 void CrowdTimeField::setPending (int voiceId, double sinceBeat,
@@ -1088,7 +1154,8 @@ void CrowdTimeField::process (const Config& requestedConfig,
     {
         if (! validIdentity(inputs[i].voiceId, inputs[i].sourceId)
             || (inputs[i].type != InputEvent::Type::On
-                && inputs[i].type != InputEvent::Type::Off))
+                && inputs[i].type != InputEvent::Type::Off
+                && inputs[i].type != InputEvent::Type::Cancel))
             continue;
 
         const int offset = clampedOffset(inputs[i].sampleOffset, clock.numSamples);

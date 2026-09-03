@@ -1,7 +1,6 @@
 #include "../Source/AtomicScaleCatalog.h"
 #include "../Source/MpeMidiOutput.h"
 
-#include <cmath>
 #include <iostream>
 #include <limits>
 #include <vector>
@@ -25,9 +24,15 @@ namespace
         return result;
     }
 
-    double midiForFrequency (double frequencyHz)
+    bool containsControllerOrBend (const std::vector<juce::MidiMessage>& output)
     {
-        return 69.0 + 12.0 * std::log2(frequencyHz / 440.0);
+        for (const auto& message : output)
+            if (message.isController()
+                || message.isChannelPressure()
+                || message.isPitchWheel()
+                || message.isAftertouch())
+                return true;
+        return false;
     }
 }
 
@@ -69,35 +74,9 @@ int main()
         }
     }
     expect(normalNote == heliumPitch.midiNote && normalChannel == 1,
-           "Normal MIDI uses the nearest Atomic note on the participant channel");
-
-    MpeMidiOutput mpe;
-    MpeMidiOutput::MpeConfig mpeConfig;
-    mpeConfig.outputType = 2;
-    mpeConfig.sendSetupMessages = false;
-    mpeConfig.pitchBendRangeChoice = 0; // +/-2 st easily covers nearest-note cents
-    juce::MidiBuffer mpeOutput;
-    mpe.render(mpeConfig, &event, 1, mpeOutput, 64);
-    const auto mpeMessages = messages(mpeOutput);
-    int mpeNote = -1;
-    int mpeChannel = -1;
-    int pitchWheel = -1;
-    for (const auto& message : mpeMessages)
-    {
-        if (message.isNoteOn())
-        {
-            mpeNote = message.getNoteNumber();
-            mpeChannel = message.getChannel();
-        }
-        if (message.isPitchWheel())
-            pitchWheel = message.getPitchWheelValue();
-    }
-    const double reconstructedMidi = (double) mpeNote
-                                   + ((double) pitchWheel - 8192.0) / 8192.0 * 2.0;
-    expect(mpeNote >= 0 && mpeChannel >= 2 && pitchWheel >= 0
-               && std::abs(reconstructedMidi - midiForFrequency(heliumPitch.frequencyHz))
-                    < 0.001,
-           "MPE note plus pitch bend reconstructs the exact Atomic frequency");
+           "Notes Only uses the nearest Atomic note on the participant channel");
+    expect(normalMessages.size() == 1 && ! containsControllerOrBend(normalMessages),
+           "Atomic Notes Only attack emits no CC, pressure or pitch bend");
 
     auto iron = catalog.getMap(24, 3); // Fe / Scientific
     iron.setRootPitchClassAndOctave(9, 1, 6);
@@ -111,17 +90,25 @@ int main()
 
     event.frequencyHz = iron.xToPitch(0.63f).frequencyHz;
     juce::MidiBuffer switched;
-    mpe.render(mpeConfig, &event, 1, switched, 64);
+    normal.render(normalConfig, &event, 1, switched, 64);
     const auto switchedMessages = messages(switched);
-    bool sawOff = false;
     bool sawOn = false;
     for (const auto& message : switchedMessages)
     {
-        sawOff = sawOff || message.isNoteOff();
         sawOn = sawOn || message.isNoteOn();
     }
-    expect(sawOff && sawOn,
-           "Atomic map changes retrigger an owned MPE voice without leaving its old note held");
+    expect(sawOn && switchedMessages.size() == 1
+               && normal.getScheduledNoteCount() == 2
+               && ! containsControllerOrBend(switchedMessages),
+           "Atomic map changes preserve the old fixed tail and start the new note");
+
+    juce::MidiBuffer tailOffs;
+    normal.render(normalConfig, nullptr, 0, tailOffs, 2937);
+    int noteOffs = 0;
+    for (const auto& message : messages(tailOffs))
+        noteOffs += message.isNoteOff() ? 1 : 0;
+    expect(noteOffs == 2 && normal.getScheduledNoteCount() == 0,
+           "Atomic pitch tails close on their independent sample deadlines");
 
     std::cout << "\nSummary: " << (failed == 0 ? "ok" : "failed") << "\n";
     return failed == 0 ? 0 : 1;

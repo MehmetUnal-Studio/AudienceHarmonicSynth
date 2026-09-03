@@ -70,6 +70,8 @@ public:
     {
         double sampleRate = 44100.0;
         int numSamples = 0;
+        bool hostPositionAvailable = false;
+        bool hostBpmValid = false;
         bool hostValid = false;
         bool isPlaying = false;
         double bpm = 120.0;
@@ -79,7 +81,7 @@ public:
 
     struct InputEvent
     {
-        enum class Type : std::uint8_t { On, Off };
+        enum class Type : std::uint8_t { On, Off, Cancel };
 
         Type type = Type::On;
         int voiceId = -1;
@@ -89,7 +91,7 @@ public:
 
     struct OutputEvent
     {
-        enum class Type : std::uint8_t { Attack, Release, SampleMotion };
+        enum class Type : std::uint8_t { Attack, Release, Cancel, SampleMotion };
 
         Type type = Type::Attack;
         int voiceId = -1;
@@ -165,6 +167,13 @@ public:
     // retrigger in bounded batches; Grid/Ensemble voices enter their next grid.
     int rehydrate (const HeldVoice* held, int count) noexcept;
 
+    // Releases Grid's admission ownership after the Notes Only renderer has
+    // emitted the final fixed-duration Note Off for this semantic voice. The
+    // gesture's held state is deliberately retained: Grid remains one-shot and
+    // a fresh attack still requires the normal Off -> On lifecycle.
+    // Audio-thread only; emits no MIDI and allocates nothing.
+    bool expireAudibleVoice (int voiceId) noexcept;
+
     int getPendingCount() const noexcept { return pendingCount_; }
     int getActiveCount() const noexcept { return activeCount_; }
     std::uint32_t getMergedCount() const noexcept { return mergedCount_; }
@@ -224,6 +233,7 @@ private:
     void startAttack (const Config&, int, std::int64_t, double, int,
                       EventCollector&) noexcept;
     void stopVoice (int, int, EventCollector&) noexcept;
+    void cancelVoice (int, int, EventCollector&) noexcept;
 
     void setPending (int voiceId, double sinceBeat, double lifetimeBeats) noexcept;
     void clearPending (int voiceId) noexcept;

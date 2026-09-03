@@ -1,6 +1,8 @@
 #include "PluginStateMigration.h"
 
+#include <cerrno>
 #include <cmath>
+#include <cstdlib>
 
 namespace CosmicStateMigration
 {
@@ -71,6 +73,37 @@ namespace
                 removeParameterNodes(child, parameterId);
         }
     }
+
+    bool readSchemaNumber (const juce::var& value, double& result) noexcept
+    {
+        if (value.isInt() || value.isInt64() || value.isDouble() || value.isBool())
+        {
+            result = (double) value;
+        }
+        else if (value.isString())
+        {
+            const auto text = value.toString().trim();
+            if (text.isEmpty())
+                return false;
+
+            errno = 0;
+            char* end = nullptr;
+            const char* begin = text.toRawUTF8();
+            result = std::strtod(begin, &end);
+            if (end == begin || end == nullptr || *end != '\0' || errno == ERANGE)
+                return false;
+        }
+        else
+        {
+            return false;
+        }
+
+        // Schema markers are exact non-negative integers. Reject partial,
+        // fractional and non-finite text instead of accidentally treating a
+        // malformed current state as either current or future state.
+        return std::isfinite(result) && result >= 0.0
+            && std::trunc(result) == result;
+    }
 }
 
 juce::ValueTree findParameterNode (const juce::ValueTree& state,
@@ -102,11 +135,7 @@ void migrate (juce::ValueTree& state)
 
     const auto schemaValue = state.getProperty("cosmicMicrowaveSchema", 0);
     double rawSchema = 0.0;
-    if (schemaValue.isInt() || schemaValue.isInt64()
-        || schemaValue.isDouble() || schemaValue.isBool())
-        rawSchema = (double) schemaValue;
-
-    if (! std::isfinite(rawSchema))
+    if (! readSchemaNumber(schemaValue, rawSchema))
         rawSchema = 0.0;
 
     // Do not destructively downgrade a state written by a future product.
@@ -122,6 +151,35 @@ void migrate (juce::ValueTree& state)
 
     if (! containsParameter(state, "normalMidiRoutingMode"))
         appendParameterValue(state, "normalMidiRoutingMode", 0.0f);
+
+    // Schema 9 retires MPE and musical controller output. Preserve the
+    // established parameter IDs for host/session compatibility, but coerce
+    // former MPE/Macro settings only while upgrading an older schema. Values
+    // already written by the current schema must round-trip faithfully; the
+    // runtime keeps these legacy controls inert independently of saved state.
+    auto storedOutputType = findParameterNode(state, "midiOutputType");
+    if (! storedOutputType.isValid())
+        appendParameterValue(state, "midiOutputType", 1.0f);
+    else if (schema < 9)
+    {
+        const bool wasMpe = readChoiceIndex(storedOutputType, 0, 2, 1) == 2;
+        writeChoiceIndex(storedOutputType,
+                         readChoiceIndex(storedOutputType, 0, 2, 1) == 0 ? 0 : 1);
+        if (wasMpe)
+        {
+            auto routingMode = findParameterNode(state, "normalMidiRoutingMode");
+            writeChoiceIndex(routingMode, 1);
+        }
+    }
+
+    // Crowd Macro CCs are also retired by Notes Only. Keep their legacy
+    // parameters inert so old sessions do not lose unrelated state.
+    if (schema < 9
+        && containsParameter(state, "crowdMacrosEnabled"))
+    {
+        auto macroEnabled = findParameterNode(state, "crowdMacrosEnabled");
+        writeNumericValue(macroEnabled, 0.0f);
+    }
 
     // Every released 1.x build through v1.0.35 stored a 1..16
     // AudioParameterInt. The later 0..15 Choice conversion was never released
@@ -246,6 +304,22 @@ void migrate (juce::ValueTree& state)
     if (! containsParameter(state, "crowdMacroRate"))
         appendParameterValue(state, "crowdMacroRate", 1.0f);      // 10 Hz
 
+    // Schema 10 adds a fixed host-tempo note lifetime and a logical source
+    // admission capacity. New instances already contain both APVTS nodes and
+    // start at 16n / 64. A schema-9-or-earlier project had an implicit
+    // 256-source domain, so a missing capacity node must explicitly migrate to
+    // 256 to preserve its routing behaviour.
+    if (! containsParameter(state, "noteDuration"))
+        appendParameterValue(state, "noteDuration", 3.0f);        // 16n
+    if (! containsParameter(state, "sourceCapacity"))
+        appendParameterValue(state, "sourceCapacity", schema <= 9 ? 2.0f : 0.0f);
+
+    // Schema 11 makes repeated same-pitch Ensemble attacks explicit. Tie is
+    // the historical behaviour and therefore the compatibility-safe value for
+    // every older or partial state that has no saved policy.
+    if (! containsParameter(state, "ensembleSameNoteMode"))
+        appendParameterValue(state, "ensembleSameNoteMode", 0.0f); // Tie
+
     // State blobs are untrusted input. Clamp every choice touched by this
     // migration before APVTS publishes it to parameter atomics.
     const auto sanitizeChoice = [&state] (const char* id, int maximum, int fallback)
@@ -260,6 +334,7 @@ void migrate (juce::ValueTree& state)
     sanitizeChoice("atomicScaleMode", 4, 1);
     sanitizeChoice("normalMidiRoutingMode", 1, 0);
     sanitizeChoice("normalMidiChannel", 15, 0);
+    sanitizeChoice("midiOutputType", 1, 1);
     sanitizeChoice("timeMode", 2, 0);
     sanitizeChoice("clockSource", 1, 0);
     sanitizeChoice("gridDivision", 3, 2);
@@ -274,6 +349,20 @@ void migrate (juce::ValueTree& state)
     sanitizeChoice("crowdMacrosEnabled", 1, 0);
     sanitizeChoice("crowdMacroChannel", 16, 0);
     sanitizeChoice("crowdMacroRate", 3, 1);
+    sanitizeChoice("noteDuration", 4, 3);
+    sanitizeChoice("sourceCapacity", 2, schema <= 9 ? 2 : 0);
+
+    // Unlike most bounded choices, an out-of-range same-note policy must not
+    // clamp upward into Retrigger: malformed state must preserve the quieter,
+    // backward-compatible Tie behaviour.
+    if (auto sameNoteMode = findParameterNode(state, "ensembleSameNoteMode");
+        sameNoteMode.isValid())
+    {
+        const float value = (float) sameNoteMode.getProperty("value", 0.0f);
+        const int safeMode = std::isfinite(value) && value >= 0.0f && value <= 1.0f
+                           ? juce::roundToInt(value) : 0;
+        writeChoiceIndex(sameNoteMode, safeMode);
+    }
 
     const auto sanitizeNumeric = [&state] (const char* id,
                                            float minimum, float maximum,

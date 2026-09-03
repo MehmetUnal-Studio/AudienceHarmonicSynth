@@ -159,7 +159,7 @@ AudienceMidiGeneratorEditor::AudienceMidiGeneratorEditor (AudienceMidiProcessor&
         repaint();
     };
     addButton.onClick = [this] { proc.simulator.addRandomSeat(); };
-    crowdButton.onClick = [this] { proc.simulator.addRandomSeats(25); };
+    crowdButton.onClick = [this] { proc.simulator.addCrowdParticipants(25); };
     removeButton.onClick = [this] { proc.simulator.removeRandomSeat(); };
     clearButton.onClick = [this] { proc.panic(); };
     moveButton.onClick = [this] { proc.simulator.setRandomMovement(moveButton.getToggleState()); };

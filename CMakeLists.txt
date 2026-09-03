@@ -7,7 +7,7 @@ if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQU
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment target" FORCE)
 endif()
 
-project(AudienceHarmonicSynth VERSION 2.5.0 LANGUAGES C CXX)
+project(AudienceHarmonicSynth VERSION 2.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -77,9 +77,11 @@ target_sources(AudienceHarmonicSynth PRIVATE
     Source/CrowdTimeField.cpp
     Source/CrowdExpressionMacros.cpp
     Source/MidiAudienceModel.cpp
+    Source/SourceQualityController.cpp
     Source/MidiPitchMap.cpp
     Source/OscBridge.cpp
     Source/OscFingerRouter.cpp
+    Source/CrowdSimulatorModel.cpp
     Source/Simulator.cpp
 )
 
@@ -106,6 +108,7 @@ target_sources(AudienceHarmonicMidi PRIVATE
     Source/MidiEngine.cpp
     Source/MidiScaleModule.cpp
     Source/OscBridge.cpp
+    Source/CrowdSimulatorModel.cpp
     Source/Simulator.cpp
 )
 
@@ -132,6 +135,7 @@ target_sources(AudienceMidiGenerator PRIVATE
     Source/MidiEngine.cpp
     Source/MidiScaleModule.cpp
     Source/OscBridge.cpp
+    Source/CrowdSimulatorModel.cpp
     Source/Simulator.cpp
 )
 
@@ -147,6 +151,7 @@ target_sources(AudienceMidiDevice PRIVATE
     Source/AudienceMidiDeviceApp.cpp
     Source/MidiEngine.cpp
     Source/OscBridge.cpp
+    Source/CrowdSimulatorModel.cpp
     Source/Simulator.cpp
 )
 
@@ -254,6 +259,16 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
         Source/ElementSpectralData.cpp
     )
 
+    add_executable(GenerateCrowdSimulatorTrace EXCLUDE_FROM_ALL
+        tools/GenerateCrowdSimulatorTrace.cpp
+        Source/CrowdSimulatorModel.cpp
+    )
+
+    target_link_libraries(GenerateCrowdSimulatorTrace PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
     target_compile_definitions(GenerateAtomicScaleCatalog PRIVATE
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
@@ -320,25 +335,25 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_test(NAME AudienceMidiPitchTests COMMAND AudienceMidiPitchTests)
 
-    add_executable(AudienceMpeOutputTests
-        Tests/MpeOutputTests.cpp
+    add_executable(AudienceMidiOutputTests
+        Tests/MidiOutputTests.cpp
         Source/MpeMidiOutput.cpp
     )
 
-    target_compile_definitions(AudienceMpeOutputTests PRIVATE
+    target_compile_definitions(AudienceMidiOutputTests PRIVATE
         COSMIC_MIDI_DIAGNOSTICS=1
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
     )
 
-    target_link_libraries(AudienceMpeOutputTests PRIVATE
+    target_link_libraries(AudienceMidiOutputTests PRIVATE
         juce::juce_audio_basics
         juce::juce_core
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
     )
 
-    add_test(NAME AudienceMpeOutputTests COMMAND AudienceMpeOutputTests)
+    add_test(NAME AudienceMidiOutputTests COMMAND AudienceMidiOutputTests)
 
     add_executable(AudienceOscBridgeTests
         Tests/OscBridgeTests.cpp
@@ -382,6 +397,7 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
         Tests/MidiAudienceModelTests.cpp
         Source/MidiAudienceModel.cpp
         Source/OscFingerRouter.cpp
+        Source/SourceQualityController.cpp
     )
 
     target_compile_definitions(AudienceMidiAudienceModelTests PRIVATE
@@ -396,6 +412,103 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     )
 
     add_test(NAME AudienceMidiAudienceModelTests COMMAND AudienceMidiAudienceModelTests)
+
+    add_executable(AudienceSimulatorTests
+        Tests/SimulatorTests.cpp
+        Source/CrowdSimulatorModel.cpp
+        Source/Simulator.cpp
+        Source/MidiAudienceModel.cpp
+        Source/OscFingerRouter.cpp
+        Source/SourceQualityController.cpp
+    )
+
+    target_compile_definitions(AudienceSimulatorTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceSimulatorTests PRIVATE
+        juce::juce_events
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceSimulatorTests COMMAND AudienceSimulatorTests)
+
+    # Link against the production shared-code target so this test exercises the
+    # actual AudienceProcessor::processBlock integration instead of duplicating
+    # its simulator-population/Governor handoff in a unit-test helper.
+    add_executable(AudienceProcessorSimulatorGovernorTests
+        Tests/ProcessorSimulatorGovernorTests.cpp
+    )
+
+    target_compile_definitions(AudienceProcessorSimulatorGovernorTests PRIVATE
+        JucePlugin_Name="Cosmic Microwave"
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceProcessorSimulatorGovernorTests PRIVATE
+        AudienceHarmonicSynth
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceProcessorSimulatorGovernorTests
+             COMMAND AudienceProcessorSimulatorGovernorTests)
+
+    add_executable(AudienceProcessorMidiHotplugTests
+        Tests/ProcessorMidiHotplugTests.cpp
+    )
+
+    target_compile_definitions(AudienceProcessorMidiHotplugTests PRIVATE
+        JucePlugin_Name="Cosmic Microwave"
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceProcessorMidiHotplugTests PRIVATE
+        AudienceHarmonicSynth
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceProcessorMidiHotplugTests
+             COMMAND AudienceProcessorMidiHotplugTests)
+
+    add_executable(AudienceProcessorAutoRoutingTests
+        Tests/ProcessorAutoRoutingTests.cpp
+    )
+
+    target_compile_definitions(AudienceProcessorAutoRoutingTests PRIVATE
+        JucePlugin_Name="Cosmic Microwave"
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceProcessorAutoRoutingTests PRIVATE
+        AudienceHarmonicSynth
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceProcessorAutoRoutingTests
+             COMMAND AudienceProcessorAutoRoutingTests)
+    set_tests_properties(AudienceProcessorAutoRoutingTests PROPERTIES TIMEOUT 45)
+
+    # These processor integration executables create system-wide CoreMIDI
+    # endpoints and exercise the same default UDP route.  Running them in
+    # parallel can make one test observe the other's temporary endpoint/port
+    # churn even though each executable is deterministic in isolation.
+    set_tests_properties(
+        AudienceProcessorSimulatorGovernorTests
+        AudienceProcessorMidiHotplugTests
+        AudienceProcessorAutoRoutingTests
+        PROPERTIES RESOURCE_LOCK cosmic_midi_routing)
 
     add_executable(AudienceMidiPitchMapTests
         Tests/MidiPitchMapTests.cpp
@@ -498,6 +611,19 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
     add_test(NAME AudiencePressureAwareSafetyGovernorTests
              COMMAND AudiencePressureAwareSafetyGovernorTests)
 
+    add_executable(AudienceSourceQualityControllerTests
+        Tests/SourceQualityControllerTests.cpp
+        Source/SourceQualityController.cpp
+    )
+
+    target_link_libraries(AudienceSourceQualityControllerTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceSourceQualityControllerTests
+             COMMAND AudienceSourceQualityControllerTests)
+
     add_executable(AudienceGlobalConductorHubTests
         Tests/GlobalConductorHubTests.cpp
         Source/GlobalConductorHub.cpp
@@ -543,6 +669,7 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
         Source/MidiAudienceModel.cpp
         Source/MpeMidiOutput.cpp
         Source/OscFingerRouter.cpp
+        Source/SourceQualityController.cpp
     )
 
     target_compile_definitions(AudienceCrowdMidiIntegrationTests PRIVATE

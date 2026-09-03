@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
+#include <vector>
 
 namespace cm
 {
@@ -15,16 +17,21 @@ namespace cm
     const juce::Colour text         { 0xffedf3f8 };
     const juce::Colour textMuted    { 0xff9eacba };
     const juce::Colour textDim      { 0xff697786 };
+    const juce::Colour textLow      { 0xff4a5462 };
     const juce::Colour cyan         { 0xff58d6ff };
     const juce::Colour green        { 0xff42d6a5 };
     const juce::Colour violet       { 0xff9b8cff };
     const juce::Colour amber        { 0xffefbd5c };
     const juce::Colour red          { 0xffff647a };
+    const juce::Colour selectedInk  { 0xff06202e };
+    const juce::Colour matrixIdle   { 0xff0c1119 };
+    const juce::Colour spectrumBg   { 0xff05080c };
 
     static juce::Colour channelColour (int channel) noexcept
     {
-        const auto position = (float) juce::jlimit (0, 15, channel - 1) / 15.0f;
-        return cyan.interpolatedWith (violet, position);
+        const auto index = juce::jlimit (0, 15, channel - 1);
+        const auto hue = std::fmod (205.0f + (float) index * 21.0f, 360.0f) / 360.0f;
+        return juce::Colour::fromHSV (hue, 0.60f, 0.82f, 1.0f);
     }
 
     static void drawCard (juce::Graphics& g, juce::Rectangle<int> bounds,
@@ -34,15 +41,13 @@ namespace cm
             return;
 
         auto b = bounds.toFloat();
-        juce::ColourGradient surface (cardRaised.withAlpha (0.50f), b.getX(), b.getY(),
-                                      card, b.getX(), b.getBottom(), false);
-        g.setGradientFill (surface);
+        g.setColour (card);
         g.fillRoundedRectangle (b, 11.0f);
-        g.setColour (line);
+        g.setColour (lineSoft);
         g.drawRoundedRectangle (b.reduced (0.5f), 11.0f, 1.0f);
 
         g.setColour (lineSoft);
-        g.fillRect (bounds.reduced (14, 0).withY (bounds.getY() + 34).withHeight (1));
+        g.fillRect (bounds.withY (bounds.getY() + 34).withHeight (1));
 
         g.setColour (textMuted.withAlpha (0.82f));
         g.setFont (juce::Font (juce::FontOptions (10.8f).withStyle ("bold")));
@@ -51,7 +56,7 @@ namespace cm
 
         if (tag.isNotEmpty())
         {
-            auto tagBounds = bounds.reduced (15, 0).removeFromTop (35).removeFromRight (140);
+            auto tagBounds = bounds.reduced (15, 0).removeFromTop (35).removeFromRight (190);
             g.setColour (cyan.withAlpha (0.78f));
             g.setFont (juce::Font (juce::FontOptions (9.0f).withStyle ("bold")));
             g.drawText (tag, tagBounds, juce::Justification::centredRight, false);
@@ -126,6 +131,62 @@ namespace cm
                                    bool highlighted, bool down) override
         {
             auto bounds = button.getLocalBounds().toFloat().reduced (0.5f);
+            if (button.getComponentID() == "segmentButton")
+            {
+                auto fill = button.getToggleState() ? cyan : juce::Colours::transparentBlack;
+                if (! button.isEnabled())
+                    fill = fill.withMultipliedAlpha (0.30f);
+                else if (down)
+                    fill = fill.interpolatedWith (text, 0.12f);
+                else if (highlighted && ! button.getToggleState())
+                    fill = cardRaised.withAlpha (0.72f);
+
+                if (! fill.isTransparent())
+                {
+                    g.setColour (fill);
+                    g.fillRect (button.getLocalBounds());
+                }
+
+                if (button.hasKeyboardFocus (true))
+                {
+                    g.setColour ((button.getToggleState() ? selectedInk : cyan).withAlpha (0.96f));
+                    g.drawRoundedRectangle (bounds.reduced (1.5f), 3.5f, 1.4f);
+                }
+                return;
+            }
+
+            if (button.getComponentID() == "pageTab")
+            {
+                auto fill = button.getToggleState()
+                    ? cyan.withAlpha (0.12f) : card.withAlpha (0.70f);
+                if (down)
+                    fill = fill.brighter (0.08f);
+                else if (highlighted)
+                    fill = fill.brighter (0.04f);
+                g.setColour (fill.withMultipliedAlpha (button.isEnabled() ? 1.0f : 0.34f));
+                g.fillRoundedRectangle (bounds, 6.0f);
+                g.setColour ((button.getToggleState() ? cyan : line)
+                                 .withAlpha (button.hasKeyboardFocus (true) ? 0.95f : 0.72f));
+                g.drawRoundedRectangle (bounds, 6.0f,
+                                        button.hasKeyboardFocus (true) ? 1.2f : 0.8f);
+                return;
+            }
+
+            if (button.getComponentID() == "panicButton")
+            {
+                auto fill = juce::Colour (0xff1c1016);
+                if (down)
+                    fill = red.withAlpha (0.70f);
+                else if (highlighted)
+                    fill = fill.interpolatedWith (red, 0.10f);
+                g.setColour (fill);
+                g.fillRoundedRectangle (bounds, 6.0f);
+                g.setColour (red.withAlpha (button.hasKeyboardFocus (true) ? 0.96f : 0.72f));
+                g.drawRoundedRectangle (bounds, 6.0f,
+                                        button.hasKeyboardFocus (true) ? 1.2f : 0.8f);
+                return;
+            }
+
             const auto radius = button.getComponentID() == "governorPill"
                                   ? bounds.getHeight() * 0.5f : 6.0f;
             const auto accent = button.findColour (juce::TextButton::buttonOnColourId).withAlpha (1.0f);
@@ -205,9 +266,64 @@ namespace cm
 
             g.setColour (slider.findColour (juce::Slider::thumbColourId)
                                .withMultipliedAlpha (enabledAlpha));
-            g.fillEllipse (sliderPos - 5.0f, centreY - 5.0f, 10.0f, 10.0f);
-            g.setColour (cyan.withAlpha (0.85f * enabledAlpha));
-            g.drawEllipse (sliderPos - 5.0f, centreY - 5.0f, 10.0f, 10.0f, 1.0f);
+            g.fillEllipse (sliderPos - 6.5f, centreY - 6.5f, 13.0f, 13.0f);
+            g.setColour (background.withAlpha (0.92f * enabledAlpha));
+            g.drawEllipse (sliderPos - 6.5f, centreY - 6.5f, 13.0f, 13.0f, 1.5f);
+        }
+
+        void drawLabel (juce::Graphics& g, juce::Label& label) override
+        {
+            const auto bounds = label.getLocalBounds().toFloat().reduced (0.5f);
+            const auto backgroundColour = label.findColour (juce::Label::backgroundColourId);
+            const auto outlineColour = label.findColour (juce::Label::outlineColourId);
+
+            if (! backgroundColour.isTransparent())
+            {
+                g.setColour (backgroundColour);
+                g.fillRoundedRectangle (bounds, 5.0f);
+            }
+
+            if (! outlineColour.isTransparent())
+            {
+                g.setColour (outlineColour);
+                g.drawRoundedRectangle (bounds, 5.0f, 0.8f);
+            }
+
+            if (! label.isBeingEdited())
+            {
+                auto textArea = label.getBorderSize().subtractedFrom (label.getLocalBounds());
+                g.setColour (label.findColour (juce::Label::textColourId)
+                                  .withMultipliedAlpha (label.isEnabled() ? 1.0f : 0.34f));
+                g.setFont (label.getFont());
+                g.drawFittedText (label.getText(), textArea, label.getJustificationType(),
+                                  juce::jmax (1, (int) ((float) textArea.getHeight()
+                                                       / juce::jmax (1.0f, label.getFont().getHeight()))),
+                                  label.getMinimumHorizontalScale());
+            }
+        }
+
+        void fillTextEditorBackground (juce::Graphics& g, int width, int height,
+                                       juce::TextEditor& editor) override
+        {
+            g.setColour (editor.findColour (juce::TextEditor::backgroundColourId));
+            g.fillRoundedRectangle (juce::Rectangle<float> (0.5f, 0.5f,
+                                                            (float) width - 1.0f,
+                                                            (float) height - 1.0f), 6.0f);
+        }
+
+        void drawTextEditorOutline (juce::Graphics& g, int width, int height,
+                                    juce::TextEditor& editor) override
+        {
+            if (! editor.isEnabled())
+                return;
+
+            const auto focused = editor.hasKeyboardFocus (true);
+            g.setColour (editor.findColour (focused ? juce::TextEditor::focusedOutlineColourId
+                                                    : juce::TextEditor::outlineColourId));
+            g.drawRoundedRectangle (juce::Rectangle<float> (0.5f, 0.5f,
+                                                            (float) width - 1.0f,
+                                                            (float) height - 1.0f),
+                                    6.0f, focused ? 1.2f : 0.8f);
         }
     };
 
@@ -253,6 +369,247 @@ namespace cm
 }
 
 //==============================================================================
+// Focusable proxy for an APVTS-attached ComboBox. Keeping the ComboBox as the
+// parameter owner preserves JUCE's gestures, automation updates and choice
+// indices while presenting the compact segmented language from the reference.
+class SegmentedChoice final : public juce::Component,
+                              private juce::ComboBox::Listener
+{
+public:
+    SegmentedChoice (juce::ComboBox& targetToUse, const juce::StringArray& labels,
+                     const juce::String& accessibleTitle)
+        : target (targetToUse)
+    {
+        setTitle (accessibleTitle);
+        setDescription ("Choose " + accessibleTitle.toLowerCase());
+        setFocusContainerType (juce::Component::FocusContainerType::keyboardFocusContainer);
+
+        for (int index = 0; index < labels.size(); ++index)
+        {
+            auto button = std::make_unique<juce::TextButton> (labels[index]);
+            button->setComponentID ("segmentButton");
+            button->setRadioGroupId (1, juce::dontSendNotification);
+            button->setClickingTogglesState (false);
+            button->setColour (juce::TextButton::buttonColourId,
+                               juce::Colours::transparentBlack);
+            button->setColour (juce::TextButton::buttonOnColourId, cm::cyan);
+            button->setColour (juce::TextButton::textColourOffId, cm::textMuted);
+            button->setColour (juce::TextButton::textColourOnId, cm::selectedInk);
+            button->setTitle (accessibleTitle + ": " + labels[index]);
+            button->setDescription ("Select " + labels[index] + " for "
+                                    + accessibleTitle.toLowerCase());
+            button->setTooltip (button->getDescription());
+            button->setWantsKeyboardFocus (true);
+            button->onClick = [this, index]
+            {
+                target.setSelectedItemIndex (index, juce::sendNotificationSync);
+                syncFromTarget();
+            };
+            addAndMakeVisible (*button);
+            buttons.push_back (std::move (button));
+        }
+
+        target.addListener (this);
+        syncFromTarget();
+    }
+
+    ~SegmentedChoice() override
+    {
+        target.removeListener (this);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (cm::card.withMultipliedAlpha (isEnabled() ? 1.0f : 0.34f));
+        g.fillRoundedRectangle (bounds, 7.0f);
+        g.setColour (cm::line.withMultipliedAlpha (isEnabled() ? 1.0f : 0.34f));
+        g.drawRoundedRectangle (bounds, 7.0f, 0.9f);
+
+        if (buttons.size() > 1)
+        {
+            const auto segmentWidth = (float) getWidth() / (float) buttons.size();
+            for (size_t index = 1; index < buttons.size(); ++index)
+                g.fillRect (segmentWidth * (float) index - 0.5f, 1.0f,
+                            1.0f, (float) getHeight() - 2.0f);
+        }
+    }
+
+    void resized() override
+    {
+        auto area = getLocalBounds().reduced (1);
+        for (size_t index = 0; index < buttons.size(); ++index)
+        {
+            const int width = index + 1 == buttons.size()
+                                ? area.getWidth()
+                                : getWidth() / (int) buttons.size();
+            buttons[index]->setBounds (area.removeFromLeft (width));
+        }
+    }
+
+    void enablementChanged() override
+    {
+        for (auto& button : buttons)
+            button->setEnabled (isEnabled());
+        repaint();
+    }
+
+    void syncFromTarget()
+    {
+        const auto selected = target.getSelectedItemIndex();
+        for (size_t index = 0; index < buttons.size(); ++index)
+            buttons[index]->setToggleState ((int) index == selected,
+                                            juce::dontSendNotification);
+        repaint();
+    }
+
+private:
+    void comboBoxChanged (juce::ComboBox*) override
+    {
+        syncFromTarget();
+    }
+
+    juce::ComboBox& target;
+    std::vector<std::unique_ptr<juce::TextButton>> buttons;
+};
+
+//==============================================================================
+// A truthful, side-effect-free visualisation of the currently selected pitch
+// map. Atomic mode draws the immutable catalog degrees in cents; Tonal mode
+// draws the actual MidiPitchMap degrees. No runtime files or network fonts are
+// involved, so painting remains deterministic inside a host.
+class PitchSpectrumDisplay final : public juce::Component
+{
+public:
+    explicit PitchSpectrumDisplay (AudienceProcessor& processorToUse)
+        : proc (processorToUse)
+    {
+        setTitle ("Pitch map spectrum");
+        setDescription ("Visual preview of the selected Tonal or Atomic pitch degrees.");
+        setInterceptsMouseClicks (false, false);
+        setWantsKeyboardFocus (false);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds();
+        if (bounds.getWidth() < 40 || bounds.getHeight() < 38)
+            return;
+
+        auto meta = bounds.removeFromBottom (18);
+        auto plot = bounds;
+        auto axis = plot.removeFromBottom (15);
+
+        g.setColour (cm::spectrumBg);
+        g.fillRoundedRectangle (bounds.toFloat(), 7.0f);
+        g.setColour (cm::lineSoft);
+        g.drawRoundedRectangle (bounds.toFloat().reduced (0.5f), 7.0f, 0.9f);
+
+        const bool atomic = cm::choiceValue (proc.apvts, "pitchSystem") == 1;
+        juce::String metaLeft;
+        juce::String metaRight;
+
+        if (atomic)
+        {
+            juce::ColourGradient spectrum (juce::Colour (0xff704bd7),
+                                           (float) plot.getX(), 0.0f,
+                                           juce::Colour (0xffd75050),
+                                           (float) plot.getRight(), 0.0f, false);
+            spectrum.addColour (0.22, juce::Colour (0xff4f79d9));
+            spectrum.addColour (0.42, juce::Colour (0xff4fc3d9));
+            spectrum.addColour (0.60, juce::Colour (0xff4fd98f));
+            spectrum.addColour (0.78, juce::Colour (0xffd9c34f));
+            g.setGradientFill (spectrum);
+            g.setOpacity (0.055f);
+            g.fillRect (plot);
+            g.setOpacity (1.0f);
+
+            const int element = AtomicScaleCatalog::clampElementIndex (
+                cm::choiceValue (proc.apvts, "spectralElement"));
+            const int mode = AtomicScaleCatalog::clampModeIndex (
+                cm::choiceValue (proc.apvts, "atomicScaleMode"));
+            const auto& map = AtomicScaleCatalog::instance().getMap (element, mode);
+            const int count = map.getDegreeCount();
+            for (int index = 0; index < count; ++index)
+            {
+                const auto degree = map.getDegree (index);
+                const float position = (float) juce::jlimit (0.0, 1199.999,
+                                                            degree.cents) / 1200.0f;
+                const float x = (float) plot.getX() + position * (float) plot.getWidth();
+                const float salience = (float) juce::jlimit (0.0, 1.0, degree.weight);
+                const float top = (float) plot.getY() + 5.0f
+                                  + (1.0f - salience) * (float) plot.getHeight() * 0.16f;
+                g.setColour (juce::Colour::fromHSV (0.73f - position * 0.73f,
+                                                    0.72f, 0.92f, 0.88f));
+                g.fillRoundedRectangle (x, top, index == 0 ? 2.8f : 1.8f,
+                                        (float) plot.getBottom() - top - 2.0f, 0.9f);
+            }
+
+            metaLeft = proc.getAtomicElementSymbol (element).toUpperCase() + "  "
+                       + proc.getAtomicElementName (element).toUpperCase()
+                       + "  ·  " + juce::String (count) + " DEGREES";
+            const auto reference = proc.getSelectedAtomicReferenceWavelengthNm();
+            if (std::isfinite (reference) && reference > 0.0)
+                metaRight = "λREF " + juce::String (reference, 2) + " NM  ·  ";
+            metaRight += proc.getAtomicModeName (mode).toUpperCase();
+        }
+        else
+        {
+            const int root = juce::jlimit (0, 11, cm::choiceValue (proc.apvts, "scaleRoot"));
+            const int octave = juce::jlimit (0, 6,
+                                             cm::choiceValue (proc.apvts, "scaleRootOctave"));
+            const int mode = juce::jlimit (0, MidiPitchMap::numScaleModes - 1,
+                                           cm::choiceValue (proc.apvts, "scaleMode"));
+            MidiPitchMap map;
+            map.configure (root, octave, mode, 1);
+            const int count = map.getScaleTableSize();
+            const int rootMidi = map.getRootMidi();
+            for (int index = 0; index < count; ++index)
+            {
+                const int semitone = juce::jlimit (0, 11, map.getScaleMidi (index) - rootMidi);
+                const float position = (float) semitone / 12.0f;
+                const float x = (float) plot.getX() + position * (float) plot.getWidth();
+                g.setColour (index == 0 ? cm::cyan : cm::textDim);
+                g.fillRoundedRectangle (x, (float) plot.getY() + 6.0f,
+                                        index == 0 ? 2.8f : 1.8f,
+                                        (float) plot.getHeight() - 8.0f, 0.9f);
+            }
+
+            static constexpr const char* rootNames[] {
+                "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+            };
+            metaLeft = juce::String (rootNames[root]) + juce::String (octave) + "  "
+                       + juce::String (MidiPitchMap::scaleName (mode)).toUpperCase()
+                       + "  ·  " + juce::String (count) + " DEGREES / OCT";
+            metaRight = "12-TET";
+        }
+
+        g.setColour (cm::header.withAlpha (0.96f));
+        g.fillRect (axis);
+        g.setColour (cm::lineSoft);
+        g.fillRect (axis.removeFromTop (1));
+        g.setFont (juce::Font (juce::FontOptions (7.8f)));
+        g.setColour (cm::textDim);
+        g.drawText ("0 c", axis.removeFromLeft (44), juce::Justification::centredLeft, false);
+        auto rightAxis = axis.removeFromRight (50);
+        g.drawText ("1200 c", rightAxis, juce::Justification::centredRight, false);
+        g.setColour (cm::textLow);
+        g.drawText ("600", axis, juce::Justification::centred, false);
+
+        g.setFont (juce::Font (juce::FontOptions (8.2f).withStyle ("bold")));
+        g.setColour (cm::textMuted);
+        g.drawFittedText (metaLeft, meta.removeFromLeft ((meta.getWidth() * 3) / 5),
+                          juce::Justification::centredLeft, 1, 0.74f);
+        g.setFont (juce::Font (juce::FontOptions (7.7f)));
+        g.setColour (cm::textLow);
+        g.drawFittedText (metaRight, meta, juce::Justification::centredRight, 1, 0.68f);
+    }
+
+private:
+    AudienceProcessor& proc;
+};
+
+//==============================================================================
 // The source map deliberately reads only MidiAudienceModel snapshots. It never
 // reaches into the OSC receiver or MIDI endpoint, so painting remains a cheap,
 // side-effect-free operation on the message thread.
@@ -263,32 +620,54 @@ public:
         : model (modelToUse)
     {
         setTitle ("Source activity map");
-        setDescription ("Two hundred and fifty-six OSC source IDs grouped by their stable MIDI channel assignment.");
+        setDescription ("Admitted OSC source IDs grouped by their stable sixteen-channel MIDI assignment.");
         setInterceptsMouseClicks (false, false);
     }
 
     void paint (juce::Graphics& g) override
     {
         auto bounds = getLocalBounds();
-        cm::drawCard (g, bounds, "SOURCE MATRIX", "256 SOURCES / 16 CH");
+        const int sourceCapacity = juce::jlimit (
+            64, MidiAudienceModel::MAX_SOURCES, model.getSourceCapacity());
+        const int sourcesPerChannel = sourceCapacity / 16;
+        int activeSources = 0;
+        int activeTouches = 0;
+        std::array<MidiAudienceModel::SourceSnapshot,
+                   MidiAudienceModel::MAX_SOURCES> snapshots {};
+        for (int sourceId = 0; sourceId < sourceCapacity; ++sourceId)
+        {
+            auto& snapshot = snapshots[(size_t) sourceId];
+            snapshot = model.getSourceSnapshot (sourceId);
+            if (snapshot.active)
+                ++activeSources;
+            activeTouches += snapshot.activeFingerCount;
+        }
 
-        auto content = bounds.reduced (14);
-        content.removeFromTop (30);
+        cm::drawCard (g, bounds, "SOURCE MATRIX",
+                      juce::String (activeTouches) + " TOUCH  ·  "
+                          + juce::String (activeSources) + " SRC  ·  "
+                          + juce::String (sourceCapacity) + " CAP  ·  "
+                          + juce::String (sourcesPerChannel) + " / CH");
 
-        auto subtitle = content.removeFromTop (19);
-        g.setColour (cm::textMuted);
-        g.setFont (juce::Font (juce::FontOptions (10.5f)));
-        g.drawText ("ID-locked source / MIDI channel map",
-                    subtitle, juce::Justification::centredLeft, true);
+        auto content = bounds.reduced (16, 0);
+        content.removeFromTop (35);
 
-        content.removeFromTop (4);
+        auto subtitle = content.removeFromTop (21);
+        g.setColour (cm::textLow);
+        g.setFont (juce::Font (juce::FontOptions (9.2f)));
+        g.drawFittedText ("ID-locked source / MIDI channel map  ·  dot = finger U/V",
+                          subtitle, juce::Justification::centredLeft, 1, 0.74f);
+
+        auto footer = content.removeFromBottom (35);
+        content.removeFromBottom (5);
         auto channelHeader = content.removeFromTop (22);
-        auto grid = content.reduced (0, 3);
+        auto grid = content;
         if (grid.getWidth() < 160 || grid.getHeight() < 128)
             return;
 
         const float columnWidth = (float) grid.getWidth() / 16.0f;
-        const float rowHeight = (float) grid.getHeight() / 16.0f;
+        const float rowHeight = (float) grid.getHeight()
+                              / (float) sourcesPerChannel;
         const float gap = juce::jlimit (1.0f, 2.6f, std::min (columnWidth, rowHeight) * 0.14f);
 
         // Quiet four-channel dividers make a dense 16x16 grid easy to scan
@@ -300,9 +679,9 @@ public:
             g.fillRect (x - 0.5f, (float) channelHeader.getY() + 3.0f,
                         1.0f, (float) grid.getBottom() - (float) channelHeader.getY() - 3.0f);
         }
-        for (int group = 1; group < 4; ++group)
+        for (int row = 4; row < sourcesPerChannel; row += 4)
         {
-            const auto y = (float) grid.getY() + rowHeight * (float) group * 4.0f;
+            const auto y = (float) grid.getY() + rowHeight * (float) row;
             g.fillRect ((float) grid.getX(), y - 0.5f,
                         (float) grid.getWidth(), 1.0f);
         }
@@ -314,21 +693,26 @@ public:
                                                    (float) channelHeader.getY(), columnWidth,
                                                    (float) channelHeader.getHeight());
             const auto colour = cm::channelColour (midiChannel);
+            const float headerDot = 5.5f;
+            g.setColour (colour.withAlpha (0.92f));
+            g.fillEllipse (heading.getCentreX() - 10.0f,
+                           heading.getCentreY() - headerDot * 0.5f,
+                           headerDot, headerDot);
             g.setColour (colour.withAlpha (0.90f));
-            g.setFont (juce::Font (juce::FontOptions (9.0f).withStyle ("bold")));
-            const auto channelText = columnWidth >= 32.0f ? "CH " + juce::String (midiChannel)
-                                                          : juce::String (midiChannel);
-            g.drawText (channelText, heading.reduced (1.0f, 0.0f),
+            g.setFont (juce::Font (juce::FontOptions (8.4f).withStyle ("bold")));
+            const auto channelText = midiChannel < 10 ? "0" + juce::String (midiChannel)
+                                                       : juce::String (midiChannel);
+            g.drawText (channelText, heading.translated (3.0f, 0.0f).reduced (1.0f, 0.0f),
                         juce::Justification::centred, false);
 
-            for (int slot = 0; slot < 16; ++slot)
+            for (int slot = 0; slot < sourcesPerChannel; ++slot)
             {
                 // OSC source ids are [0,255], while the documented musical map
                 // is 1->ch1 ... 17->ch1. Source 0 therefore occupies the final
                 // ch16 cell after ids 16,32,...240.
                 const int oneBasedId = midiChannel + slot * 16;
-                const int sourceId = oneBasedId == 256 ? 0 : oneBasedId;
-                const auto snapshot = model.getSourceSnapshot (sourceId);
+                const int sourceId = oneBasedId == sourceCapacity ? 0 : oneBasedId;
+                const auto& snapshot = snapshots[(size_t) sourceId];
 
                 auto cell = juce::Rectangle<float> (
                     (float) grid.getX() + columnWidth * (float) channelIndex,
@@ -336,19 +720,25 @@ public:
                     columnWidth, rowHeight).reduced (gap * 0.5f);
 
                 const bool active = snapshot.active;
-                g.setColour (active ? colour.withAlpha (0.23f)
-                                    : cm::cardRaised.withAlpha (0.58f));
+                g.setColour (active ? colour.withAlpha (0.22f) : cm::matrixIdle);
                 g.fillRoundedRectangle (cell, juce::jmin (3.5f, rowHeight * 0.22f));
+
+                g.setColour (active ? colour.withAlpha (0.88f)
+                                    : cm::lineSoft.withAlpha (0.76f));
+                g.drawRoundedRectangle (cell, juce::jmin (3.5f, rowHeight * 0.22f),
+                                        active ? 0.9f : 0.65f);
 
                 if (active)
                 {
-                    g.setColour (colour.withAlpha (0.92f));
-                    g.drawRoundedRectangle (cell, juce::jmin (3.5f, rowHeight * 0.22f), 0.9f);
-
-                    const float px = cell.getX() + juce::jlimit (0.12f, 0.88f, snapshot.x) * cell.getWidth();
-                    const float py = cell.getY() + juce::jlimit (0.18f, 0.82f, 1.0f - snapshot.y) * cell.getHeight();
-                    const float dot = juce::jlimit (2.0f, 4.2f,
-                                                   1.7f + 0.25f * (float) snapshot.activeFingerCount);
+                    const float px = cell.getX()
+                                   + (0.06f + juce::jlimit (0.0f, 1.0f, snapshot.x) * 0.76f)
+                                         * cell.getWidth();
+                    const float py = cell.getY()
+                                   + (0.08f + (1.0f - juce::jlimit (0.0f, 1.0f, snapshot.y))
+                                                  * 0.58f)
+                                         * cell.getHeight();
+                    const float dot = juce::jlimit (2.4f, 5.0f,
+                                                   2.5f + 0.3f * (float) snapshot.activeFingerCount);
                     g.setColour (cm::text.withAlpha (0.96f));
                     g.fillEllipse (px - dot * 0.5f, py - dot * 0.5f, dot, dot);
 
@@ -361,6 +751,46 @@ public:
                     }
                 }
             }
+        }
+
+        g.setColour (cm::lineSoft);
+        g.fillRect (footer.removeFromTop (1));
+        footer.reduce (0, 6);
+
+        auto drawLegend = [&g] (juce::Rectangle<int> item, juce::Colour fill,
+                                juce::Colour border, const juce::String& label, bool dot)
+        {
+            auto swatch = item.removeFromLeft (16).withSizeKeepingCentre (10, 10).toFloat();
+            g.setColour (fill);
+            g.fillRoundedRectangle (swatch, 3.0f);
+            g.setColour (border);
+            g.drawRoundedRectangle (swatch.reduced (0.5f), 3.0f, 0.8f);
+            if (dot)
+            {
+                g.setColour (cm::text);
+                g.fillEllipse (swatch.getCentreX() - 1.6f, swatch.getCentreY() - 1.6f,
+                               3.2f, 3.2f);
+            }
+            g.setColour (cm::textDim);
+            g.setFont (juce::Font (juce::FontOptions (8.2f)));
+            g.drawText (label, item, juce::Justification::centredLeft, false);
+        };
+
+        auto legend = footer.removeFromLeft (juce::jmin (315, footer.getWidth()));
+        drawLegend (legend.removeFromLeft (70), cm::matrixIdle, cm::lineSoft,
+                    "IDLE", false);
+        drawLegend (legend.removeFromLeft (108), cm::cyan.withAlpha (0.11f),
+                    cm::cyan.withAlpha (0.55f), "ACTIVE TOUCH", false);
+        if (legend.getWidth() >= 100)
+            drawLegend (legend, cm::cyan.withAlpha (0.28f), cm::cyan,
+                        "U/V POSITION", true);
+
+        if (footer.getWidth() >= 190)
+        {
+            g.setColour (cm::textLow);
+            g.setFont (juce::Font (juce::FontOptions (7.8f)));
+            g.drawFittedText ("identity locked across on / off / finger messages", footer,
+                              juce::Justification::centredRight, 1, 0.72f);
         }
     }
 
@@ -409,13 +839,13 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     lookAndFeel = std::make_unique<cm::LookAndFeel>();
     setLookAndFeel (lookAndFeel.get());
 
-    setSize (1280, 760);
+    setSize (1440, 900);
     setResizable (true, true);
     setResizeLimits (1000, 650, 2200, 1300);
     setOpaque (true);
     const auto versionText = "v" + juce::String (JucePlugin_VersionString);
-    setTitle ("Cosmic Microwave " + versionText + " OSC to MIDI router");
-    setDescription ("MIDI-only control surface for zone OSC input, source routing, pitch mapping, Time Field scheduling and MIDI output.");
+    setTitle ("Cosmic Microwave " + versionText + " OSC to MIDI notes router");
+    setDescription ("Notes-only control surface for zone OSC input, source routing, pitch mapping, Time Field scheduling and MIDI output.");
 
     versionLabel.setText (versionText, juce::dontSendNotification);
     versionLabel.setJustificationType (juce::Justification::centred);
@@ -429,6 +859,8 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     for (auto* tab : { &performTabButton, &showConsoleTabButton })
     {
         styleButton (*tab);
+        tab->setComponentID ("pageTab");
+        tab->setRadioGroupId (1001, juce::dontSendNotification);
         tab->setClickingTogglesState (false);
         tab->setWantsKeyboardFocus (true);
         addAndMakeVisible (*tab);
@@ -437,7 +869,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     performTabButton.setDescription ("Open the OSC, source matrix, Time Field, pitch and MIDI performance controls.");
     performTabButton.setTooltip (performTabButton.getDescription());
     showConsoleTabButton.setTitle ("Show Console page");
-    showConsoleTabButton.setDescription ("Open venue preflight, safety telemetry, Global Conductor and Crowd Expression controls.");
+    showConsoleTabButton.setDescription ("Open venue preflight, safety telemetry, Global Conductor and Notes Only MIDI policy controls.");
     showConsoleTabButton.setTooltip (showConsoleTabButton.getDescription());
     performTabButton.onClick = [this] { showPage (false); };
     showConsoleTabButton.onClick = [this] { showPage (true); };
@@ -464,10 +896,12 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
         caption.setFont (juce::Font (juce::FontOptions (8.2f).withStyle ("bold")));
         caption.setMinimumHorizontalScale (0.76f);
     };
-    styleMetric (activeSourcesValue, activeSourcesCaption, "SOURCES", "Active OSC sources");
+    styleMetric (activeSourcesValue, activeSourcesCaption, "SOURCES", "Active input sources");
     styleMetric (activeFingersValue, activeFingersCaption, "TOUCHES", "Active touches");
     styleMetric (notesSentValue, notesSentCaption, "MIDI NOTES", "MIDI notes sent");
-    styleMetric (mpeVoicesValue, mpeVoicesCaption, "MPE VOICES", "Active MPE voices");
+    styleMetric (activeNotesValue, activeNotesCaption, "ACTIVE NOTES", "Active scheduled notes");
+    notesSentValue.setColour (juce::Label::textColourId, cm::cyan);
+    activeNotesValue.setColour (juce::Label::textColourId, cm::green);
 
     // OSC input ---------------------------------------------------------------
     styleLabel (portLabel, "UDP PORT");
@@ -481,7 +915,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     portEditor.setColour (juce::TextEditor::focusedOutlineColourId, cm::cyan);
     portEditor.setTitle ("UDP listen port");
     portEditor.setDescription ("UDP port for this Cosmic Microwave instance. Enter a number from 1 to 65535 and press Return or Apply.");
-    portEditor.setTooltip ("Each zone uses its own UDP port, for example Zone A 6060 and Zone B 6061.");
+    portEditor.setTooltip ("Each zone uses the UDP output port assigned to it in the per-show Venue Bridge manifest.");
     portEditor.onTextChange = [this]
     {
         if (! updatingPortEditor)
@@ -489,7 +923,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
             portEditorDirty = portEditor.getText().trim() != juce::String (proc.getUdpPort());
             portApplyButton.setEnabled (portEditorDirty);
             portEditor.setDescription ("UDP port for this Cosmic Microwave instance. Enter a number from 1 to 65535 and press Return or Apply.");
-            oscPathLabel.setText ("/cs/{zone}/{source}/finger0  |  /u  /v  /on  |  0-1",
+            oscPathLabel.setText ("/cs/{zone}/{source}/finger0  |  u/v/on  |  0-1  |  immediate",
                                   juce::dontSendNotification);
             oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
             oscPathLabel.setTitle ("OSC address format");
@@ -512,7 +946,7 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     oscStatusLabel.setTitle ("OSC receiver status");
     addAndMakeVisible (oscStatusLabel);
 
-    styleLabel (oscPathLabel, "/cs/{zone}/{source}/finger0  |  /u  /v  /on  |  0-1");
+    styleLabel (oscPathLabel, "/cs/{zone}/{source}/finger0  |  u/v/on  |  0-1  |  immediate");
     oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
     oscPathLabel.setFont (juce::Font (juce::FontOptions (9.0f)));
     oscPathLabel.setTitle ("OSC address format");
@@ -542,20 +976,50 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
         styleButton (*button);
         addAndMakeVisible (*button);
     }
-    simAddButton.setTitle ("Add simulated source");
-    simCrowdButton.setTitle ("Add twenty-five simulated sources");
-    simRemoveButton.setTitle ("Remove simulated source");
-    simClearButton.setTitle ("Clear all simulated sources");
+    simAddButton.setTitle ("Add held simulator touch");
+    simAddButton.setTooltip ("Add one continuously held finger0 touch for deterministic pitch and channel tests.");
+    simCrowdButton.setTitle ("Add crowd simulator participants");
+    simCrowdButton.setTooltip ("Add 25 stable participant IDs whose finger0 touches independently press and release like production Pad traffic.");
+    simRemoveButton.setTitle ("Remove simulator participant");
+    simRemoveButton.setTooltip ("Remove one participant from the local simulator, releasing it first when active.");
+    simClearButton.setTitle ("Clear simulator");
+    simClearButton.setTooltip ("Release and remove every local simulator participant. Live OSC sources are not simulator-owned; do not run both inputs together.");
     simAddButton.onClick = [this] { proc.simulator.addRandomSeat(); };
-    simCrowdButton.onClick = [this] { proc.simulator.addRandomSeats (25); };
+    simCrowdButton.onClick = [this] { proc.simulator.addCrowdParticipants (25); };
     simRemoveButton.onClick = [this] { proc.simulator.removeRandomSeat(); };
     simClearButton.onClick = [this] { proc.simulator.clear(); };
+
+    addChoiceItems (simProfileCombo, { "Human", "Dense", "Stress" });
+    styleCombo (simProfileCombo);
+    simProfileCombo.setSelectedItemIndex (
+        static_cast<int> (proc.simulator.getProfile()), juce::dontSendNotification);
+    simProfileCombo.setTitle ("Simulator behaviour profile");
+    simProfileCombo.setDescription (
+        "Human follows the measured phone timing and gesture mixture. Dense increases activity while preserving independent human motion. Stress applies a bounded worst-case load profile.");
+    simProfileCombo.setTooltip (simProfileCombo.getDescription());
+    simProfileCombo.onChange = [this]
+    {
+        const int selected = simProfileCombo.getSelectedItemIndex();
+        const auto profile = selected == 1 ? Simulator::Profile::dense
+                           : selected == 2 ? Simulator::Profile::stress
+                                           : Simulator::Profile::human;
+        proc.simulator.setProfile (profile);
+    };
+    addAndMakeVisible (simProfileCombo);
+
+    styleLabel (simStatusLabel, "HELD 0  ·  CROWD 0 / 0 ACTIVE",
+                juce::Justification::centredLeft);
+    simStatusLabel.setColour (juce::Label::textColourId, cm::textDim);
+    simStatusLabel.setFont (juce::Font (juce::FontOptions (9.3f).withStyle ("bold")));
+    simStatusLabel.setTitle ("Simulator lifecycle status");
+    simStatusLabel.setDescription ("No local simulator participants.");
+    addAndMakeVisible (simStatusLabel);
 
     simMoveButton.setColour (juce::ToggleButton::textColourId, cm::textMuted);
     simMoveButton.setColour (juce::ToggleButton::tickColourId, cm::green);
     simMoveButton.setColour (juce::ToggleButton::tickDisabledColourId, cm::line);
-    simMoveButton.setTitle ("Random simulator movement");
-    simMoveButton.setTooltip ("Continuously move active simulator sources across the pitch and expression axes.");
+    simMoveButton.setTitle ("Move active simulator touches");
+    simMoveButton.setTooltip ("Continuously move only currently pressed simulator touches across the U and V axes. Crowd press/release cycling continues independently.");
     simMoveButton.onClick = [this]
     {
         proc.simulator.setRandomMovement (simMoveButton.getToggleState());
@@ -633,10 +1097,14 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     addChoiceItems (timeModeCombo, { "Flow", "Grid", "Ensemble" });
     addChoiceItems (clockSourceCombo, { "Host", "Internal" });
     addChoiceItems (gridDivisionCombo, { "1/4", "1/8", "1/16", "1/32" });
+    addChoiceItems (noteDurationCombo, { "2n", "4n", "8n", "16n", "32n" });
+    addChoiceItems (ensembleSameNoteCombo, { "Tie", "Retrigger" });
     addChoiceItems (temporalSpreadCombo, { "1", "2", "4", "8", "16" });
 
     for (auto* combo : { &timeModeCombo, &clockSourceCombo,
-                         &gridDivisionCombo, &temporalSpreadCombo })
+                         &gridDivisionCombo, &noteDurationCombo,
+                         &ensembleSameNoteCombo,
+                         &temporalSpreadCombo })
     {
         styleCombo (*combo);
         addAndMakeVisible (*combo);
@@ -648,6 +1116,12 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     clockSourceCombo.setDescription ("Follow the host transport tempo or use Cosmic Microwave's internal clock.");
     gridDivisionCombo.setTitle ("Time Field grid division");
     gridDivisionCombo.setDescription ("Temporal scheduling grid, from quarter notes to thirty-second notes.");
+    noteDurationCombo.setTitle ("Note duration");
+    noteDurationCombo.setDescription ("Fixed Note On to Note Off lifetime for each new attack, calculated from the current host tempo.");
+    ensembleSameNoteCombo.setTitle ("Ensemble same-note articulation");
+    ensembleSameNoteCombo.setDescription (
+        "Tie extends an already sounding identical note. Retrigger sends a safe Note Off then Note On on every admitted Ensemble pulse. This choice affects Ensemble only.");
+    ensembleSameNoteCombo.setTooltip (ensembleSameNoteCombo.getDescription());
     temporalSpreadCombo.setTitle ("Time Field temporal spread");
     temporalSpreadCombo.setDescription ("Number of grid steps over which scheduled attacks may be distributed.");
 
@@ -682,12 +1156,19 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     styleLabel (clockSourceLabel, "CLOCK");
     styleLabel (internalBpmLabel, "INTERNAL BPM");
     styleLabel (gridDivisionLabel, "DIVISION");
+    styleLabel (noteDurationLabel, "NOTE DURATION");
+    styleLabel (ensembleSameNoteLabel, "SAME NOTE");
+    ensembleSameNoteLabel.setTitle ("Ensemble same-note articulation");
+    ensembleSameNoteLabel.setDescription (ensembleSameNoteCombo.getDescription());
+    ensembleSameNoteLabel.setTooltip (ensembleSameNoteCombo.getDescription());
     styleLabel (maxAttacksLabel, "ATTACKS / STEP");
     styleLabel (maxActiveVoicesLabel, "ACTIVE LIMIT");
     styleLabel (gatePercentLabel, "GATE");
     styleLabel (temporalSpreadLabel, "SPREAD / STEPS");
     for (auto* label : { &timeModeLabel, &clockSourceLabel, &internalBpmLabel,
-                         &gridDivisionLabel, &maxAttacksLabel, &maxActiveVoicesLabel,
+                         &gridDivisionLabel, &noteDurationLabel,
+                         &ensembleSameNoteLabel,
+                         &maxAttacksLabel, &maxActiveVoicesLabel,
                          &gatePercentLabel, &temporalSpreadLabel })
         addAndMakeVisible (*label);
 
@@ -704,7 +1185,8 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     timeTelemetryLabel.setFont (juce::Font (juce::FontOptions (9.6f).withStyle ("bold")));
     timeTelemetryLabel.setMinimumHorizontalScale (0.72f);
     timeTelemetryLabel.setTitle ("Time Field load");
-    timeTelemetryLabel.setDescription ("Pending attacks, active scheduled voices and merged same-step attacks.");
+    timeTelemetryLabel.setDescription (
+        "Pending attacks, active scheduled voices, and pending work whose admission window elapsed; held intent is renewed while released taps may expire.");
     addAndMakeVisible (timeTelemetryLabel);
 
     styleButton (governorModeButton);
@@ -736,6 +1218,9 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     clockSourceAttachment = std::make_unique<ComboAttachment> (proc.apvts, "clockSource", clockSourceCombo);
     internalBpmAttachment = std::make_unique<SliderAttachment> (proc.apvts, "internalBpm", internalBpmSlider);
     gridDivisionAttachment = std::make_unique<ComboAttachment> (proc.apvts, "gridDivision", gridDivisionCombo);
+    noteDurationAttachment = std::make_unique<ComboAttachment> (proc.apvts, "noteDuration", noteDurationCombo);
+    ensembleSameNoteAttachment = std::make_unique<ComboAttachment> (
+        proc.apvts, "ensembleSameNoteMode", ensembleSameNoteCombo);
     maxAttacksAttachment = std::make_unique<SliderAttachment> (proc.apvts, "maxAttacksPerStep", maxAttacksSlider);
     maxActiveVoicesAttachment = std::make_unique<SliderAttachment> (proc.apvts, "maxActiveVoices", maxActiveVoicesSlider);
     gatePercentAttachment = std::make_unique<SliderAttachment> (proc.apvts, "gatePercent", gatePercentSlider);
@@ -745,60 +1230,50 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     timeModeCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
     clockSourceCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
     gridDivisionCombo.onChange = [this] { updateLiveText(); };
+    noteDurationCombo.onChange = [this] { updateLiveText(); };
     governorModeButton.onClick = [this] { updateModeVisibility(); updateLiveText(); };
 
     // MIDI routing ------------------------------------------------------------
-    addChoiceItems (midiTypeCombo, { "Off", "Normal MIDI", "MPE MIDI" });
+    addChoiceItems (midiTypeCombo, { "Off", "Notes Only" });
     addChoiceItems (normalRoutingCombo, { "Single channel", "Per source 1-16" });
+    addChoiceItems (sourceCapacityCombo,
+                    { "64 participants - 4 / channel",
+                      "128 participants - 8 / channel",
+                      "256 participants - 16 / channel" });
     juce::StringArray channels;
     for (int channel = 1; channel <= 16; ++channel)
         channels.add ("Channel " + juce::String (channel));
     addChoiceItems (normalChannelCombo, channels);
-    addChoiceItems (mpeZoneCombo, { "Lower (M1 / Ch2-16)", "Upper (M16 / Ch1-15)" });
-    addChoiceItems (mpeBendRangeCombo, { "+/-2 st", "+/-12 st", "+/-24 st", "+/-48 st" });
-    addChoiceItems (mpePitchModeCombo, { "Retrigger", "Glide" });
 
-    for (auto* combo : { &midiTypeCombo, &normalRoutingCombo, &normalChannelCombo,
-                         &mpeZoneCombo, &mpeBendRangeCombo, &mpePitchModeCombo })
+    for (auto* combo : { &midiTypeCombo, &normalRoutingCombo,
+                         &normalChannelCombo, &sourceCapacityCombo })
     {
         styleCombo (*combo);
         addAndMakeVisible (*combo);
     }
-    midiTypeCombo.setTitle ("MIDI output protocol");
-    normalRoutingCombo.setTitle ("Normal MIDI source routing");
-    normalChannelCombo.setTitle ("Fixed normal MIDI channel");
-    mpeZoneCombo.setTitle ("MPE zone");
-    mpeBendRangeCombo.setTitle ("MPE pitch bend range");
-    mpePitchModeCombo.setTitle ("MPE pitch motion mode");
+    midiTypeCombo.setTitle ("MIDI note output");
+    midiTypeCombo.setDescription ("Off, or Note On/Off only. Cosmic Microwave does not emit musical CC, Channel Pressure, Pitch Bend or MPE messages.");
+    normalRoutingCombo.setTitle ("Notes Only source routing");
+    normalChannelCombo.setTitle ("Fixed Notes Only MIDI channel");
+    sourceCapacityCombo.setTitle ("Participant source capacity");
+    sourceCapacityCombo.setDescription ("Logical zone capacity distributed evenly across the same sixteen physical MIDI channels.");
 
     styleLabel (midiTypeLabel, "OUTPUT");
     styleLabel (normalRoutingLabel, "SOURCE ROUTING");
     styleLabel (normalChannelLabel, "FIXED CHANNEL");
-    styleLabel (mpeZoneLabel, "ZONE");
-    styleLabel (mpeBendRangeLabel, "BEND RANGE");
-    styleLabel (mpePitchModeLabel, "PITCH MOTION");
-    for (auto* label : { &midiTypeLabel, &normalRoutingLabel, &normalChannelLabel,
-                         &mpeZoneLabel, &mpeBendRangeLabel, &mpePitchModeLabel })
+    styleLabel (sourceCapacityLabel, "SOURCE CAPACITY");
+    for (auto* label : { &midiTypeLabel, &normalRoutingLabel,
+                         &normalChannelLabel, &sourceCapacityLabel })
         addAndMakeVisible (*label);
-
-    mpeSetupButton.setColour (juce::ToggleButton::textColourId, cm::textMuted);
-    mpeSetupButton.setColour (juce::ToggleButton::tickColourId, cm::violet);
-    mpeSetupButton.setColour (juce::ToggleButton::tickDisabledColourId, cm::line);
-    mpeSetupButton.setTitle ("Send MPE setup messages");
-    mpeSetupButton.setTooltip ("Send MPE zone configuration and pitch-bend-range RPN messages to the destination.");
-    addAndMakeVisible (mpeSetupButton);
 
     midiTypeAttachment = std::make_unique<ComboAttachment> (proc.apvts, "midiOutputType", midiTypeCombo);
     normalRoutingAttachment = std::make_unique<ComboAttachment> (proc.apvts, "normalMidiRoutingMode", normalRoutingCombo);
     normalChannelAttachment = std::make_unique<ComboAttachment> (proc.apvts, "normalMidiChannel", normalChannelCombo);
-    mpeZoneAttachment = std::make_unique<ComboAttachment> (proc.apvts, "mpeZone", mpeZoneCombo);
-    mpeBendRangeAttachment = std::make_unique<ComboAttachment> (proc.apvts, "mpePitchBendRange", mpeBendRangeCombo);
-    mpePitchModeAttachment = std::make_unique<ComboAttachment> (proc.apvts, "mpePitchMode", mpePitchModeCombo);
-    mpeSetupAttachment = std::make_unique<ButtonAttachment> (proc.apvts, "mpeSendSetupMessages", mpeSetupButton);
+    sourceCapacityAttachment = std::make_unique<ComboAttachment> (proc.apvts, "sourceCapacity", sourceCapacityCombo);
 
     midiTypeCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
     normalRoutingCombo.onChange = [this] { updateModeVisibility(); updateLiveText(); };
-    mpeZoneCombo.onChange = [this] { updateLiveText(); };
+    sourceCapacityCombo.onChange = [this] { updateLiveText(); };
 
     // MIDI destination --------------------------------------------------------
     styleLabel (destinationLabel, "DESTINATION");
@@ -834,6 +1309,8 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     addAndMakeVisible (destinationDetailLabel);
 
     styleButton (panicButton, true);
+    panicButton.setButtonText ("PANIC  —  ALL NOTES OFF");
+    panicButton.setComponentID ("panicButton");
     panicButton.setTitle ("MIDI panic");
     panicButton.setDescription ("Send note-off and all-sound-off messages on all MIDI channels.");
     panicButton.setTooltip ("Release every active note on the host and external MIDI outputs.");
@@ -912,6 +1389,48 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
                  "Require this plug-in instance to be the sole in-process owner of its UDP port.");
     styleReadout (routeConsoleStatusLabel, "Routing safety status");
 
+    styleLabel (factoryPresetLabel, "FACTORY PERFORMANCE PRESET");
+    addAndMakeVisible (factoryPresetLabel);
+    for (int index = 0; index < AudienceProcessor::getNumFactoryPresets(); ++index)
+        factoryPresetCombo.addItem (AudienceProcessor::getFactoryPresetName(index), index + 1);
+    factoryPresetCombo.setTextWhenNothingSelected ("CUSTOM / SAVED PROJECT STATE");
+    styleCombo (factoryPresetCombo);
+    factoryPresetCombo.setTitle ("Factory performance preset");
+    factoryPresetCombo.setDescription (
+        "Recall the screenshot setup for Zone A-H. Recall sends Panic, selects UDP 6062-6069, "
+        "opens the matching virtual MIDI port and restores the Notes Only show controls.");
+    factoryPresetCombo.setTooltip (factoryPresetCombo.getDescription());
+    addAndMakeVisible (factoryPresetCombo);
+    styleButton (autoAssignRetryButton);
+    autoAssignRetryButton.setTitle ("Retry automatic Zone / UDP assignment");
+    autoAssignRetryButton.setDescription (
+        "Retry the retained exclusive scan of UDP 6062-6069 after every factory route was busy.");
+    autoAssignRetryButton.setTooltip (autoAssignRetryButton.getDescription());
+    autoAssignRetryButton.onClick = [this]
+    {
+        proc.retryFreshRouteAssignment();
+        restoreUdpPortEditor();
+        refreshMidiOutputCombo();
+        updateLiveText();
+        updateConsoleTelemetry();
+    };
+    addAndMakeVisible (autoAssignRetryButton);
+    styleReadout (factoryPresetStatusLabel, "Factory performance preset status");
+    factoryPresetCombo.onChange = [this]
+    {
+        if (refreshingFactoryPreset)
+            return;
+        const int index = factoryPresetCombo.getSelectedItemIndex();
+        if (index < 0 || index >= AudienceProcessor::getNumFactoryPresets())
+            return;
+        proc.applyFactoryPreset(index);
+        restoreUdpPortEditor();
+        refreshMidiOutputCombo();
+        updateModeVisibility();
+        updateLiveText();
+        updateConsoleTelemetry();
+    };
+
     styleToggle (safetyGovernorButton, "Safety Governor enabled",
                  "Continuously reduce attack admission, motion rate and voice ceilings as realtime pressure rises.");
     styleReadout (safetyStateLabel, "Safety Governor state");
@@ -921,14 +1440,22 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     styleReadout (safetyFifoLabel, "External MIDI FIFO pressure");
     styleReadout (safetyQueueLabel, "OSC queue pressure");
 
-    styleReadout (preflightSummaryLabel, "Venue preflight summary");
+    styleReadout (preflightSummaryLabel, "Cosmic local preflight summary");
+    preflightSummaryLabel.setDescription (
+        "Summarizes checks performed inside this Cosmic Microwave instance. It is not "
+        "a server roster result or a substitute for the separate 60-second venue soak.");
+    preflightSummaryLabel.setTooltip (preflightSummaryLabel.getDescription());
     static constexpr const char* preflightTitles[] {
         "OSC receiver preflight", "Zone contract preflight", "UDP ownership preflight",
         "MIDI route preflight", "Safety Governor preflight", "Time Field preflight",
-        "Global Conductor preflight"
+        "Global Conductor preflight", "Source Quality Ready Gate preflight"
     };
     for (size_t index = 0; index < preflightRows.size(); ++index)
         styleReadout (preflightRows[index], preflightTitles[index]);
+    preflightRows[7].setDescription (
+        "Short local accepted-live-OSC signal census. A READY result keeps the server "
+        "roster and the 60-second production soak explicitly external.");
+    preflightRows[7].setTooltip (preflightRows[7].getDescription());
 
     addChoiceItems (conductorRoleCombo, { "Off", "Leader", "Follower" });
     addChoiceItems (conductorGroupCombo, { "Group 1", "Group 2", "Group 3", "Group 4" });
@@ -985,7 +1512,26 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
                         "MIDI CC number carrying the crowd vertical centroid.", 0.0, 127.0);
     styleConsoleSlider (macroMotionCcSlider, "Crowd motion CC",
                         "MIDI CC number carrying smoothed aggregate crowd motion.", 0.0, 127.0);
-    styleReadout (macroStatusLabel, "Crowd Expression status");
+    styleReadout (macroStatusLabel, "Notes Only MIDI policy status");
+
+    styleButton (sourceQualityButton);
+    sourceQualityButton.setTitle ("Source Quality Ready Gate");
+    sourceQualityButton.setDescription (
+        "Start a fresh local accepted-live-OSC signal census for every source in the selected 64, 128 or 256 capacity domain. This short gate does not verify the server roster or replace the separate 60-second production soak. While armed and warming, only new attacks wait; Off, Cancel and sounding notes remain safe.");
+    sourceQualityButton.setTooltip (sourceQualityButton.getDescription());
+    sourceQualityButton.onClick = [this]
+    {
+        if (proc.isSourceQualityCheckArmed())
+            proc.stopSourceQualityCheck();
+        else
+            proc.startSourceQualityCheck();
+        updateConsoleTelemetry();
+    };
+    addAndMakeVisible (sourceQualityButton);
+    styleReadout (sourceQualityGateLabel, "Source Quality gate state");
+    styleReadout (sourceQualityCoverageLabel, "Source signal census coverage");
+    styleReadout (sourceQualityTimingLabel, "Source U and V heartbeat and motion rate");
+    styleReadout (sourceQualityFaultLabel, "Source lifecycle and split drop incidents");
 
     styleReadout (chaosTitleLabel, "Capture and Replay Chaos Lab");
     chaosTitleLabel.setText ("EXTERNAL TOOL  /  AUDIO THREAD ISOLATED", juce::dontSendNotification);
@@ -1025,6 +1571,29 @@ AudienceEditor::AudienceEditor (AudienceProcessor& processorToUse)
     for (auto* toggle : { &exclusivePortButton, &safetyGovernorButton, &crowdMacrosButton })
         toggle->onClick = [this] { updateConsoleTelemetry(); };
 
+    // Presentation proxies keep the existing ComboBoxAttachments authoritative
+    // while matching the compact segmented language of the reference design.
+    timeModeSegments = std::make_unique<SegmentedChoice> (
+        timeModeCombo, juce::StringArray { "Flow", "Grid", "Ensemble" },
+        "Time Field mode");
+    clockSourceSegments = std::make_unique<SegmentedChoice> (
+        clockSourceCombo, juce::StringArray { "Host", "Internal" },
+        "Time Field clock source");
+    pitchSystemSegments = std::make_unique<SegmentedChoice> (
+        pitchSystemCombo, juce::StringArray { "Tonal", "Atomic" },
+        "Pitch system");
+    pitchSpectrumDisplay = std::make_unique<PitchSpectrumDisplay> (proc);
+    addAndMakeVisible (*timeModeSegments);
+    addAndMakeVisible (*clockSourceSegments);
+    addAndMakeVisible (*pitchSystemSegments);
+    addAndMakeVisible (*pitchSpectrumDisplay);
+
+    // The hidden ComboBoxes retain parameter ownership only. The focusable
+    // segmented proxies above are the user-facing accessible controls.
+    timeModeCombo.setWantsKeyboardFocus (false);
+    clockSourceCombo.setWantsKeyboardFocus (false);
+    pitchSystemCombo.setWantsKeyboardFocus (false);
+
     restoreUdpPortEditor();
     refreshMidiOutputCombo();
     updateModeVisibility();
@@ -1044,6 +1613,14 @@ void AudienceEditor::setPerformControlsVisible (bool shouldBeVisible)
 {
     if (sourceMap != nullptr)
         sourceMap->setVisible (shouldBeVisible);
+    if (timeModeSegments != nullptr)
+        timeModeSegments->setVisible (shouldBeVisible);
+    if (clockSourceSegments != nullptr)
+        clockSourceSegments->setVisible (shouldBeVisible);
+    if (pitchSystemSegments != nullptr)
+        pitchSystemSegments->setVisible (shouldBeVisible);
+    if (pitchSpectrumDisplay != nullptr)
+        pitchSpectrumDisplay->setVisible (shouldBeVisible);
 
     auto set = [shouldBeVisible] (std::initializer_list<juce::Component*> components)
     {
@@ -1053,20 +1630,24 @@ void AudienceEditor::setPerformControlsVisible (bool shouldBeVisible)
 
     set ({ &portLabel, &portEditor, &portApplyButton, &oscStatusLabel, &oscPathLabel,
            &routingSummaryLabel, &routingDetailLabel, &zoneStatusLabel,
-           &simAddButton, &simCrowdButton, &simRemoveButton, &simClearButton, &simMoveButton,
+           &simAddButton, &simCrowdButton, &simRemoveButton, &simClearButton,
+           &simProfileCombo,
+           &simStatusLabel, &simMoveButton,
            &rootLabel, &rootOctaveLabel, &scaleLabel, &octavesLabel,
            &atomicElementLabel, &atomicModeLabel, &pitchSystemCombo, &rootCombo,
            &rootOctaveCombo, &scaleCombo, &atomicElementCombo, &atomicModeCombo, &octavesSlider,
            &timeStatusLabel, &timeTelemetryLabel, &governorModeButton,
            &timeModeLabel, &clockSourceLabel, &internalBpmLabel, &gridDivisionLabel,
+           &noteDurationLabel, &ensembleSameNoteLabel,
            &maxAttacksLabel, &maxActiveVoicesLabel, &gatePercentLabel, &temporalSpreadLabel,
            &governorAttacksValue, &governorActiveVoicesValue, &governorSpreadValue,
-           &timeModeCombo, &clockSourceCombo, &gridDivisionCombo, &temporalSpreadCombo,
+           &timeModeCombo, &clockSourceCombo, &gridDivisionCombo, &noteDurationCombo,
+           &ensembleSameNoteCombo,
+           &temporalSpreadCombo,
            &internalBpmSlider, &maxAttacksSlider, &maxActiveVoicesSlider, &gatePercentSlider,
-           &midiTypeLabel, &normalRoutingLabel, &normalChannelLabel, &mpeZoneLabel,
-           &mpeBendRangeLabel, &mpePitchModeLabel, &midiTypeCombo, &normalRoutingCombo,
-           &normalChannelCombo, &mpeZoneCombo, &mpeBendRangeCombo, &mpePitchModeCombo,
-           &mpeSetupButton, &destinationLabel, &destinationCombo, &rescanButton,
+           &midiTypeLabel, &normalRoutingLabel, &normalChannelLabel, &sourceCapacityLabel,
+           &midiTypeCombo, &normalRoutingCombo, &normalChannelCombo, &sourceCapacityCombo,
+           &destinationLabel, &destinationCombo, &rescanButton,
            &destinationStatusLabel, &destinationDetailLabel, &panicButton });
 }
 
@@ -1080,6 +1661,8 @@ void AudienceEditor::setConsoleControlsVisible (bool shouldBeVisible)
 
     set ({ &outputPathLabel, &expectedZoneLabel, &outputPathCombo, &expectedZoneCombo,
            &exclusivePortButton, &routeConsoleStatusLabel,
+           &factoryPresetLabel, &factoryPresetCombo, &autoAssignRetryButton,
+           &factoryPresetStatusLabel,
            &safetyGovernorButton, &safetyStateLabel, &safetyReasonLabel,
            &safetyIngressLabel, &safetyDeadlineLabel, &safetyFifoLabel, &safetyQueueLabel,
            &preflightSummaryLabel,
@@ -1092,7 +1675,27 @@ void AudienceEditor::setConsoleControlsVisible (bool shouldBeVisible)
            &macroMotionCcLabel, &macroChannelCombo, &macroRateCombo,
            &macroDensityCcSlider, &macroCentroidXCcSlider, &macroCentroidYCcSlider,
            &macroMotionCcSlider, &macroStatusLabel,
+           &sourceQualityButton, &sourceQualityGateLabel,
+           &sourceQualityCoverageLabel, &sourceQualityTimingLabel,
+           &sourceQualityFaultLabel,
            &chaosTitleLabel, &chaosBodyLabel, &chaosCommandLabel });
+
+    // These legacy controls remain constructed only so old APVTS parameter
+    // topology is harmless. Notes Only never exposes or emits Crowd Macro CCs.
+    for (auto* retired : { static_cast<juce::Component*> (&crowdMacrosButton),
+                           static_cast<juce::Component*> (&macroChannelLabel),
+                           static_cast<juce::Component*> (&macroRateLabel),
+                           static_cast<juce::Component*> (&macroDensityCcLabel),
+                           static_cast<juce::Component*> (&macroCentroidXCcLabel),
+                           static_cast<juce::Component*> (&macroCentroidYCcLabel),
+                           static_cast<juce::Component*> (&macroMotionCcLabel),
+                           static_cast<juce::Component*> (&macroChannelCombo),
+                           static_cast<juce::Component*> (&macroRateCombo),
+                           static_cast<juce::Component*> (&macroDensityCcSlider),
+                           static_cast<juce::Component*> (&macroCentroidXCcSlider),
+                           static_cast<juce::Component*> (&macroCentroidYCcSlider),
+                           static_cast<juce::Component*> (&macroMotionCcSlider) })
+        retired->setVisible (false);
 
     for (auto& row : preflightRows)
         row.setVisible (shouldBeVisible);
@@ -1125,68 +1728,60 @@ void AudienceEditor::showPage (bool shouldShowConsole)
 
 void AudienceEditor::paint (juce::Graphics& g)
 {
-    juce::ColourGradient bodyGradient (cm::background.brighter (0.018f), 0.0f, 92.0f,
-                                       cm::background, 0.0f, (float) getHeight(), false);
-    g.setGradientFill (bodyGradient);
-    g.fillRect (getLocalBounds());
+    g.fillAll (cm::background);
 
-    auto headerBounds = getLocalBounds().removeFromTop (92);
-    juce::ColourGradient headerGradient (cm::header.brighter (0.035f),
-                                         (float) headerBounds.getX(), 0.0f,
-                                         cm::header, (float) headerBounds.getRight(), 0.0f, false);
-    headerGradient.addColour (0.48, juce::Colour (0xff101925));
-    g.setGradientFill (headerGradient);
+    auto headerBounds = getLocalBounds().removeFromTop (62);
+    g.setColour (cm::header);
     g.fillRect (headerBounds);
     g.setColour (cm::lineSoft);
     g.fillRect (headerBounds.removeFromBottom (1));
 
-    auto brand = juce::Rectangle<int> (18, 12, 36, 36).toFloat();
-    g.setColour (cm::cyan.withAlpha (0.075f));
-    g.fillEllipse (brand.expanded (1.0f));
+    auto brand = juce::Rectangle<int> (18, 15, 32, 32).toFloat();
     g.setColour (cm::cyan.withAlpha (0.88f));
-    g.drawEllipse (brand.reduced (3.0f), 1.25f);
-    g.setColour (cm::violet.withAlpha (0.84f));
-    g.drawEllipse (brand.reduced (9.5f), 1.15f);
-    g.setColour (cm::text);
-    g.fillEllipse (brand.getCentreX() - 2.5f, brand.getCentreY() - 2.5f, 5.0f, 5.0f);
+    g.drawEllipse (brand, 1.8f);
+    g.setColour (cm::violet);
+    g.fillEllipse (brand.getCentreX() - 4.0f, brand.getCentreY() - 4.0f, 8.0f, 8.0f);
     g.setColour (cm::cyan);
-    g.fillEllipse (brand.getRight() - 7.0f, brand.getY() + 7.0f, 3.5f, 3.5f);
+    g.fillEllipse (brand.getRight() - 5.0f, brand.getY() + 3.0f, 4.0f, 4.0f);
 
     g.setColour (cm::text);
-    g.setFont (juce::Font (juce::FontOptions (20.0f).withStyle ("bold")));
-    g.drawText ("COSMIC MICROWAVE", 66, 9, 260, 25, juce::Justification::centredLeft, false);
+    g.setFont (juce::Font (juce::FontOptions (15.0f).withStyle ("bold")));
+    g.drawText ("COSMIC MICROWAVE", 62, 11, 214, 22,
+                juce::Justification::centredLeft, false);
     g.setColour (cm::textDim);
-    g.setFont (juce::Font (juce::FontOptions (9.5f).withStyle ("bold")));
-    g.drawText ("OSC / MIDI ROUTING", 67, 35, 218, 14,
+    g.setFont (juce::Font (juce::FontOptions (9.0f).withStyle ("bold")));
+    g.drawText ("OSC / MIDI ROUTING", 62, 34, 214, 14,
                 juce::Justification::centredLeft, false);
 
-    g.setColour (cm::lineSoft.withAlpha (0.92f));
-    g.fillRect (juce::Rectangle<int> (14, 61, getWidth() - 28, 1));
-
-    auto badge = juce::Rectangle<float> (303.0f, 20.0f, 67.0f, 20.0f);
-    g.setColour (cm::green.withAlpha (0.07f));
+    auto badge = juce::Rectangle<float> (282.0f, 14.0f, 78.0f, 20.0f);
+    g.setColour (juce::Colour (0xff0c1713));
     g.fillRoundedRectangle (badge, 10.0f);
+    g.setColour (juce::Colour (0xff1f4438));
+    g.drawRoundedRectangle (badge.reduced (0.5f), 10.0f, 0.8f);
     g.setColour (cm::green);
     g.fillEllipse (badge.getX() + 9.0f, badge.getCentreY() - 2.0f, 4.0f, 4.0f);
     g.setFont (juce::Font (juce::FontOptions (8.5f).withStyle ("bold")));
-    g.drawText ("MIDI ONLY", badge.toNearestInt().withTrimmedLeft (9),
+    g.drawText ("MIDI ONLY", badge.toNearestInt().withTrimmedLeft (10),
                 juce::Justification::centred, false);
 
     const std::array<juce::Label*, 4> metricValues {{ &activeSourcesValue, &activeFingersValue,
-                                                      &notesSentValue, &mpeVoicesValue }};
+                                                      &notesSentValue, &activeNotesValue }};
     const std::array<juce::Label*, 4> metricCaptions {{ &activeSourcesCaption, &activeFingersCaption,
-                                                        &notesSentCaption, &mpeVoicesCaption }};
+                                                        &notesSentCaption, &activeNotesCaption }};
     for (size_t index = 0; index < metricValues.size(); ++index)
     {
         const auto metricBounds = metricValues[index]->getBounds()
                                       .getUnion (metricCaptions[index]->getBounds()).toFloat();
-        g.setColour (cm::cardRaised.withAlpha (0.58f));
+        g.setColour (cm::card);
         g.fillRoundedRectangle (metricBounds, 7.0f);
-        g.setColour (cm::lineSoft.withAlpha (0.92f));
+        g.setColour (cm::lineSoft);
         g.drawRoundedRectangle (metricBounds.reduced (0.5f), 7.0f, 0.8f);
 
-        const auto accent = cm::cyan.interpolatedWith (cm::violet,
-                                                        (float) index / 3.0f);
+        const std::array<juce::Colour, 4> accents {{ juce::Colour (0xff3a4a5c),
+                                                     juce::Colour (0xff3a4a5c),
+                                                     juce::Colour (0xff2e6f86),
+                                                     juce::Colour (0xff564e86) }};
+        const auto accent = accents[index];
         g.setColour (accent.withAlpha (0.72f));
         g.fillRoundedRectangle (metricBounds.withHeight (1.4f).reduced (8.0f, 0.0f), 0.7f);
     }
@@ -1197,18 +1792,20 @@ void AudienceEditor::paint (juce::Graphics& g)
         cm::drawCard (g, preflightCardBounds, "VENUE PREFLIGHT", "LIVE CHECKLIST");
         cm::drawCard (g, conductorCardBounds, "GLOBAL CONDUCTOR", "PROCESS-LOCAL");
         cm::drawCard (g, routeConsoleCardBounds, "ROUTING SAFETY", "EXPLICIT PATH");
-        cm::drawCard (g, macrosCardBounds, "CROWD EXPRESSION", "MIDI CC MACROS");
+        cm::drawCard (g, macrosCardBounds, "SOURCE QUALITY", "READY GATE");
         cm::drawCard (g, chaosCardBounds, "CAPTURE / REPLAY CHAOS LAB", "EXTERNAL CLI");
     }
     else
     {
         cm::drawCard (g, oscCardBounds, "OSC INPUT", "ZONE / FINGER0");
         cm::drawCard (g, routingCardBounds, "SOURCE ROUTING", "ID-LOCKED");
-        cm::drawCard (g, simulatorCardBounds, "SIMULATOR", "LOCAL TEST");
-        cm::drawCard (g, pitchCardBounds, "PITCH MAPPING");
+        cm::drawCard (g, simulatorCardBounds, "SIMULATOR", {});
         cm::drawCard (g, timeCardBounds, "TIME FIELD");
-        cm::drawCard (g, midiCardBounds, "MIDI ROUTING", "NORMAL / MPE");
-        cm::drawCard (g, destinationCardBounds, "MIDI OUTPUT");
+        cm::drawCard (g, pitchCardBounds, "PITCH MAPPING",
+                      "U → NOTE  ·  V → VELOCITY  ·  NO MUSICAL CC");
+        const int midiType = cm::choiceValue (proc.apvts, "midiOutputType");
+        const auto midiTag = midiType == 0 ? "OFF" : "NOTES ONLY";
+        cm::drawCard (g, midiCardBounds, "MIDI", midiTag);
     }
 
     if (! showConsolePage && ! timeStatusLabel.getBounds().isEmpty()
@@ -1227,31 +1824,40 @@ void AudienceEditor::paint (juce::Graphics& g)
 void AudienceEditor::resized()
 {
     auto area = getLocalBounds();
-    auto headerArea = area.removeFromTop (92);
-    versionLabel.setBounds (303, 42, 67, 12);
+    auto headerArea = area.removeFromTop (62);
+    versionLabel.setBounds (282, 36, 78, 14);
 
-    auto metricBand = headerArea.removeFromTop (62);
-    auto metrics = metricBand.reduced (14, 12).removeFromRight (juce::jmin (500, getWidth() - 395));
+    auto metrics = headerArea.reduced (14, 8)
+                            .removeFromRight (juce::jlimit (344, 500,
+                                                           (int) std::round ((double) getWidth() * 0.36)));
     constexpr int metricGap = 7;
     const int metricWidth = (metrics.getWidth() - metricGap * 3) / 4;
     const std::array<juce::Label*, 4> metricValues {{ &activeSourcesValue, &activeFingersValue,
-                                                      &notesSentValue, &mpeVoicesValue }};
+                                                      &notesSentValue, &activeNotesValue }};
     const std::array<juce::Label*, 4> metricCaptions {{ &activeSourcesCaption, &activeFingersCaption,
-                                                        &notesSentCaption, &mpeVoicesCaption }};
+                                                        &notesSentCaption, &activeNotesCaption }};
     for (size_t index = 0; index < metricValues.size(); ++index)
     {
         auto metric = metrics.removeFromLeft (metricWidth);
-        metricValues[index]->setBounds (metric.removeFromTop (26));
+        metricValues[index]->setBounds (metric.removeFromTop (25));
         metricCaptions[index]->setBounds (metric);
         metrics.removeFromLeft (metricGap);
     }
 
-    auto tabs = headerArea.reduced (14, 2);
-    performTabButton.setBounds (tabs.removeFromLeft (122));
-    tabs.removeFromLeft (7);
-    showConsoleTabButton.setBounds (tabs.removeFromLeft (154));
+    auto tabs = juce::Rectangle<int> (374, 16,
+                                      juce::jmax (190, headerArea.getWidth()
+                                                        - 374
+                                                        - juce::jlimit (344, 500,
+                                                            (int) std::round ((double) getWidth() * 0.36))
+                                                        - 22),
+                                      30);
+    const int tabGap = 6;
+    const int performWidth = juce::jmin (100, (tabs.getWidth() - tabGap) / 2);
+    performTabButton.setBounds (tabs.removeFromLeft (performWidth));
+    tabs.removeFromLeft (tabGap);
+    showConsoleTabButton.setBounds (tabs.removeFromLeft (juce::jmin (130, tabs.getWidth())));
 
-    area.reduce (14, 12);
+    area.reduce (12, 12);
 
     if (showConsolePage)
     {
@@ -1357,24 +1963,37 @@ void AudienceEditor::resized()
             exclusivePortButton.setBounds (inner.removeFromTop (27));
             inner.removeFromTop (5);
             routeConsoleStatusLabel.setBounds (inner.removeFromTop (juce::jmin (54, inner.getHeight())));
+            inner.removeFromTop (9);
+            factoryPresetLabel.setBounds (inner.removeFromTop (12));
+            inner.removeFromTop (3);
+            auto presetRow = inner.removeFromTop (30);
+            autoAssignRetryButton.setBounds (presetRow.removeFromRight (94));
+            presetRow.removeFromRight (5);
+            factoryPresetCombo.setBounds (presetRow);
+            inner.removeFromTop (4);
+            factoryPresetStatusLabel.setBounds (inner.removeFromTop (27));
         }
 
-        // Crowd Expression macros
+        // Runtime-only live-source census and Ready Gate. Legacy Crowd Macro
+        // controls remain hidden and inert so old sessions keep their exact
+        // parameter topology.
         {
             auto inner = macrosCardBounds.reduced (13);
             inner.removeFromTop (31);
-            crowdMacrosButton.setBounds (inner.removeFromTop (25));
-            inner.removeFromTop (2);
-            twoFields (inner.removeFromTop (39), macroChannelLabel, macroChannelCombo,
-                       macroRateLabel, macroRateCombo);
-            inner.removeFromTop (2);
-            twoFields (inner.removeFromTop (37), macroDensityCcLabel, macroDensityCcSlider,
-                       macroCentroidXCcLabel, macroCentroidXCcSlider);
-            inner.removeFromTop (2);
-            twoFields (inner.removeFromTop (37), macroCentroidYCcLabel, macroCentroidYCcSlider,
-                       macroMotionCcLabel, macroMotionCcSlider);
-            inner.removeFromTop (3);
-            macroStatusLabel.setBounds (inner.removeFromTop (juce::jmin (27, inner.getHeight())));
+            sourceQualityButton.setBounds (inner.removeFromTop (29));
+            inner.removeFromTop (5);
+            sourceQualityGateLabel.setBounds (inner.removeFromTop (28));
+            inner.removeFromTop (4);
+            sourceQualityCoverageLabel.setBounds (inner.removeFromTop (28));
+            inner.removeFromTop (4);
+            sourceQualityTimingLabel.setBounds (inner.removeFromTop (28));
+            inner.removeFromTop (4);
+            sourceQualityFaultLabel.setBounds (inner.removeFromTop (28));
+            inner.removeFromTop (5);
+            macroStatusLabel.setBounds (inner.removeFromTop (
+                juce::jmin (48, inner.getHeight())));
+            macroStatusLabel.setJustificationType (
+                juce::Justification::centredLeft);
         }
 
         // External Chaos Lab
@@ -1390,39 +2009,62 @@ void AudienceEditor::resized()
         return;
     }
 
-    const int topHeight = juce::jlimit (120, 142, (int) std::round ((double) area.getHeight() * 0.25));
-    auto top = area.removeFromTop (topHeight);
-    area.removeFromTop (8);
-
-    const int cardGap = 10;
-    const int oscWidth = (int) std::round ((double) (top.getWidth() - cardGap * 2) * 0.33);
-    const int routingWidth = (int) std::round ((double) (top.getWidth() - cardGap * 2) * 0.38);
-    oscCardBounds = top.removeFromLeft (oscWidth);
-    top.removeFromLeft (cardGap);
-    routingCardBounds = top.removeFromLeft (routingWidth);
-    top.removeFromLeft (cardGap);
-    simulatorCardBounds = top;
-
-    const int sidebarWidth = juce::jlimit (348, 430, (int) std::round ((double) area.getWidth() * 0.38));
-    auto sidebar = area.removeFromRight (sidebarWidth);
-    area.removeFromRight (11);
-    const int timeWidth = juce::jlimit (260, 304,
-                                        (int) std::round ((double) area.getWidth() * 0.44));
-    timeCardBounds = area.removeFromRight (timeWidth);
-    area.removeFromRight (9);
+    // Reference layout: setup cards on the left, a fluid 16x16 matrix in the
+    // centre, and all musical decisions stacked on the right. Widths remain
+    // proportional below the reference's 1280 px desktop target so existing
+    // host windows down to the supported 1000 px minimum remain usable.
+    constexpr int columnGap = 12;
+    const int leftColumnWidth = juce::jlimit (248, 304,
+                                              (int) std::round ((double) area.getWidth() * 0.225));
+    const int rightColumnWidth = juce::jlimit (310, 362,
+                                               (int) std::round ((double) area.getWidth() * 0.265));
+    auto leftColumn = area.removeFromLeft (leftColumnWidth);
+    area.removeFromLeft (columnGap);
+    auto rightColumn = area.removeFromRight (rightColumnWidth);
+    area.removeFromRight (columnGap);
     mapCardBounds = area;
     if (sourceMap != nullptr)
         sourceMap->setBounds (mapCardBounds);
 
-    const int pitchHeight = juce::jlimit (90, 126, (int) std::round ((double) sidebar.getHeight() * 0.26));
-    const int desiredDestinationHeight = juce::jlimit (114, 138, (int) std::round ((double) sidebar.getHeight() * 0.34));
-    const int destinationHeight = juce::jmin (desiredDestinationHeight,
-                                               sidebar.getHeight() - pitchHeight - 14 - 126);
-    pitchCardBounds = sidebar.removeFromTop (pitchHeight);
-    sidebar.removeFromTop (7);
-    destinationCardBounds = sidebar.removeFromBottom (destinationHeight);
-    sidebar.removeFromBottom (7);
-    midiCardBounds = sidebar;
+    const int leftUsable = leftColumn.getHeight() - columnGap * 2;
+    const int oscHeight = juce::jlimit (160, 230,
+        (int) std::round ((double) leftUsable * 0.28));
+    const int routingHeight = juce::jlimit (135, 170,
+        (int) std::round ((double) leftUsable * 0.20));
+    const int simulatorHeight = juce::jlimit (166, 180,
+        (int) std::round ((double) leftUsable * 0.22));
+    oscCardBounds = leftColumn.removeFromTop (juce::jmin (oscHeight, leftColumn.getHeight()));
+    leftColumn.removeFromTop (columnGap);
+    routingCardBounds = leftColumn.removeFromTop (juce::jmin (routingHeight, leftColumn.getHeight()));
+    leftColumn.removeFromTop (columnGap);
+    simulatorCardBounds = leftColumn.removeFromTop (
+        juce::jmin (simulatorHeight, leftColumn.getHeight()));
+
+    const int rightHeight = rightColumn.getHeight();
+    constexpr int minimumTimeHeight = 232;
+    constexpr int minimumPitchHeight = 138;
+    constexpr int minimumMidiHeight = 200;
+    int timeHeight = juce::jlimit (minimumTimeHeight, 320,
+        (int) std::round ((double) rightHeight * 0.38));
+    int pitchHeight = juce::jlimit (minimumPitchHeight, 226,
+        (int) std::round ((double) rightHeight * 0.27));
+
+    // Destination selection and Panic must remain usable at the supported
+    // 1000x650 minimum. Shrink the upper cards toward their compact layouts
+    // before taking any height from the MIDI card.
+    const int upperBudget = juce::jmax (0, rightHeight - columnGap * 2 - minimumMidiHeight);
+    int excess = juce::jmax (0, timeHeight + pitchHeight - upperBudget);
+    const int pitchReduction = juce::jmin (excess, pitchHeight - minimumPitchHeight);
+    pitchHeight -= pitchReduction;
+    excess -= pitchReduction;
+    timeHeight -= juce::jmin (excess, timeHeight - minimumTimeHeight);
+    timeCardBounds = rightColumn.removeFromTop (timeHeight);
+    rightColumn.removeFromTop (columnGap);
+    pitchCardBounds = rightColumn.removeFromTop (
+        juce::jmin (pitchHeight, juce::jmax (0, rightColumn.getHeight() - 170)));
+    rightColumn.removeFromTop (columnGap);
+    midiCardBounds = rightColumn;
+    destinationCardBounds = midiCardBounds;
 
     // OSC input card
     {
@@ -1450,44 +2092,49 @@ void AudienceEditor::resized()
 
     // Simulator card
     {
+        simProfileCombo.setBounds (simulatorCardBounds.getRight() - 98,
+                                   simulatorCardBounds.getY() + 6, 86, 23);
         auto inner = simulatorCardBounds.reduced (14);
-        inner.removeFromTop (34);
-        auto row = inner.removeFromTop (28);
-        const std::array<int, 4> weights {{ 82, 54, 72, 54 }};
-        const int totalWeight = 262;
-        const int available = row.getWidth() - 18;
-        std::array<juce::Button*, 4> buttons {{ &simAddButton, &simCrowdButton, &simRemoveButton, &simClearButton }};
-        for (size_t index = 0; index < buttons.size(); ++index)
-        {
-            const int width = index + 1 == buttons.size()
-                                  ? row.getWidth()
-                                  : juce::jmax (42, available * weights[index] / totalWeight);
-            buttons[index]->setBounds (row.removeFromLeft (width));
-            if (index + 1 != buttons.size())
-                row.removeFromLeft (6);
-        }
+        inner.removeFromTop (35);
+        simStatusLabel.setBounds (inner.removeFromTop (16));
+        inner.removeFromTop (4);
+        constexpr int buttonGap = 7;
+        const int rowHeight = juce::jlimit (22, 27, (inner.getHeight() - 34) / 2);
+        auto topRow = inner.removeFromTop (rowHeight);
+        const int half = (topRow.getWidth() - buttonGap) / 2;
+        simAddButton.setBounds (topRow.removeFromLeft (half));
+        topRow.removeFromLeft (buttonGap);
+        simCrowdButton.setBounds (topRow);
+        inner.removeFromTop (buttonGap);
+        auto bottomRow = inner.removeFromTop (rowHeight);
+        simRemoveButton.setBounds (bottomRow.removeFromLeft (half));
+        bottomRow.removeFromLeft (buttonGap);
+        simClearButton.setBounds (bottomRow);
         inner.removeFromTop (5);
-        simMoveButton.setBounds (inner.removeFromTop (25));
+        simMoveButton.setBounds (inner.removeFromTop (21));
     }
 
-    // Time Field: a dedicated two-column scheduling surface. Keeping it beside
-    // the source matrix gives all eight parameters full-height controls even at
-    // the 900x560 minimum editor size.
+    // Time Field: the reference's segmented mode and clock controls remain
+    // proxies for the original APVTS-attached ComboBoxes.
     {
         governorModeButton.setBounds (timeCardBounds.getRight() - 109,
                                       timeCardBounds.getY() + 6, 96, 24);
         auto inner = timeCardBounds.reduced (13);
-        inner.removeFromTop (27);
-        timeStatusLabel.setBounds (inner.removeFromTop (21));
-        timeTelemetryLabel.setBounds (inner.removeFromTop (17));
-        inner.removeFromTop (3);
+        inner.removeFromTop (25);
+        timeStatusLabel.setBounds (inner.removeFromTop (18));
+        const bool compactTimeLayout = timeCardBounds.getHeight() < 220;
+        if (compactTimeLayout)
+            timeTelemetryLabel.setBounds ({});
+        else
+            timeTelemetryLabel.setBounds (inner.removeFromTop (15));
+        inner.removeFromTop (2);
 
         auto layoutPair = [] (juce::Rectangle<int> row,
                               juce::Label& leftLabel, juce::Component& leftControl,
                               juce::Label& rightLabel, juce::Component& rightControl)
         {
             constexpr int gap = 7;
-            auto labels = row.removeFromTop (12);
+            auto labels = row.removeFromTop (11);
             auto controls = row;
             const int leftWidth = (labels.getWidth() - gap) / 2;
             leftLabel.setBounds (labels.removeFromLeft (leftWidth));
@@ -1498,16 +2145,18 @@ void AudienceEditor::resized()
             rightControl.setBounds (controls);
         };
 
-        const int rowGap = 3;
-        const int rowHeight = juce::jlimit (39, 47,
-                                            juce::jmax (1, (inner.getHeight() - rowGap * 3) / 4));
-        const int controlsHeight = rowHeight * 4 + rowGap * 3;
+        constexpr int rowGap = 3;
+        const int rowHeight = juce::jmax (27, (inner.getHeight() - rowGap * 4) / 5);
+        const int controlsHeight = rowHeight * 5 + rowGap * 4;
         inner.removeFromTop (juce::jmax (0, (inner.getHeight() - controlsHeight) / 2));
-        layoutPair (inner.removeFromTop (rowHeight),
-                    timeModeLabel, timeModeCombo, clockSourceLabel, clockSourceCombo);
+        timeModeLabel.setBounds ({});
+        timeModeCombo.setBounds ({});
+        if (timeModeSegments != nullptr)
+            timeModeSegments->setBounds (inner.removeFromTop (rowHeight));
+        else
+            inner.removeFromTop (rowHeight);
         inner.removeFromTop (rowGap);
 
-        auto clockRow = inner.removeFromTop (rowHeight);
         const int selectedMode = timeModeCombo.getSelectedItemIndex();
         const bool timedMode = selectedMode >= 0
                                  ? selectedMode != 0
@@ -1516,21 +2165,38 @@ void AudienceEditor::resized()
         const bool internalClock = selectedClock >= 0
                                      ? selectedClock == 1
                                      : cm::choiceValue (proc.apvts, "clockSource") == 1;
+        auto clockRow = inner.removeFromTop (rowHeight);
+        if (clockSourceSegments != nullptr)
+            layoutPair (clockRow, clockSourceLabel, *clockSourceSegments,
+                        gridDivisionLabel, gridDivisionCombo);
+        inner.removeFromTop (rowGap);
+
+        auto durationRow = inner.removeFromTop (rowHeight);
         if (timedMode && internalClock)
         {
-            layoutPair (clockRow, internalBpmLabel, internalBpmSlider,
-                        gridDivisionLabel, gridDivisionCombo);
+            constexpr int gap = 5;
+            auto labels = durationRow.removeFromTop (11);
+            const int columnWidth = (labels.getWidth() - gap * 2) / 3;
+            noteDurationLabel.setBounds (labels.removeFromLeft (columnWidth));
+            labels.removeFromLeft (gap);
+            internalBpmLabel.setBounds (labels.removeFromLeft (columnWidth));
+            labels.removeFromLeft (gap);
+            ensembleSameNoteLabel.setBounds (labels);
+
+            noteDurationCombo.setBounds (durationRow.removeFromLeft (columnWidth));
+            durationRow.removeFromLeft (gap);
+            internalBpmSlider.setBounds (durationRow.removeFromLeft (columnWidth));
+            durationRow.removeFromLeft (gap);
+            ensembleSameNoteCombo.setBounds (durationRow);
         }
         else
         {
-            auto label = clockRow.removeFromTop (12);
-            gridDivisionLabel.setBounds (label);
-            gridDivisionCombo.setBounds (clockRow);
             internalBpmLabel.setBounds ({});
             internalBpmSlider.setBounds ({});
+            layoutPair (durationRow, noteDurationLabel, noteDurationCombo,
+                        ensembleSameNoteLabel, ensembleSameNoteCombo);
         }
         inner.removeFromTop (rowGap);
-
         layoutPair (inner.removeFromTop (rowHeight),
                     maxAttacksLabel, maxAttacksSlider,
                     maxActiveVoicesLabel, maxActiveVoicesSlider);
@@ -1547,136 +2213,155 @@ void AudienceEditor::resized()
         governorSpreadValue.setBounds (temporalSpreadCombo.getBounds());
     }
 
-    // Pitch mapping card: the system selector lives in the card header; the
-    // content row adapts between four tonal fields and five Atomic fields.
+    // Pitch mapping: a real catalog/scale preview, then compact semantic fields.
     {
-        pitchSystemCombo.setBounds (pitchCardBounds.getRight() - 112,
-                                    pitchCardBounds.getY() + 6, 99, 24);
+        pitchSystemCombo.setBounds ({});
         auto inner = pitchCardBounds.reduced (13);
-        inner.removeFromTop (27);
-        auto labelRow = inner.removeFromTop (13);
-        auto controlRow = inner.removeFromTop (juce::jmin (28, inner.getHeight()));
-        const int gap = 6;
+        inner.removeFromTop (25);
+        if (pitchSystemSegments != nullptr)
+            pitchSystemSegments->setBounds (inner.removeFromTop (24));
+        inner.removeFromTop (3);
+
+        const bool showSpectrum = inner.getHeight() >= 108;
+        if (pitchSpectrumDisplay != nullptr)
+        {
+            pitchSpectrumDisplay->setBounds (showSpectrum ? inner.removeFromTop (
+                juce::jlimit (46, 66, inner.getHeight() - 62)) : juce::Rectangle<int>());
+        }
+        if (showSpectrum)
+            inner.removeFromTop (3);
+
+        auto layoutPair = [] (juce::Rectangle<int> row,
+                              juce::Label& leftLabel, juce::Component& leftControl,
+                              juce::Label& rightLabel, juce::Component& rightControl,
+                              double leftRatio = 0.5)
+        {
+            constexpr int gap = 6;
+            auto labels = row.removeFromTop (10);
+            const int leftWidth = juce::jlimit (36, labels.getWidth() - gap - 36,
+                (int) std::round ((double) (labels.getWidth() - gap) * leftRatio));
+            leftLabel.setBounds (labels.removeFromLeft (leftWidth));
+            labels.removeFromLeft (gap);
+            rightLabel.setBounds (labels);
+            leftControl.setBounds (row.removeFromLeft (leftWidth));
+            row.removeFromLeft (gap);
+            rightControl.setBounds (row);
+        };
+
+        auto layoutThree = [] (juce::Rectangle<int> row,
+                               std::array<juce::Label*, 3> labels,
+                               std::array<juce::Component*, 3> controls)
+        {
+            constexpr int gap = 6;
+            auto labelArea = row.removeFromTop (10);
+            const int width = (labelArea.getWidth() - gap * 2) / 3;
+            for (size_t index = 0; index < controls.size(); ++index)
+            {
+                const int fieldWidth = index + 1 == controls.size()
+                    ? labelArea.getWidth() : width;
+                labels[index]->setBounds (labelArea.removeFromLeft (fieldWidth));
+                controls[index]->setBounds (row.removeFromLeft (fieldWidth));
+                if (index + 1 != controls.size())
+                {
+                    labelArea.removeFromLeft (gap);
+                    row.removeFromLeft (gap);
+                }
+            }
+        };
+
+        const int fieldGap = 3;
+        const int fieldHeight = juce::jmax (25, (inner.getHeight() - fieldGap) / 2);
         const bool atomic = cm::choiceValue (proc.apvts, "pitchSystem") == 1;
         if (atomic)
         {
-            const int rootWidth = 44;
-            const int octaveWidth = 48;
-            const int rangeWidth = 56;
-            const int flexible = juce::jmax (96, labelRow.getWidth()
-                                                  - rootWidth - octaveWidth - rangeWidth - gap * 4);
-            const int elementWidth = (int) std::round ((double) flexible * 0.55);
-            const std::array<int, 5> widths {{ rootWidth, octaveWidth, elementWidth,
-                                               flexible - elementWidth, rangeWidth }};
-            std::array<juce::Label*, 5> labels {{ &rootLabel, &rootOctaveLabel,
-                                                  &atomicElementLabel, &atomicModeLabel,
-                                                  &octavesLabel }};
-            std::array<juce::Component*, 5> controls {{ &rootCombo, &rootOctaveCombo,
-                                                         &atomicElementCombo, &atomicModeCombo,
-                                                         &octavesSlider }};
-            for (size_t index = 0; index < controls.size(); ++index)
-            {
-                const int width = index + 1 == controls.size() ? labelRow.getWidth() : widths[index];
-                labels[index]->setBounds (labelRow.removeFromLeft (width));
-                controls[index]->setBounds (controlRow.removeFromLeft (width));
-                if (index + 1 != controls.size())
-                {
-                    labelRow.removeFromLeft (gap);
-                    controlRow.removeFromLeft (gap);
-                }
-            }
+            layoutPair (inner.removeFromTop (fieldHeight),
+                        atomicElementLabel, atomicElementCombo,
+                        atomicModeLabel, atomicModeCombo, 0.58);
+            inner.removeFromTop (fieldGap);
+            layoutThree (inner.removeFromTop (fieldHeight),
+                         {{ &rootLabel, &rootOctaveLabel, &octavesLabel }},
+                         {{ &rootCombo, &rootOctaveCombo, &octavesSlider }});
         }
         else
         {
-            const int fieldWidth = (inner.getWidth() - gap * 3) / 4;
-            std::array<juce::Label*, 4> labels {{ &rootLabel, &rootOctaveLabel,
-                                                  &scaleLabel, &octavesLabel }};
-            std::array<juce::Component*, 4> controls {{ &rootCombo, &rootOctaveCombo,
-                                                         &scaleCombo, &octavesSlider }};
-            for (size_t index = 0; index < controls.size(); ++index)
-            {
-                const int width = index + 1 == controls.size() ? labelRow.getWidth() : fieldWidth;
-                labels[index]->setBounds (labelRow.removeFromLeft (width));
-                controls[index]->setBounds (controlRow.removeFromLeft (width));
-                if (index + 1 != controls.size())
-                {
-                    labelRow.removeFromLeft (gap);
-                    controlRow.removeFromLeft (gap);
-                }
-            }
+            scaleLabel.setBounds (inner.removeFromTop (10));
+            scaleCombo.setBounds (inner.removeFromTop (juce::jmax (15, fieldHeight - 10)));
+            inner.removeFromTop (fieldGap);
+            layoutThree (inner.removeFromTop (fieldHeight),
+                         {{ &rootLabel, &rootOctaveLabel, &octavesLabel }},
+                         {{ &rootCombo, &rootOctaveCombo, &octavesSlider }});
         }
     }
 
-    // MIDI routing card: protocol on row one, mode-specific controls on row two.
+    // MIDI protocol, routing, destination and panic share one coherent card.
     {
         auto inner = midiCardBounds.reduced (13);
-        inner.removeFromTop (26);
-        const int availableHeight = inner.getHeight();
-        const int controlHeight = juce::jlimit (24, 30, (availableHeight - 26) / 2);
+        inner.removeFromTop (25);
+        panicButton.setBounds (inner.removeFromBottom (juce::jlimit (27, 34,
+            (int) std::round ((double) midiCardBounds.getHeight() * 0.12))));
+        inner.removeFromBottom (5);
 
-        auto firstLabels = inner.removeFromTop (12);
-        auto firstControls = inner.removeFromTop (controlHeight);
-        midiTypeLabel.setBounds (firstLabels.removeFromLeft (juce::jmin (160, firstLabels.getWidth() / 2)));
-        midiTypeCombo.setBounds (firstControls.removeFromLeft (juce::jmin (160, firstControls.getWidth() / 2)));
-        mpeSetupButton.setBounds (firstControls.reduced (8, 0));
+        const bool showDetail = inner.getHeight() >= 155;
+        destinationDetailLabel.setVisible (showDetail);
+        if (showDetail)
+        {
+            destinationDetailLabel.setBounds (inner.removeFromBottom (16));
+            inner.removeFromBottom (2);
+        }
+        else
+        {
+            destinationDetailLabel.setBounds ({});
+        }
+        destinationStatusLabel.setBounds (inner.removeFromBottom (17));
+        inner.removeFromBottom (3);
 
-        inner.removeFromTop (2);
-        auto secondLabels = inner.removeFromTop (12);
-        auto secondControls = inner.removeFromTop (controlHeight);
+        constexpr int rowGap = 3;
+        const int rowHeight = juce::jmax (21, (inner.getHeight() - rowGap * 3) / 4);
+        auto outputRow = inner.removeFromTop (rowHeight);
+        inner.removeFromTop (rowGap);
+        auto capacityRow = inner.removeFromTop (rowHeight);
+        inner.removeFromTop (rowGap);
+        auto routingRow = inner.removeFromTop (rowHeight);
+        inner.removeFromTop (rowGap);
+        auto destinationRow = inner.removeFromTop (rowHeight);
+
+        auto splitLabelControl = [] (juce::Rectangle<int> row, juce::Label& label,
+                                     juce::Component& control)
+        {
+            const int labelHeight = juce::jmin (10, juce::jmax (7, row.getHeight() / 3));
+            label.setBounds (row.removeFromTop (labelHeight));
+            control.setBounds (row);
+        };
+
         const int mode = cm::choiceValue (proc.apvts, "midiOutputType");
+        splitLabelControl (outputRow, midiTypeLabel, midiTypeCombo);
+        splitLabelControl (capacityRow, sourceCapacityLabel, sourceCapacityCombo);
 
         if (mode == 1)
         {
             const bool fixed = cm::choiceValue (proc.apvts, "normalMidiRoutingMode") == 0;
-            const int leftWidth = fixed ? (int) std::round ((double) secondControls.getWidth() * 0.62)
-                                        : secondControls.getWidth();
-            normalRoutingLabel.setBounds (secondLabels.removeFromLeft (leftWidth));
-            normalRoutingCombo.setBounds (secondControls.removeFromLeft (leftWidth));
+            auto labels = routingRow.removeFromTop (juce::jmin (10, routingRow.getHeight() / 3));
+            auto controls = routingRow;
+            const int leftWidth = fixed
+                ? (int) std::round ((double) (controls.getWidth() - 7) * 0.62)
+                : controls.getWidth();
+            normalRoutingLabel.setBounds (labels.removeFromLeft (leftWidth));
+            normalRoutingCombo.setBounds (controls.removeFromLeft (leftWidth));
             if (fixed)
             {
-                secondLabels.removeFromLeft (7);
-                secondControls.removeFromLeft (7);
-                normalChannelLabel.setBounds (secondLabels);
-                normalChannelCombo.setBounds (secondControls);
+                labels.removeFromLeft (7);
+                controls.removeFromLeft (7);
+                normalChannelLabel.setBounds (labels);
+                normalChannelCombo.setBounds (controls);
             }
         }
-        else if (mode == 2)
-        {
-            const int gap = 6;
-            const int width = (secondControls.getWidth() - gap * 2) / 3;
-            std::array<juce::Label*, 3> labels {{ &mpeZoneLabel, &mpeBendRangeLabel, &mpePitchModeLabel }};
-            std::array<juce::Component*, 3> controls {{ &mpeZoneCombo, &mpeBendRangeCombo, &mpePitchModeCombo }};
-            for (size_t index = 0; index < controls.size(); ++index)
-            {
-                const int fieldWidth = index + 1 == controls.size() ? secondControls.getWidth() : width;
-                labels[index]->setBounds (secondLabels.removeFromLeft (fieldWidth));
-                controls[index]->setBounds (secondControls.removeFromLeft (fieldWidth));
-                if (index + 1 != controls.size())
-                {
-                    secondLabels.removeFromLeft (gap);
-                    secondControls.removeFromLeft (gap);
-                }
-            }
-        }
-    }
 
-    // MIDI destination card
-    {
-        auto inner = destinationCardBounds.reduced (13);
-        inner.removeFromTop (27);
-        destinationLabel.setBounds (inner.removeFromTop (13));
-        auto row = inner.removeFromTop (juce::jmin (28, inner.getHeight()));
-        panicButton.setBounds (row.removeFromRight (64));
-        row.removeFromRight (6);
-        rescanButton.setBounds (row.removeFromRight (62));
-        row.removeFromRight (6);
-        destinationCombo.setBounds (row);
-        inner.removeFromTop (2);
-        destinationStatusLabel.setBounds (inner.removeFromTop (juce::jmin (18, inner.getHeight())));
-        const bool showDetail = inner.getHeight() >= 14;
-        destinationDetailLabel.setVisible (showDetail);
-        destinationDetailLabel.setBounds (showDetail ? inner.removeFromTop (18)
-                                                     : juce::Rectangle<int>());
+        auto destinationLabels = destinationRow.removeFromTop (
+            juce::jmin (10, destinationRow.getHeight() / 3));
+        destinationLabel.setBounds (destinationLabels);
+        rescanButton.setBounds (destinationRow.removeFromRight (64));
+        destinationRow.removeFromRight (6);
+        destinationCombo.setBounds (destinationRow);
     }
 }
 
@@ -1721,7 +2406,7 @@ void AudienceEditor::restoreUdpPortEditor()
     portApplyButton.setEnabled (false);
     portEditor.setColour (juce::TextEditor::outlineColourId, cm::line);
     portEditor.setDescription ("UDP port for this Cosmic Microwave instance. Enter a number from 1 to 65535 and press Return or Apply.");
-    oscPathLabel.setText ("/cs/{zone}/{source}/finger0  |  /u  /v  /on  |  0-1",
+    oscPathLabel.setText ("/cs/{zone}/{source}/finger0  |  u/v/on  |  0-1  |  immediate",
                           juce::dontSendNotification);
     oscPathLabel.setColour (juce::Label::textColourId, cm::textDim);
     oscPathLabel.setTitle ("OSC address format");
@@ -1777,7 +2462,6 @@ void AudienceEditor::updateModeVisibility()
                                  : cm::choiceValue (proc.apvts, "clockSource") == 1;
     const bool adaptive = cm::choiceValue (proc.apvts, "crowdGovernorEnabled") != 0;
     const bool normal = midiType == 1;
-    const bool mpe = midiType == 2;
     const bool fixedChannel = normal
                            && cm::choiceValue (proc.apvts, "normalMidiRoutingMode") == 0;
     const int visibilityKey = (adaptive ? 100000 : 0)
@@ -1795,6 +2479,9 @@ void AudienceEditor::updateModeVisibility()
 
     internalBpmLabel.setVisible (timed && internalClock);
     internalBpmSlider.setVisible (timed && internalClock);
+    const bool ensemble = timeMode == 2;
+    ensembleSameNoteLabel.setEnabled (ensemble);
+    ensembleSameNoteCombo.setEnabled (ensemble);
 
     governorModeButton.setButtonText (adaptive ? "ADAPTIVE" : "MANUAL");
     governorModeButton.setColour (juce::TextButton::textColourOffId,
@@ -1832,13 +2519,35 @@ void AudienceEditor::updateModeVisibility()
     normalChannelLabel.setVisible (fixedChannel);
     normalChannelCombo.setVisible (fixedChannel);
 
-    mpeZoneLabel.setVisible (mpe);
-    mpeZoneCombo.setVisible (mpe);
-    mpeBendRangeLabel.setVisible (mpe);
-    mpeBendRangeCombo.setVisible (mpe);
-    mpePitchModeLabel.setVisible (mpe);
-    mpePitchModeCombo.setVisible (mpe);
-    mpeSetupButton.setVisible (mpe);
+    // ComboBoxes remain attached to APVTS but are intentionally presentation-
+    // hidden. Their segmented proxies mirror host automation and state recall.
+    pitchSystemCombo.setVisible (false);
+    timeModeCombo.setVisible (false);
+    clockSourceCombo.setVisible (false);
+    timeModeLabel.setVisible (false);
+    if (pitchSystemSegments != nullptr)
+    {
+        pitchSystemSegments->setVisible (true);
+        pitchSystemSegments->syncFromTarget();
+    }
+    if (timeModeSegments != nullptr)
+    {
+        timeModeSegments->setVisible (true);
+        timeModeSegments->setEnabled (true);
+        timeModeSegments->syncFromTarget();
+    }
+    if (clockSourceSegments != nullptr)
+    {
+        clockSourceSegments->setVisible (true);
+        clockSourceSegments->setEnabled (timed);
+        clockSourceSegments->syncFromTarget();
+    }
+    clockSourceLabel.setEnabled (timed);
+    if (pitchSpectrumDisplay != nullptr)
+    {
+        pitchSpectrumDisplay->setVisible (true);
+        pitchSpectrumDisplay->repaint();
+    }
 
     if (lastVisibilityKey != visibilityKey)
     {
@@ -1853,16 +2562,16 @@ void AudienceEditor::updateLiveText()
     const int activeSources = proc.audienceModel.getActiveSourceCount();
     const int activeFingers = proc.audienceModel.getActiveFingerCount();
     const int notesSent = proc.getMidiNotesSent();
-    const int mpeVoices = proc.getActiveMpeVoices();
+    const int activeNotes = proc.getScheduledMidiNoteCount();
 
     activeSourcesValue.setText (juce::String (activeSources), juce::dontSendNotification);
     activeFingersValue.setText (juce::String (activeFingers), juce::dontSendNotification);
     notesSentValue.setText (cm::compactCount (notesSent), juce::dontSendNotification);
-    mpeVoicesValue.setText (juce::String (mpeVoices), juce::dontSendNotification);
-    activeSourcesValue.setDescription (juce::String (activeSources) + " active OSC sources.");
+    activeNotesValue.setText (juce::String (activeNotes), juce::dontSendNotification);
+    activeSourcesValue.setDescription (juce::String (activeSources) + " active OSC or simulator sources.");
     activeFingersValue.setDescription (juce::String (activeFingers) + " active finger0 touches.");
     notesSentValue.setDescription (juce::String (notesSent) + " MIDI note attacks sent.");
-    mpeVoicesValue.setDescription (juce::String (mpeVoices) + " active MPE voices.");
+    activeNotesValue.setDescription (juce::String (activeNotes) + " active scheduled MIDI notes.");
 
     if (cm::choiceValue (proc.apvts, "pitchSystem") == 1)
     {
@@ -1874,7 +2583,7 @@ void AudienceEditor::updateLiveText()
                           + proc.getAtomicModeName (mode) + " · "
                           + juce::String (proc.getSelectedAtomicDegreeCount()) + " degrees · "
                           + juce::String (referenceNm, 3) + " nm reference. "
-                            "MPE uses exact frequency; Normal MIDI uses the nearest note.";
+                            "Notes Only sends the nearest MIDI note.";
         pitchSystemCombo.setTooltip (detail);
         pitchSystemCombo.setDescription (detail);
     }
@@ -1885,6 +2594,8 @@ void AudienceEditor::updateLiveText()
     }
 
     static constexpr const char* divisions[] { "1/4", "1/8", "1/16", "1/32" };
+    static constexpr const char* durations[] { "2n", "4n", "8n", "16n", "32n" };
+    static constexpr double durationQuarterNotes[] { 2.0, 1.0, 0.5, 0.25, 0.125 };
     const int selectedTimeClock = clockSourceCombo.getSelectedItemIndex();
     const bool hostClock = selectedTimeClock >= 0
                              ? selectedTimeClock == 0
@@ -1898,6 +2609,11 @@ void AudienceEditor::updateLiveText()
     const int liveTimeMode = selectedMode >= 0
                                ? selectedMode
                                : cm::choiceValue (proc.apvts, "timeMode");
+    const auto effectivePolicy = proc.getEffectiveTimeFieldPolicy();
+    const bool schedulerTimed = effectivePolicy.mode
+                              != CrowdTimeField::Mode::Flow;
+    const bool schedulerEnsemble = effectivePolicy.mode
+                                 == CrowdTimeField::Mode::Ensemble;
     const bool governorAdaptive = cm::choiceValue (proc.apvts, "crowdGovernorEnabled") != 0;
     const int observedCrowd = juce::jmax (0, proc.getGovernorObservedDensity());
     const int effectiveAttacks = juce::jmax (1, proc.getGovernorEffectiveAttacksPerStep());
@@ -1907,21 +2623,42 @@ void AudienceEditor::updateLiveText()
     const auto spreadStepWord = effectiveSpread == 1 ? " grid step" : " grid steps";
     const bool clockLocked = proc.getTimeFieldClockLocked();
     const int pending = proc.getTimeFieldPending();
-    const int scheduledActive = proc.getTimeFieldActive();
+    const int timeFieldActive = proc.getTimeFieldActive();
     const auto merged = proc.getTimeFieldMerged();
     const auto bpm = juce::String (proc.getTimeFieldBpm(), 0);
     const auto grid = juce::String (divisions[divisionIndex]);
+    const int durationIndex = juce::jlimit (
+        0, 4, cm::choiceValue (proc.apvts, "noteDuration"));
+    const auto durationText = juce::String (durations[durationIndex]);
+    const bool ensembleRetrigger = cm::choiceValue (
+        proc.apvts, "ensembleSameNoteMode") == 1;
+    const auto sameNoteText = juce::String (
+        ensembleRetrigger ? "RETRIGGER" : "TIE");
+    const double durationMs = 60000.0 * durationQuarterNotes[durationIndex]
+                            / juce::jmax (1.0, proc.getNoteDurationBpm());
+    const auto durationDescription = durationText + " produces approximately "
+        + juce::String (durationMs, 1)
+        + " ms notes at the current tempo. Attack start times are unchanged.";
+    noteDurationCombo.setDescription (durationDescription);
+    noteDurationCombo.setTooltip (durationDescription);
+    const auto sameNoteDescription = ensembleRetrigger
+        ? "Ensemble Retrigger sends a safe Note Off then Note On when the same pitch is admitted again, so every pulse has a new attack. Flow and Grid still use Tie."
+        : "Ensemble Tie extends an identical sounding note instead of starting another attack. This preserves the historical behaviour. Flow and Grid also use Tie.";
+    ensembleSameNoteCombo.setDescription (sameNoteDescription);
+    ensembleSameNoteCombo.setTooltip (sameNoteDescription);
 
     juce::String primaryTimeStatus;
     juce::String clockDescription;
     if (liveTimeMode == 0)
     {
-        primaryTimeStatus = "FLOW  /  DIRECT";
-        clockDescription = "Flow mode sends touch attacks directly. Timing controls are bypassed.";
+        primaryTimeStatus = "FLOW  /  DIRECT  /  " + durationText + " NOTE";
+        clockDescription = "Flow sends attacks directly; only the fixed "
+                         + durationText + " note lifetime follows tempo.";
     }
     else if (hostClock && clockLocked)
     {
-        primaryTimeStatus = "HOST LOCK  /  " + bpm + " BPM  /  " + grid;
+        primaryTimeStatus = "HOST LOCK  /  " + bpm + " BPM  /  " + grid
+                          + "  /  " + durationText;
         clockDescription = "Time Field is locked to the running host transport at "
                          + bpm + " BPM on the " + grid + " grid.";
     }
@@ -1929,15 +2666,24 @@ void AudienceEditor::updateLiveText()
     {
         // Host transport may be stopped or absent in Standalone. Scheduling is
         // still active: every instance shares the monotonic-seconds fallback.
-        primaryTimeStatus = "FREE CLOCK  /  " + bpm + " BPM  /  " + grid;
+        primaryTimeStatus = "FREE CLOCK  /  " + bpm + " BPM  /  " + grid
+                          + "  /  " + durationText;
         clockDescription = "Host transport is stopped or unavailable. Time Field remains active on the shared monotonic clock at "
                          + bpm + " BPM on the " + grid + " grid.";
     }
     else
     {
-        primaryTimeStatus = "INTERNAL  /  " + bpm + " BPM  /  " + grid;
+        primaryTimeStatus = "INTERNAL  /  " + bpm + " BPM  /  " + grid
+                          + "  /  " + durationText;
         clockDescription = "Time Field is running from its internal clock at "
                          + bpm + " BPM on the " + grid + " grid.";
+    }
+
+    if (liveTimeMode == 2)
+    {
+        primaryTimeStatus += "  /  " + sameNoteText;
+        clockDescription += " Same-pitch Ensemble pulses use "
+                          + sameNoteText.toLowerCase() + " articulation.";
     }
 
     timeStatusLabel.setText (primaryTimeStatus, juce::dontSendNotification);
@@ -1960,7 +2706,8 @@ void AudienceEditor::updateLiveText()
     governorActiveVoicesValue.setDescription (
         "Adaptive Crowd Governor currently allows " + juce::String (effectiveActiveLimit)
         + " simultaneous scheduled voices for an observed crowd density of "
-        + juce::String (observedCrowd) + observedSourceWord + ".");
+        + juce::String (observedCrowd) + observedSourceWord
+        + ". If the limit falls below voices that are already sounding, those voices release naturally and new attacks wait.");
     governorSpreadValue.setDescription (
         "Adaptive Crowd Governor currently distributes attacks across "
         + juce::String (effectiveSpread) + spreadStepWord + " for "
@@ -1980,64 +2727,72 @@ void AudienceEditor::updateLiveText()
         mergeActivityUntilMs = nowMs + 1400.0;
     lastTimeFieldMerged = merged;
 
-    // Adaptive telemetry is authoritative only while the Governor is selected.
-    // Manual mode continues to reflect the saved/automated controls, including
-    // the fifteen-member MPE ceiling.
-    const int manualActiveLimit = cm::choiceValue (proc.apvts, "midiOutputType") == 2
-                                ? juce::jmin (15, juce::jmax (
-                                      1, (int) std::lround (maxActiveVoicesSlider.getValue())))
-                                : juce::jmax (
-                                      1, (int) std::lround (maxActiveVoicesSlider.getValue()));
-    const int activeLimit = governorAdaptive ? effectiveActiveLimit : manualActiveLimit;
-    const int attacksPerStep = governorAdaptive
-                                 ? effectiveAttacks
-                                 : juce::jmax (1, (int) std::lround (maxAttacksSlider.getValue()));
-    const int spreadSteps = governorAdaptive
-                              ? effectiveSpread
-                              : juce::jmax (1, temporalSpreadCombo.getText().getIntValue());
-    const int oneSpreadCapacity = attacksPerStep * spreadSteps;
-    const bool atActiveLimit = liveTimeMode != 0 && pending > 0
-                            && scheduledActive >= activeLimit;
-    const bool queuePressure = liveTimeMode != 0 && pending > oneSpreadCapacity;
-    const bool highLoad = atActiveLimit || queuePressure;
-    const bool mergeActivity = liveTimeMode != 0 && nowMs < mergeActivityUntilMs;
+    // The packed snapshot is the policy the audio scheduler actually received
+    // after Manual/Adaptive, Safety Governor and Global Conductor clamps. Do
+    // not infer load from the controls: those can be less restrictive than the
+    // final venue policy and would make a genuinely full queue look normal.
+    const int activeLimit = juce::jmax (0, effectivePolicy.activeLimit);
+    const int attacksPerStep = juce::jmax (0, effectivePolicy.attacksPerStep);
+    const int spreadSteps = juce::jmax (1, effectivePolicy.spreadSlots);
+    const int oneSchedulingWindowCapacity = attacksPerStep
+                                          * (schedulerEnsemble ? spreadSteps : 1);
+    const bool admissionBlocked = schedulerTimed && pending > 0
+                               && ! effectivePolicy.admissionOpen;
+    const bool atActiveLimit = schedulerTimed && pending > 0
+                            && activeLimit > 0
+                            && timeFieldActive >= activeLimit;
+    const bool queuePressure = schedulerTimed
+                            && pending > oneSchedulingWindowCapacity;
+    const bool highLoad = admissionBlocked || atActiveLimit || queuePressure;
+    const bool mergeActivity = schedulerTimed && nowMs < mergeActivityUntilMs;
     const auto queueState = "PENDING " + juce::String (pending)
-                          + "  /  ACTIVE " + juce::String (scheduledActive)
+                          + "  /  TF ACTIVE " + juce::String (timeFieldActive)
                           + "  /  MERGED " + juce::String (merged);
     auto loadDescription = liveTimeMode == 0
-                         ? "Direct signal path with " + juce::String (scheduledActive)
+                         ? "Direct signal path with " + juce::String (timeFieldActive)
                              + " active touches."
                          : queueState
-                             + ". Merged counts same-step attack collisions combined safely; it is not a dropped-note count."
-                             + (atActiveLimit
+                             + ". Merged counts pending work whose admission window elapsed. Held intent is renewed; released short taps may expire. It is not a packet-loss count."
+                             + (admissionBlocked
+                                  ? " Final venue policy is holding new attacks while releases and cancellations continue."
+                                  : atActiveLimit
                                   ? " The active-voice limit is currently full and attacks remain queued."
                                   : queuePressure
-                                      ? " High load: the pending queue exceeds one selected temporal-spread window."
+                                      ? " High load: the pending queue exceeds one effective scheduling window."
                                   : mergeActivity
-                                      ? " Crowd attacks were consolidated during the latest scheduling window."
+                                      ? " Pending work reached its admission lifetime during the latest scheduling window."
                                       : " Scheduler load is within the selected limits.");
     if (governorAdaptive)
         loadDescription += " Adaptive Crowd Governor sees an observed crowd density of "
                          + juce::String (observedCrowd)
-                         + observedSourceWord + " and currently applies "
+                         + observedSourceWord + " and proposes "
                          + juce::String (effectiveAttacks) + " attacks per step, "
                          + juce::String (effectiveActiveLimit) + " active voices and "
                          + juce::String (effectiveSpread) + spreadStepWord + "."
+                         + (timeFieldActive > activeLimit && schedulerTimed
+                              ? " Existing voices above the new soft limit release naturally; new attacks remain queued."
+                              : "")
                          + (liveTimeMode == 0 ? " These limits are bypassed in Flow mode." : "");
+    if (schedulerTimed)
+        loadDescription += " Final scheduler policy: "
+                         + juce::String (attacksPerStep) + " attacks, "
+                         + juce::String (activeLimit) + " active, "
+                         + juce::String (spreadSteps) + " spread, admission "
+                         + (effectivePolicy.admissionOpen ? "open." : "held.");
     timeTelemetryLabel.setText (liveTimeMode == 0
                                   ? governorAdaptive
-                                      ? "GOVERNOR BYPASS  /  CROWD " + juce::String (observedCrowd)
-                                          + "  /  ACTIVE " + juce::String (scheduledActive)
+                                          ? "GOVERNOR BYPASS  /  CROWD " + juce::String (observedCrowd)
+                                          + "  /  ACTIVE " + juce::String (timeFieldActive)
                                       : "ATTACKS PASS THROUGH  /  ACTIVE "
-                                          + juce::String (scheduledActive)
+                                          + juce::String (timeFieldActive)
                                   : governorAdaptive
                                       ? "ADAPT  /  CROWD " + juce::String (observedCrowd)
                                           + "  /  P" + juce::String (pending)
-                                          + "  A" + juce::String (scheduledActive)
+                                          + "  A" + juce::String (timeFieldActive)
                                           + "  M" + juce::String (merged)
                                   : highLoad
                                       ? "HIGH LOAD  /  P" + juce::String (pending)
-                                          + "  /  A" + juce::String (scheduledActive)
+                                          + "  /  A" + juce::String (timeFieldActive)
                                           + "  /  M" + juce::String (merged)
                                       : queueState,
                                 juce::dontSendNotification);
@@ -2058,7 +2813,9 @@ void AudienceEditor::updateLiveText()
     juce::Colour oscColour;
     if (! listening)
     {
-        oscDetail = proc.osc.oscStatus().isNotEmpty() ? proc.osc.oscStatus() : "OSC receiver stopped";
+        oscDetail = proc.oscStatus.isNotEmpty() ? proc.oscStatus
+                  : proc.osc.oscStatus().isNotEmpty() ? proc.osc.oscStatus()
+                                                     : "OSC receiver stopped";
         oscText = "ERR / " + oscDetail;
         oscColour = cm::red;
     }
@@ -2112,6 +2869,10 @@ void AudienceEditor::updateLiveText()
     oscStatusLabel.setDescription (oscSafetyDetail);
 
     const int midiType = cm::choiceValue (proc.apvts, "midiOutputType");
+    const int sourceCapacity = proc.audienceModel.getSourceCapacity();
+    const int sourcesPerChannel = sourceCapacity / 16;
+    const auto capacityText = juce::String (sourceCapacity) + " participants / "
+                            + juce::String (sourcesPerChannel) + " per channel";
     if (midiType == 1)
     {
         const int routingMode = cm::choiceValue (proc.apvts, "normalMidiRoutingMode");
@@ -2120,7 +2881,8 @@ void AudienceEditor::updateLiveText()
                                      juce::dontSendNotification);
         if (routingMode == 1)
         {
-            routingDetailLabel.setText ("1:1  /  ...  /  16:16  /  17:1  /  0:16  /  note pairs stay together",
+            routingDetailLabel.setText (capacityText
+                                        + "  /  stable ID modulo 16  /  note ownership safe",
                                         juce::dontSendNotification);
         }
         else
@@ -2129,14 +2891,6 @@ void AudienceEditor::updateLiveText()
             routingDetailLabel.setText ("Every source/finger0 uses MIDI Channel " + juce::String (channel),
                                         juce::dontSendNotification);
         }
-    }
-    else if (midiType == 2)
-    {
-        const bool upper = cm::choiceValue (proc.apvts, "mpeZone") == 1;
-        routingSummaryLabel.setText ("Source finger0  ->  MPE voices", juce::dontSendNotification);
-        routingDetailLabel.setText (upper ? "Upper zone  /  master 16  /  members 1-15"
-                                               : "Lower zone  /  master 1  /  members 2-16",
-                                    juce::dontSendNotification);
     }
     else
     {
@@ -2148,7 +2902,9 @@ void AudienceEditor::updateLiveText()
     const int observedZoneCount = cm::zoneCount (observedZones);
     zoneStatusLabel.setText (cm::zonesFromMask (observedZones)
                              + "  /  " + juce::String (activeSources) + " sources  /  "
-                             + juce::String (activeFingers) + " touches",
+                             + juce::String (activeFingers) + " touches  /  "
+                             + juce::String ((int) proc.audienceModel.getCapacityDroppedEventCount())
+                             + " cap drops",
                              juce::dontSendNotification);
     const bool oscFresh = listening && messageCount > 0 && age <= 1500u;
     zoneStatusLabel.setColour (juce::Label::textColourId,
@@ -2163,7 +2919,35 @@ void AudienceEditor::updateLiveText()
     zoneStatusLabel.setTooltip (zoneDescription);
     zoneStatusLabel.setDescription (zoneDescription);
 
+    const int simulatorHeld = proc.simulator.getHeldSeatCount();
+    const int simulatorCrowd = proc.simulator.getCrowdParticipantCount();
+    const int simulatorCrowdActive = proc.simulator.getActiveCrowdParticipantCount();
+    const int simulatorTotal = proc.simulator.getSimSeatCount();
+    const bool mixedLiveAndSimulator = oscFresh && simulatorTotal > 0;
+    if (mixedLiveAndSimulator)
+    {
+        simStatusLabel.setText ("LOCAL + OSC INPUT  |  SHARED IDS",
+                                juce::dontSendNotification);
+        simStatusLabel.setColour (juce::Label::textColourId, cm::amber);
+        simStatusLabel.setDescription ("Live OSC and the simulator share source IDs 0 to 255. Clear the simulator before production input to avoid lifecycle collisions.");
+    }
+    else
+    {
+        simStatusLabel.setText ("HELD " + juce::String (simulatorHeld)
+                                + "  ·  CROWD " + juce::String (simulatorCrowdActive)
+                                + " / " + juce::String (simulatorCrowd) + " ACTIVE",
+                                juce::dontSendNotification);
+        simStatusLabel.setColour (juce::Label::textColourId,
+                                  simulatorTotal > 0 ? cm::green : cm::textDim);
+        simStatusLabel.setDescription (
+            juce::String (simulatorHeld) + " held test touches and "
+            + juce::String (simulatorCrowdActive) + " active touches in a stable pool of "
+            + juce::String (simulatorCrowd) + " crowd participants.");
+    }
+    simStatusLabel.setTooltip (simStatusLabel.getDescription());
     simMoveButton.setToggleState (proc.simulator.isRandomMovementOn(), juce::dontSendNotification);
+    simProfileCombo.setSelectedItemIndex (
+        static_cast<int> (proc.simulator.getProfile()), juce::dontSendNotification);
 
     const auto currentDestinationStatus = proc.getMidiOutputStatus();
     if (proc.getMidiOutputRouteRevision() != lastMidiOutputRouteRevision)
@@ -2271,13 +3055,17 @@ void AudienceEditor::updateConsoleTelemetry()
     const int outputPath = juce::jlimit (0, 2, proc.getMidiOutputPath());
     static constexpr const char* outputPathNames[] { "HOST ONLY", "EXTERNAL ONLY", "MIRROR" };
     const int endpointIndex = proc.getResolvedMidiOutputOptionIndex();
-    const bool externalEndpointAvailable = endpointIndex > 0 && ! destinationRouteUnresolved;
+    const bool externalEndpointAvailable = endpointIndex > 0
+                                        && ! destinationRouteUnresolved
+                                        && proc.isMidiOutputReady();
     const int expectedZone = proc.getExpectedZone();
     const auto expectedZoneText = expectedZone < 0
                                 ? juce::String ("ANY")
                                 : juce::String::charToString ((juce::juce_wchar) ('A' + expectedZone));
     const bool exclusiveRequested = cm::choiceValue (proc.apvts, "exclusiveUdpPort") != 0;
-    const bool exclusiveActive = exclusiveRequested && proc.osc.isExclusive();
+    const bool exclusiveActive = exclusiveRequested
+                              && proc.osc.isExclusive()
+                              && proc.osc.isReceiving();
     const bool routeCoherent = outputPath != 1 || externalEndpointAvailable;
     const auto routeState = ! routeCoherent ? CheckState::fail
                           : ! exclusiveActive ? CheckState::warning : CheckState::pass;
@@ -2286,6 +3074,54 @@ void AudienceEditor::updateConsoleTelemetry()
                + " / UDP " + juce::String (proc.getUdpPort())
                + (outputPath == 0 ? " / HOST BUS"
                   : externalEndpointAvailable ? " / ENDPOINT READY" : " / NO EXTERNAL ENDPOINT"));
+
+    const int matchingFactoryPreset = proc.getMatchingFactoryPresetIndex();
+    const auto freshRouteState = proc.getFreshRouteAssignmentState();
+    const bool freshRoutePending =
+        freshRouteState == AudienceProcessor::FreshRouteAssignmentState::pending;
+    const bool freshRouteAssigned =
+        freshRouteState == AudienceProcessor::FreshRouteAssignmentState::assigned;
+    const bool freshRouteExhausted =
+        freshRouteState == AudienceProcessor::FreshRouteAssignmentState::exhausted;
+    autoAssignRetryButton.setEnabled (freshRouteExhausted);
+    autoAssignRetryButton.setButtonText (freshRouteExhausted ? "RETRY AUTO"
+                                                             : "AUTO READY");
+    refreshingFactoryPreset = true;
+    if (matchingFactoryPreset >= 0)
+        factoryPresetCombo.setSelectedItemIndex (matchingFactoryPreset,
+                                                  juce::dontSendNotification);
+    else
+        factoryPresetCombo.setSelectedId (0, juce::dontSendNotification);
+    refreshingFactoryPreset = false;
+    const auto factoryState = freshRouteExhausted
+                            ? "NO FREE UDP PORT  /  6062-6069  /  FAIL-CLOSED"
+                            : freshRoutePending
+                                ? juce::String ("AUTO ASSIGNING  /  6062-6069")
+                                : matchingFactoryPreset >= 0
+                                    ? (freshRouteAssigned
+                                        ? "AUTO ASSIGNED  /  "
+                                        : "ACTIVE  /  ")
+                                        + AudienceProcessor::getFactoryPresetName(
+                                            matchingFactoryPreset)
+                                    : juce::String ("CUSTOM  /  SAVED PROJECT STATE");
+    factoryPresetStatusLabel.setText (factoryState, juce::dontSendNotification);
+    factoryPresetStatusLabel.setColour (
+        juce::Label::textColourId,
+        freshRouteExhausted ? cm::red
+        : freshRoutePending ? cm::amber
+        : matchingFactoryPreset >= 0 ? cm::green : cm::textMuted);
+    factoryPresetStatusLabel.setDescription (
+        freshRouteExhausted
+            ? "Every factory UDP port is occupied. No OSC receiver, virtual MIDI endpoint "
+              "or Global Conductor registration was opened; retry after a port is released."
+        : freshRoutePending
+            ? "Cosmic Microwave is claiming the lowest free retained exclusive factory route."
+        : matchingFactoryPreset >= 0
+            ? "The screenshot-aligned factory performance baseline is active. "
+              "Venue Preflight may still require Safety Governor activation."
+            : "One or more controls differ from every factory Zone A-H preset. "
+              "The current custom state will still be stored by the host project.");
+    factoryPresetStatusLabel.setTooltip (factoryPresetStatusLabel.getDescription());
 
     int warnings = 0;
     int failures = 0;
@@ -2311,7 +3147,7 @@ void AudienceEditor::updateConsoleTelemetry()
 
     const auto zoneMismatchCount = proc.osc.getZoneMismatchCount();
     preflight (1, zoneMismatchCount > 0u ? CheckState::fail
-                  : expectedZone < 0 ? CheckState::warning : CheckState::pass,
+                  : expectedZone < 0 ? CheckState::fail : CheckState::pass,
                zoneMismatchCount > 0u ? juce::String ((int) zoneMismatchCount) + " ZONE MISMATCH"
                : expectedZone < 0 ? "EXPECTED ZONE IS ANY"
                                   : "ZONE " + expectedZoneText + " LOCKED");
@@ -2359,14 +3195,140 @@ void AudienceEditor::updateConsoleTelemetry()
                : conductorGlobal ? "GLOBAL ALLOCATION LIVE"
                                  : "LOCAL FALLBACK / WAITING FOR LEADER");
 
+    const auto quality = proc.getSourceQualityOutput();
+    const int qualityTarget = juce::jmax (1, quality.expectedSources);
+    sourceQualityButton.setButtonText (
+        quality.armed ? "STOP " + juce::String (qualityTarget) + " CHECK"
+                      : "START " + juce::String (qualityTarget) + " CHECK");
+
+    const auto qualityState = ! quality.armed ? CheckState::bypassed
+                            : quality.simulatorActive ? CheckState::fail
+                            : quality.state == SourceQualityController::State::READY
+                                ? CheckState::pass
+                            : quality.state == SourceQualityController::State::DEGRADED
+                                  && quality.admissionOpen
+                                ? CheckState::warning
+                            : CheckState::fail;
+    const auto gateDetail = ! quality.armed
+        ? juce::String ("NOT ARMED / NEW ATTACKS OPEN")
+        : quality.simulatorActive
+            ? juce::String ("BLOCKED / SIMULATOR ACTIVE / CLEAR BEFORE CHECK")
+        : quality.state == SourceQualityController::State::WARMING
+            ? "WARMING / NEW ATTACKS HELD / CLEAN "
+                + juce::String (quality.readinessHoldProgress * 100.0, 0) + "%"
+        : quality.state == SourceQualityController::State::READY
+            ? juce::String ("READY LATCHED / NEW ATTACKS OPEN")
+        : quality.admissionOpen
+            ? juce::String ("DEGRADED / READY LATCHED / NEW ATTACKS OPEN")
+            : juce::String ("HARD FAULT / NEW ATTACKS HELD / RESTART REQUIRED");
+    setStatus (sourceQualityGateLabel, qualityState, gateDetail);
+    sourceQualityGateLabel.setDescription (
+        "The operator-armed gate holds only new attacks until the local accepted-live-OSC "
+        "signal census is complete and stable. It is not a server roster check or a "
+        "60-second production soak. Note Off, watchdog Cancel and already sounding notes "
+        "always remain release-safe.");
+    sourceQualityGateLabel.setTooltip (sourceQualityGateLabel.getDescription());
+
+    const auto coverageState = ! quality.armed ? CheckState::bypassed
+                             : quality.readyLatched ? CheckState::pass
+                             : quality.qualifiedSources == qualityTarget
+                                  && quality.activeSources == qualityTarget
+                                ? CheckState::pass : CheckState::warning;
+    setStatus (sourceQualityCoverageLabel, coverageState,
+               "CENSUS " + juce::String (quality.observedSources) + "/"
+                   + juce::String (qualityTarget)
+                   + " / U+V+ON " + juce::String (quality.qualifiedSources) + "/"
+                   + juce::String (qualityTarget)
+                   + (quality.readyLatched ? " / ACTIVE NOW "
+                                           : " / ACTIVE REQUIRED ")
+                   + juce::String (quality.activeSources) + "/"
+                   + juce::String (qualityTarget));
+    sourceQualityCoverageLabel.setDescription (
+        "Local accepted OSC signal census over the exact dense source domain 0.."
+        + juce::String (qualityTarget - 1)
+        + ". Qualification requires every identity to send U, V and On since START, "
+          "and every identity must remain active with both heartbeat axes during the "
+          "clean hold. After READY, ACTIVE is current telemetry only. This does not "
+          "prove the server roster or replace the 60-second soak.");
+    sourceQualityCoverageLabel.setTooltip (
+        sourceQualityCoverageLabel.getDescription());
+
+    const bool hotTraffic = SourceQualityController::hasReason(
+        quality.reasonBits, SourceQualityController::ReasonHotSource);
+    const bool invalidQualityClock = SourceQualityController::hasReason(
+        quality.reasonBits, SourceQualityController::ReasonInvalidClock);
+    const auto timingState = ! quality.armed ? CheckState::bypassed
+                           : quality.staleActiveSources > 0 || hotTraffic
+                                  || quality.aggregateRateHigh || invalidQualityClock
+                                ? CheckState::warning : CheckState::pass;
+    const auto heartbeatText = quality.maxActiveHeartbeatAgeMs
+                                   == std::numeric_limits<std::uint32_t>::max()
+        ? juce::String ("INVALID")
+        : juce::String ((int) quality.maxActiveHeartbeatAgeMs) + " ms";
+    setStatus (sourceQualityTimingLabel, timingState,
+               "MOTION " + juce::String (quality.totalMotionEventsPerSecond, 1)
+                   + " evt/s / MAX "
+                   + juce::String (quality.maxSourceMotionEventsPerSecond, 1)
+                   + " / U+V HB " + heartbeatText
+                   + " / STALE " + juce::String (quality.staleActiveSources)
+                   + " / HOT " + juce::String (quality.hotSources)
+                   + " / TOP " + juce::String (quality.topTalkerShare * 100.0, 0) + "%"
+                   + " / AGG " + (quality.aggregateRateHigh ? "HIGH" : "OK"));
+    sourceQualityTimingLabel.setDescription (
+        "Per-source and aggregate accepted U/V motion rate, plus the oldest required "
+        "U-and-V heartbeat among currently held live sources. A stationary held phone "
+        "must continue both heartbeat axes. Simulator traffic cannot satisfy this local "
+        "signal census and blocks the check while active.");
+    sourceQualityTimingLabel.setTooltip (sourceQualityTimingLabel.getDescription());
+
+    const bool hardQualityFault = quality.capacityDropCount > 0u
+                               || quality.lifecycleDropCount > 0u;
+    const bool lifecycleQualityFault = quality.duplicateOnCount > 0u
+                                    || quality.orphanOffCount > 0u
+                                    || quality.watchdogCancelCount > 0u;
+    const auto faultState = ! quality.armed ? CheckState::bypassed
+                          : hardQualityFault ? CheckState::fail
+                          : lifecycleQualityFault || quality.motionDropCount > 0u
+                              ? CheckState::warning
+                                                  : CheckState::pass;
+    setStatus (sourceQualityFaultLabel, faultState,
+               "DUP " + juce::String ((int) quality.duplicateOnCount)
+                   + " / ORPHAN " + juce::String ((int) quality.orphanOffCount)
+                   + " / CANCEL " + juce::String ((int) quality.watchdogCancelCount)
+                   + " / CAP " + juce::String ((int) quality.capacityDropCount)
+                   + " / MDROP " + juce::String ((int) quality.motionDropCount)
+                   + " / LDROP " + juce::String ((int) quality.lifecycleDropCount));
+    sourceQualityFaultLabel.setDescription (
+        "Incidents in the current local check epoch. Capacity or lifecycle-message "
+        "drops latch a hard fault and hold new attacks until a fresh check. Motion "
+        "drops and lifecycle anomalies remain warnings without cutting already "
+        "sounding notes.");
+    sourceQualityFaultLabel.setTooltip (sourceQualityFaultLabel.getDescription());
+
+    preflight (7, qualityState,
+               ! quality.armed ? "SOURCE SIGNAL CENSUS BYPASSED"
+               : quality.simulatorActive
+                    ? "LOCAL SIGNAL CENSUS BLOCKED / SIMULATOR ACTIVE"
+               : quality.state == SourceQualityController::State::READY
+                    ? "LOCAL SIGNAL CENSUS READY / 0.."
+                        + juce::String (qualityTarget - 1)
+                        + " / SERVER ROSTER EXTERNAL"
+               : quality.state == SourceQualityController::State::DEGRADED
+                    ? gateDetail
+                    : "LOCAL SIGNAL CENSUS "
+                        + juce::String (quality.qualifiedSources) + "/"
+                        + juce::String (qualityTarget));
+
     const auto summaryState = failures > 0 ? CheckState::fail
                             : warnings > 0 ? CheckState::warning : CheckState::pass;
     setStatus (preflightSummaryLabel, summaryState,
-               failures > 0 ? juce::String (failures) + " BLOCKER"
+               failures > 0 ? "COSMIC LOCAL PREFLIGHT / "
+                                + juce::String (failures) + " BLOCKER"
                                 + (failures == 1 ? juce::String() : "S")
                                 + " / " + juce::String (warnings) + " ADVISORY"
-              : warnings > 0 ? "READY WITH " + juce::String (warnings) + " ADVISORY"
-                             : "VENUE READY / ALL CHECKS PASS");
+              : warnings > 0 ? "COSMIC LOCAL PREFLIGHT / PASS WITH "
+                                   + juce::String (warnings) + " ADVISORY"
+                             : "COSMIC LOCAL PREFLIGHT / ALL LOCAL CHECKS PASS");
 
     static constexpr const char* registrationNames[] {
         "REGISTERED", "INVALID PORT", "DUPLICATE PORT", "CAPACITY FULL"
@@ -2395,58 +3357,12 @@ void AudienceEditor::updateConsoleTelemetry()
         + juce::String (proc.getConductorLeaderPort()) + ".");
     conductorQuotaLabel.setTooltip (conductorQuotaLabel.getDescription());
 
-    const bool macrosRequested = cm::choiceValue (proc.apvts, "crowdMacrosEnabled") != 0;
-    const bool macrosEffective = proc.getCrowdMacroEffectiveEnabled();
-    const bool macrosSafetySuspended = macrosRequested && ! macrosEffective
-                                    && safetyEnabled && safetyState >= 2;
-    const bool midiFormatOff = cm::choiceValue (proc.apvts, "midiOutputType") == 0;
-    const int macroChannelChoice = juce::jlimit (
-        0, 16, cm::choiceValue (proc.apvts, "crowdMacroChannel"));
-    const auto compactMacroChannel = macroChannelChoice == 16
-                                   ? juce::String ("ALL")
-                                   : "CH" + juce::String (macroChannelChoice + 1);
-    const auto liveValues = "D " + juce::String (proc.getCrowdMacroDensityCcValue())
-                          + "  X " + juce::String (proc.getCrowdMacroCentroidXCcValue())
-                          + "  Y " + juce::String (proc.getCrowdMacroCentroidYCcValue())
-                          + "  M " + juce::String (proc.getCrowdMacroMotionCcValue());
-
-    juce::String macroStateText;
-    juce::Colour macroStateColour;
-    if (! macrosRequested)
-    {
-        macroStateText = "BYPASS  /  MACROS OFF";
-        macroStateColour = cm::textMuted;
-    }
-    else if (macrosEffective)
-    {
-        macroStateText = "LIVE  /  " + compactMacroChannel + "  /  " + liveValues;
-        macroStateColour = cm::green;
-    }
-    else if (macrosSafetySuspended)
-    {
-        macroStateText = "SUSPENDED  /  SAFETY " + safetyName + "  /  " + liveValues;
-        macroStateColour = cm::amber;
-    }
-    else if (midiFormatOff)
-    {
-        macroStateText = "SUSPENDED  /  MIDI FORMAT OFF  /  " + liveValues;
-        macroStateColour = cm::amber;
-    }
-    else
-    {
-        macroStateText = "ARMED  /  WAITING FOR PROCESS  /  " + liveValues;
-        macroStateColour = cm::amber;
-    }
-
+    const auto macroStateText = "NOTES ONLY  /  U=PITCH  /  V=VELOCITY\n"
+                                "NO MUSICAL CC / PITCH BEND / MPE";
     macroStatusLabel.setText (macroStateText, juce::dontSendNotification);
-    macroStatusLabel.setColour (juce::Label::textColourId, macroStateColour);
-    const auto macroDescription = macroStateText + ". "
-        + juce::String (proc.getCrowdMacroActiveSources()) + " active sources; normalized density "
-        + juce::String (proc.getCrowdMacroDensity(), 3) + ", centroid "
-        + juce::String (proc.getCrowdMacroCentroidX(), 3) + " by "
-        + juce::String (proc.getCrowdMacroCentroidY(), 3) + ", motion "
-        + juce::String (proc.getCrowdMacroMotion(), 3)
-        + ". CC messages are emitted only when a value changes.";
+    macroStatusLabel.setColour (juce::Label::textColourId, cm::green);
+    const auto macroDescription = "Cosmic Microwave v2.6 notes-only MIDI policy. "
+        "Musical controller and MPE output are disabled; only panic safety uses CC120 and CC123.";
     macroStatusLabel.setDescription (macroDescription);
     macroStatusLabel.setTooltip (macroDescription);
 }

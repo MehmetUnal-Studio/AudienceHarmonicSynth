@@ -13,8 +13,8 @@ public:
 
     struct Config
     {
-        // Normal MIDI supplies 16. MPE supplies the number of usable member
-        // channels so the recommendation can never exceed its real voice pool.
+        // Notes Only supplies the full 16 MIDI-channel capacity, so the
+        // recommendation can never exceed its real voice pool.
         int voiceLimit = 16;
 
         // Rise/fall are approximately the time to traverse 95% of a density

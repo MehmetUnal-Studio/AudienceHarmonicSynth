@@ -1,9 +1,13 @@
 #include "Simulator.h"
 
-Simulator::Simulator (SeatEventSink& t, int sourceCapacity)
-    : target(t),
-      maxSourceCount(juce::jlimit(1, SeatEventSink::MAX_OSC_SOURCES, sourceCapacity))
+#include <algorithm>
+
+Simulator::Simulator (SeatEventSink& sink, int sourceCapacity)
+    : target (sink),
+      model (std::max (1, std::min (SeatEventSink::MAX_OSC_SOURCES,
+                                    sourceCapacity)))
 {
+    syncTelemetry();
 }
 
 Simulator::~Simulator()
@@ -13,94 +17,168 @@ Simulator::~Simulator()
 
 void Simulator::addRandomSeat()
 {
-    if ((int) simSeats.size() >= maxSourceCount)
-        return;
-
-    // Pick a source ID that is unique within this simulated instance. Search
-    // deterministically from a random start so high-density tests can always
-    // reach the full configured capacity instead of giving up after retries.
-    const int firstCandidate = rng.nextInt(maxSourceCount);
-    for (int offset = 0; offset < maxSourceCount; ++offset)
-    {
-        const int row = rng.nextInt(SeatEventSink::MAX_ROWS);
-        const int col = (firstCandidate + offset) % maxSourceCount;
-
-        bool taken = false;
-        for (const auto& s : simSeats)
-            if (s.col == col) { taken = true; break; }
-
-        if (taken) continue;
-
-        const float x = rng.nextFloat();
-        const float y = rng.nextFloat();
-        simSeats.push_back({ row, col, x, y, 0.0f, 0.0f });
-
-        target.setX (row, col, x);
-        target.setY (row, col, y);
-        target.setOn(row, col, true);
-
-        if (randomMovement && ! isTimerRunning())
-            startTimer(33);
-        return;
-    }
+    addSeat (false);
 }
 
 void Simulator::addRandomSeats (int count)
 {
-    for (int i = 0; i < count; ++i)
-        addRandomSeat();
+    const int remaining = std::max (0,
+        model.getSourceCapacity() - model.getPopulation());
+    const int toAdd = std::max (0, std::min (remaining, count));
+    for (int i = 0; i < toAdd; ++i)
+        addSeat (false);
+}
+
+void Simulator::addCrowdParticipants (int count)
+{
+    const int remaining = std::max (0,
+        model.getSourceCapacity() - model.getPopulation());
+    const int toAdd = std::max (0, std::min (remaining, count));
+    for (int i = 0; i < toAdd; ++i)
+        addSeat (true);
+}
+
+void Simulator::addSeat (bool automaticLifecycle)
+{
+    const auto result = automaticLifecycle
+        ? model.addCrowdParticipant (eventBuffer)
+        : model.addHeldParticipant (eventBuffer);
+    dispatchEvents (result.eventCount);
+    syncTelemetry();
+    updateTimerState();
 }
 
 void Simulator::removeRandomSeat()
 {
-    if (simSeats.empty()) return;
-    const int idx = rng.nextInt((int) simSeats.size());
-    const auto& s = simSeats[(size_t) idx];
-    target.setOn(s.row, s.col, false);
-    simSeats.erase(simSeats.begin() + idx);
+    const auto result = model.removeOneParticipant (eventBuffer);
+    dispatchEvents (result.eventCount);
+    syncTelemetry();
+    updateTimerState();
 }
 
 void Simulator::setRandomMovement (bool on)
 {
-    randomMovement = on;
-    if (on && ! simSeats.empty())  startTimer(33);
-    else if (! on)                  stopTimer();
+    randomMovement.store (on, std::memory_order_relaxed);
+    updateTimerState();
+}
+
+void Simulator::setProfile (Profile newProfile) noexcept
+{
+    model.setProfile (newProfile);
+    const auto accepted = model.getProfile();
+    profileValue.store (static_cast<int> (accepted), std::memory_order_relaxed);
+}
+
+Simulator::Profile Simulator::getProfile() const noexcept
+{
+    const int value = profileValue.load (std::memory_order_relaxed);
+    if (value == static_cast<int> (Profile::dense))
+        return Profile::dense;
+    if (value == static_cast<int> (Profile::stress))
+        return Profile::stress;
+    return Profile::human;
+}
+
+void Simulator::setSeed (std::uint64_t newSeed) noexcept
+{
+    model.setSeed (newSeed);
+    seedValue.store (model.getSeed(), std::memory_order_relaxed);
+}
+
+std::uint64_t Simulator::getSeed() const noexcept
+{
+    return seedValue.load (std::memory_order_relaxed);
+}
+
+std::size_t Simulator::setSourceCapacity (int newCapacity)
+{
+    const auto released = model.setSourceCapacity (newCapacity, eventBuffer);
+    dispatchEvents (released);
+    syncTelemetry();
+    updateTimerState();
+    return released;
 }
 
 void Simulator::clear()
 {
-    for (const auto& s : simSeats)
-        target.setOn(s.row, s.col, false);
-    clearSilently();
+    dispatchEvents (model.clear (eventBuffer));
+    randomMovement.store (false, std::memory_order_relaxed);
+    syncTelemetry();
+    stopTimer();
 }
 
 void Simulator::clearSilently()
 {
-    simSeats.clear();
-    randomMovement = false;
+    model.clearSilently();
+    randomMovement.store (false, std::memory_order_relaxed);
+    syncTelemetry();
     stopTimer();
 }
 
 void Simulator::timerCallback()
 {
-    if (! randomMovement || simSeats.empty()) return;
-
-    for (auto& s : simSeats)
+    if (model.getPopulation() <= 0)
     {
-        // gentle random walk
-        s.vx += (rng.nextFloat() - 0.5f) * 0.02f;
-        s.vy += (rng.nextFloat() - 0.5f) * 0.02f;
-        s.vx *= 0.95f;
-        s.vy *= 0.95f;
-        s.x  += s.vx;
-        s.y  += s.vy;
+        stopTimer();
+        return;
+    }
 
-        if (s.x < 0.0f) { s.x = 0.0f; s.vx = -s.vx * 0.3f; }
-        if (s.x > 1.0f) { s.x = 1.0f; s.vx = -s.vx * 0.3f; }
-        if (s.y < 0.0f) { s.y = 0.0f; s.vy = -s.vy * 0.3f; }
-        if (s.y > 1.0f) { s.y = 1.0f; s.vy = -s.vy * 0.3f; }
+    const auto eventCount = model.advance (
+        randomMovement.load (std::memory_order_relaxed), eventBuffer);
+    dispatchEvents (eventCount);
+    syncTelemetry();
+    updateTimerState();
+}
 
-        target.setX(s.row, s.col, s.x);
-        target.setY(s.row, s.col, s.y);
+void Simulator::dispatchEvents (std::size_t eventCount) noexcept
+{
+    const std::size_t boundedCount = std::min (eventCount, eventBuffer.size());
+    for (std::size_t index = 0; index < boundedCount; ++index)
+    {
+        const auto& event = eventBuffer[index];
+        switch (event.type)
+        {
+            case CrowdSimulatorModel::EventType::x:
+                target.setX (event.row, event.sourceId, event.value);
+                break;
+            case CrowdSimulatorModel::EventType::y:
+                target.setY (event.row, event.sourceId, event.value);
+                break;
+            case CrowdSimulatorModel::EventType::on:
+                target.setOn (event.row, event.sourceId, true);
+                break;
+            case CrowdSimulatorModel::EventType::off:
+                target.setOn (event.row, event.sourceId, false);
+                break;
+        }
+    }
+}
+
+void Simulator::syncTelemetry() noexcept
+{
+    sourceCapacityValue.store (model.getSourceCapacity(),
+                               std::memory_order_relaxed);
+    simulatorPopulation.store (model.getPopulation(), std::memory_order_relaxed);
+    heldPopulation.store (model.getHeldPopulation(), std::memory_order_relaxed);
+    crowdPopulation.store (model.getCrowdPopulation(), std::memory_order_relaxed);
+    activeCrowdPopulation.store (model.getActiveCrowdPopulation(),
+                                 std::memory_order_relaxed);
+    activeSimulatorPopulation.store (model.getActivePopulation(),
+                                     std::memory_order_relaxed);
+}
+
+void Simulator::updateTimerState()
+{
+    const bool needsTimer = model.getCrowdPopulation() > 0
+                         || (randomMovement.load (std::memory_order_relaxed)
+                             && model.getPopulation() > 0);
+    if (needsTimer)
+    {
+        if (! isTimerRunning())
+            startTimer (CrowdSimulatorModel::tickIntervalMs);
+    }
+    else
+    {
+        stopTimer();
     }
 }

@@ -114,8 +114,9 @@ public:
 
     // Pressure fields are non-negative. Queue/pending/FIFO pressures are
     // normalised to 0..1; deadline ratio is process-time/deadline; FIFO age is
-    // seconds. Any NaN, infinity, negative or impossible bound fails closed to
-    // EMERGENCY and identifies the offending signal in reasonBits.
+    // seconds. A valid Time Field pending value tops out at CRITICAL so the
+    // bounded queue can keep draining; invalid values and every other emergency
+    // signal still fail closed to EMERGENCY and identify the offending input.
     Output update (const Config&, const Input&) noexcept;
 
     void reset() noexcept;

@@ -37,7 +37,7 @@ jobs:
           AudienceMidiMappingTests
           AudienceMidiScaleModuleTests
           AudienceMidiPitchTests
-          AudienceMpeOutputTests
+          AudienceMidiOutputTests
           AudienceOscBridgeTests
           AudienceAtomicScaleBuilderTests
           AudienceSampleLibraryTests
