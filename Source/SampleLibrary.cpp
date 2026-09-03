@@ -104,9 +104,24 @@ int SampleLibrary::loadFromDirectory (const juce::File& dir)
     dir.findChildFiles(files, juce::File::findFiles, false, "*.wav;*.aif;*.aiff;*.flac");
     files.sort();
 
+    truncated = false;
+    juce::String truncReason;        // non-empty once a cap is hit (B17)
+
     int loaded = 0, skipped = 0;
+    juce::uint64 totalBytes = 0;     // decoded float PCM held in RAM so far
+
     for (auto& f : files)
     {
+        // --- Safety cap: sample COUNT (B17) ---
+        // Stop before loading any further files once the ceiling is reached, so
+        // a pathological directory cannot spawn an unbounded number of buffers.
+        if (loaded >= kMaxSampleCount)
+        {
+            truncated   = true;
+            truncReason = "sample-count cap " + juce::String(kMaxSampleCount) + " reached";
+            break;
+        }
+
         if (f.getFileName().startsWith("._")) { ++skipped; continue; }
 
         std::unique_ptr<juce::AudioFormatReader> reader (formatManager.createReaderFor(f));
@@ -123,6 +138,23 @@ int SampleLibrary::loadFromDirectory (const juce::File& dir)
         const int numCh = (int) juce::jmin((juce::uint32) 2, reader->numChannels);
         if (numCh <= 0)                                 { ++skipped; continue; }
         const int len   = (int) reader->lengthInSamples;
+
+        // --- Safety cap: total decoded BYTES (B17) ---
+        // Compute this buffer's RAM cost up front and stop *before* allocating
+        // it if loading would push us past the budget. This avoids the actual
+        // RAM spike (and the resulting suspendProcessing stall) rather than
+        // detecting it after the fact.
+        const juce::uint64 bytesForThis = (juce::uint64) numCh
+                                        * (juce::uint64) len
+                                        * (juce::uint64) sizeof(float);
+        if (totalBytes + bytesForThis > kMaxTotalBytes)
+        {
+            truncated   = true;
+            truncReason = "decoded-size cap "
+                        + juce::String(kMaxTotalBytes / (1024 * 1024)) + " MB reached";
+            break;
+        }
+
         s.buffer.setSize(numCh, len);
         reader->read(&s.buffer, 0, len, 0, true, numCh > 1);
 
@@ -138,6 +170,7 @@ int SampleLibrary::loadFromDirectory (const juce::File& dir)
         autoTrim(s);
         if (s.trimmedLength <= 0)                      { ++skipped; continue; }
 
+        totalBytes += bytesForThis;
         samples.push_back(std::move(s));
         ++loaded;
     }
@@ -145,6 +178,17 @@ int SampleLibrary::loadFromDirectory (const juce::File& dir)
     status = "Loaded " + juce::String(loaded) + " sample"
            + (loaded == 1 ? "" : "s")
            + (skipped > 0 ? " (" + juce::String(skipped) + " skipped)" : "");
+
+    if (truncated)
+    {
+        // Surface the truncation visibly: append to the UI/debug status string
+        // (also readable via wasTruncated()) and log it. Never truncate silently.
+        status += " - WARNING: load truncated (" + truncReason + ")";
+        juce::Logger::writeToLog ("SampleLibrary: load truncated in "
+                                  + dir.getFullPathName() + " - " + truncReason
+                                  + "; loaded " + juce::String(loaded) + " sample(s)");
+    }
+
     return loaded;
 }
 

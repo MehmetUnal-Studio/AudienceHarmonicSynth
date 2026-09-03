@@ -1,14 +1,14 @@
 # AGENTS.md
 
 ## Project
-This is a JUCE/C++ audio plugin called Audience Harmonic Synth.
+This is a JUCE/C++ audio plugin called SpektraSynth.
 
 The plugin is an audience-driven musical instrument with:
 - internal audio synthesis
 - sample library playback
 - granular synthesis
 - Element / Atomic Spectral Synth
-- optional MIDI / MPE output
+- optional Notes Only MIDI output
 
 ## Hard realtime audio rules
 Never do any of the following inside processBlock or any function reachable from the audio callback:
@@ -53,8 +53,8 @@ Do not force every sample library through granular synthesis.
 
 Direct Sample Player must be a real sample playback path, not fake granular playback with large grains.
 
-## MIDI / MPE architecture
-MIDI/MPE output is a parallel output layer.
+## MIDI output architecture
+MIDI output is a parallel output layer.
 
 Output modes:
 - Audio Only
@@ -63,35 +63,31 @@ Output modes:
 
 MIDI output types:
 - Off
-- Normal MIDI
-- MPE MIDI
+- Notes Only
 
 For Element / Atomic Spectral Scales:
 - resolve the exact target frequency first
-- convert frequency to nearest MIDI note + pitch bend
-- use MPE member channels for independent per-note tuning
-- do not fake MPE using global pitch bend
+- convert frequency to the nearest MIDI note
+- do not emit Pitch Bend, Channel Pressure, RPN, MPE setup, or musical CC messages
 
-## MPE defaults
-Lower Zone:
-- master channel: 1
-- member channels: 2-16
-- pitch bend range: configurable, default 48 semitones
-
-Each active voice owns one MPE member channel until note off.
-
-Send pitch bend before note on.
+## Notes Only contract
+- `u` selects pitch.
+- `v` sets the velocity of the next Note On.
+- Performance output contains only Note On and Note Off.
+- Host MIDI thru passes only Note On and Note Off.
+- Do not emit CC11, CC74, Crowd Macro CC, Channel Pressure, Pitch Bend, RPN, or MPE.
+- Keep legacy MPE and Crowd Macro APVTS parameter IDs inert for old project/state recall.
 
 On panic:
 - send note off for all active notes
-- all notes off / all sound off where appropriate
-- reset pitch bend to center
-- clear MPE channel allocator state
+- send only CC123 (All Notes Off) and CC120 (All Sound Off) on channels 1-16
+- clear Notes Only ownership state
 
 ## Spectral scale rule
-The audio engine and MIDI/MPE engine must share the same pitch resolver.
+The audio engine and MIDI engine must share the same pitch resolver.
 
-Do not duplicate or approximate spectral scale math separately for MIDI.
+Do not duplicate spectral scale math separately for MIDI. Notes Only deliberately
+quantizes the resolved exact frequency to the nearest MIDI note at the output boundary.
 
 ## Build and validation
 After meaningful code changes:

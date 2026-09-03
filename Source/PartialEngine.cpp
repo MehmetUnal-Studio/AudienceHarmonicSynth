@@ -10,6 +10,20 @@ namespace
     constexpr float kPi    = 3.14159265358979323846f;
     constexpr float kTwoPi = 6.28318530717958647692f;
 
+    // Shared, read-only sine wavetable for the additive partial oscillator.
+    // Built ONCE at static-init time (not on the audio thread, not per voice).
+    // Guard entry [kSineTableSize] == [0] enables branch-free linear interpolation.
+    // Linear interp on a 4096-point table is ~-78 dB error (inaudible).
+    constexpr int kSineTableSize = 4096;
+    static const std::array<float, kSineTableSize + 1> kSineTable = []
+    {
+        std::array<float, kSineTableSize + 1> table {};
+        for (int i = 0; i < kSineTableSize; ++i)
+            table[(size_t) i] = (float) std::sin(kTwoPi * (double) i / (double) kSineTableSize);
+        table[(size_t) kSineTableSize] = table[0];
+        return table;
+    }();
+
 	    struct ScaleDef
 	    {
 	        const char* name;
@@ -1745,14 +1759,34 @@ namespace
             return AtomicScaleBuilder::buildPlayableAtomicScale(sourceLinesForElement(element), options);
         }
 
-        const AtomicScaleBuilder::Result& atomicResultFor (int element, AtomicScaleBuilder::ScaleMode mode)
+        // One element's five scale-mode builds. Member order is load-bearing:
+        // atomicResultFor() maps each ScaleMode enum to the matching member below.
+        struct ResultSet
         {
-            struct ResultSet
-            {
-                AtomicScaleBuilder::Result melodic, performable, microtonal, scientific, raw;
-            };
+            AtomicScaleBuilder::Result melodic, performable, microtonal, scientific, raw;
+        };
 
-            static const std::array<ResultSet, kLastElement + 1> cache {{
+        const AtomicScaleBuilder::Result& atomicResultFor (const std::array<ResultSet, kLastElement + 1>& cache,
+                                                           int element, AtomicScaleBuilder::ScaleMode mode)
+        {
+            const auto& set = cache[(size_t) juce::jlimit(kElementHydrogen, kLastElement, element)];
+            switch (mode)
+            {
+                case AtomicScaleBuilder::ScaleMode::Melodic:     return set.melodic;
+                case AtomicScaleBuilder::ScaleMode::Microtonal:  return set.microtonal;
+                case AtomicScaleBuilder::ScaleMode::Scientific:  return set.scientific;
+                case AtomicScaleBuilder::ScaleMode::Raw:         return set.raw;
+                case AtomicScaleBuilder::ScaleMode::Performable: return set.performable;
+            }
+
+            return set.performable;
+        }
+
+        // Builds all 29 elements x 5 modes. Heavy (std::vector allocation + sort /
+        // cluster per build); MUST run on the message thread only.
+        std::array<ResultSet, kLastElement + 1> buildAtomicScaleResultSets()
+        {
+            return {{
                 { buildAtomicResult(kElementHydrogen, AtomicScaleBuilder::ScaleMode::Melodic),
                   buildAtomicResult(kElementHydrogen, AtomicScaleBuilder::ScaleMode::Performable),
                   buildAtomicResult(kElementHydrogen, AtomicScaleBuilder::ScaleMode::Microtonal),
@@ -1899,47 +1933,39 @@ namespace
                   buildAtomicResult(kElementZinc, AtomicScaleBuilder::ScaleMode::Scientific),
                   buildAtomicResult(kElementZinc, AtomicScaleBuilder::ScaleMode::Raw) },
             }};
-
-            const auto& set = cache[(size_t) juce::jlimit(kElementHydrogen, kLastElement, element)];
-            switch (mode)
-            {
-                case AtomicScaleBuilder::ScaleMode::Melodic:     return set.melodic;
-                case AtomicScaleBuilder::ScaleMode::Microtonal:  return set.microtonal;
-                case AtomicScaleBuilder::ScaleMode::Scientific:  return set.scientific;
-                case AtomicScaleBuilder::ScaleMode::Raw:         return set.raw;
-                case AtomicScaleBuilder::ScaleMode::Performable: return set.performable;
-            }
-
-            return set.performable;
         }
 
-        const AtomicScaleBuilder::Result& atomicScaleResultForMode (int spectralMode, int atomicModeIndex)
+        const AtomicScaleBuilder::Result& atomicScaleResultForMode (const std::array<ResultSet, kLastElement + 1>& cache,
+                                                                    int spectralMode, int atomicModeIndex)
         {
-            return atomicResultFor(elementForSpectralMode(spectralMode),
+            return atomicResultFor(cache,
+                                   elementForSpectralMode(spectralMode),
                                    scaleModeForAtomicIndex(atomicModeIndex));
         }
 
-        const AtomicScaleBuilder::Result& atomicRawResultForElement (int element)
+        const AtomicScaleBuilder::Result& atomicRawResultForElement (const std::array<ResultSet, kLastElement + 1>& cache,
+                                                                     int element)
         {
-            return atomicResultFor(element, AtomicScaleBuilder::ScaleMode::Raw);
+            return atomicResultFor(cache, element, AtomicScaleBuilder::ScaleMode::Raw);
         }
 
-        int spectralLineCount (int mode, int atomicModeIndex) noexcept
+        int spectralLineCount (const std::array<ResultSet, kLastElement + 1>& cache,
+                               int mode, int atomicModeIndex) noexcept
         {
             if (! isSpectralMode(mode))
                 return 0;
 
-            return (int) atomicScaleResultForMode(mode, atomicModeIndex).scaleDegrees.size();
+            return (int) atomicScaleResultForMode(cache, mode, atomicModeIndex).scaleDegrees.size();
         }
 
-        int elementLineCount (int element) noexcept
+        int elementLineCount (const std::array<ResultSet, kLastElement + 1>& cache, int element) noexcept
         {
-            return (int) atomicRawResultForElement(element).timbrePartials.size();
+            return (int) atomicRawResultForElement(cache, element).timbrePartials.size();
         }
 
-        double elementReferenceWavelength (int element) noexcept
+        double elementReferenceWavelength (const std::array<ResultSet, kLastElement + 1>& cache, int element) noexcept
         {
-            return atomicRawResultForElement(element).lambdaRefNm;
+            return atomicRawResultForElement(cache, element).lambdaRefNm;
         }
 
 	    double midiToHz (int midi) noexcept
@@ -2032,8 +2058,40 @@ namespace
     }
 }
 
+// Engine-owned atomic-scale cache. Forward-declared in PartialEngine.h; the
+// complete type lives here so the audio thread never sees the build machinery.
+// Holds one ResultSet (5 scale modes) per element, indexed by element index
+// exactly as the original function-local cache was.
+struct AtomicScaleCache
+{
+    std::array<ResultSet, kLastElement + 1> sets;
+};
+
+// Out-of-line so the std::unique_ptr<AtomicScaleCache> member can be destroyed
+// where AtomicScaleCache is a complete type.
+PartialEngine::~PartialEngine() = default;
+
+void PartialEngine::ensureAtomicScaleCache()
+{
+    // Message-thread only. Builds the 145-entry cache exactly once. Idempotent:
+    // after construction the pointer is already populated, so prepare()'s call
+    // is a no-op and never allocates.
+    if (atomicScaleCache == nullptr)
+    {
+        atomicScaleCache = std::make_unique<AtomicScaleCache>();
+        atomicScaleCache->sets = buildAtomicScaleResultSets();
+    }
+}
+
 PartialEngine::PartialEngine()
 {
+    // Populate the atomic-scale cache up front, on the message thread, before the
+    // engine is reachable by the audio thread. This guarantees every reader
+    // (atomicResultFor / getScalePitch / renderVoices / UI getters) sees a fully
+    // built cache and never triggers a lazy build (and thus never allocates) on
+    // any audio-thread path.
+    ensureAtomicScaleCache();
+
     for (auto& b : auroraBands) b.store(0.0f);
     initEnvelopeLuts();
     reset();
@@ -2053,9 +2111,9 @@ void PartialEngine::prepare (double sr, int blockSize)
 {
     // Build atomic scale/timbre caches away from the audio callback. Scale reduction
     // is musical/perceptual; raw timbre partials remain preserved in every result.
-    for (int element = kElementHydrogen; element <= kLastElement; ++element)
-        for (int mode = 0; mode < 5; ++mode)
-            (void) atomicResultFor(element, scaleModeForAtomicIndex(mode));
+    // The cache is already built in the constructor, so this is a no-op in normal
+    // operation; it stays here as the documented message-thread population point.
+    ensureAtomicScaleCache();
 
     sampleRate = sr;
     delaySamples = juce::jlimit(1, MAX_DELAY_SAMPLES - 1,
@@ -2086,7 +2144,6 @@ void PartialEngine::reset()
             v.sourceMode = kEngineSampleLibrary;
             v.playbackMode = kSamplePlaybackDirect;
             v.elementIndex = kElementHelium;
-            v.elementPartials = 0;
             v.elementPhase.fill(0.0f);
         v.pitchLfoPhase = v.pitchLfoInc = v.pitchLfoDepth = 0.0f;
         v.ampLfoPhase   = v.ampLfoInc   = v.ampLfoDepth   = 0.0f;
@@ -2137,6 +2194,9 @@ void PartialEngine::reset()
     activeVoiceCount.store(0);
     registeredSeatCount.store(0);
     adaptiveUnisonCount.store(3);
+
+    // Every voice above was set inactive; keep the active-voice index list in sync.
+    clearActiveVoiceList();
 
     delayBufL.fill(0.0f);
     delayBufR.fill(0.0f);
@@ -2203,7 +2263,7 @@ int PartialEngine::getScaleTableSize() const noexcept
                                   scaleMode.load(std::memory_order_relaxed));
     const int atomicMode = atomicScaleMode.load(std::memory_order_relaxed);
     const int stepsPerOctave = isSpectralMode(mode)
-        ? spectralLineCount(mode, atomicMode)
+        ? spectralLineCount(atomicScaleCache->sets, mode, atomicMode)
         : getScaleDef(mode).count;
 
     return juce::jmax(1, scaleOctaves.load(std::memory_order_relaxed)) * stepsPerOctave;
@@ -2220,7 +2280,7 @@ int PartialEngine::getScaleStepsPerOctave() const noexcept
 {
     const int mode = juce::jlimit(0, kTotalScaleModes - 1,
                                   scaleMode.load(std::memory_order_relaxed));
-    return isSpectralMode(mode) ? spectralLineCount(mode, atomicScaleMode.load(std::memory_order_relaxed))
+    return isSpectralMode(mode) ? spectralLineCount(atomicScaleCache->sets, mode, atomicScaleMode.load(std::memory_order_relaxed))
                                 : getScaleDef(mode).count;
 }
 
@@ -2304,7 +2364,7 @@ PartialEngine::PitchTarget PartialEngine::getScalePitch (int idx) const noexcept
     if (isSpectralMode(mode))
     {
         const int atomicMode = atomicScaleMode.load(std::memory_order_relaxed);
-        const auto& scale = atomicScaleResultForMode(mode, atomicMode);
+        const auto& scale = atomicScaleResultForMode(atomicScaleCache->sets, mode, atomicMode);
         const int lineCount = (int) scale.scaleDegrees.size();
         if (lineCount <= 0)
             return {};
@@ -2365,38 +2425,9 @@ int PartialEngine::loadSampleLibrary (const juce::File& dir)
 {
     clearAllVoices();
     const int n = library.loadFromDirectory(dir);
-    buildScaleTable();
     if (n > 0)
         retriggerActiveSeats();
     return n;
-}
-
-void PartialEngine::buildScaleTable()
-{
-    int count = 0;
-    const int mode = juce::jlimit(0, kTotalScaleModes - 1,
-                                  scaleMode.load(std::memory_order_relaxed));
-    if (library.numSamples() > 0 && ! isSpectralMode(mode))
-    {
-        int minM = 127, maxM = 0;
-        for (int i = 0; i < library.numSamples(); ++i)
-        {
-            if (auto* s = library.getSample(i))
-            {
-                minM = juce::jmin(minM, s->rootMidi);
-                maxM = juce::jmax(maxM, s->rootMidi);
-            }
-        }
-        const auto& scale = getScaleDef(mode);
-        // include every active-scale note in [minM, maxM]
-        for (int m = minM; m <= maxM && count < (int) scaleTable.size(); ++m)
-        {
-            const int pc = ((m % 12) + 12) % 12;
-            for (int i = 0; i < scale.count; ++i)
-                if (pc == scale.degrees[(size_t) i]) { scaleTable[(size_t) count++] = m; break; }
-        }
-    }
-    scaleTableCount.store(count, std::memory_order_release);
 }
 
 int PartialEngine::getScaleMidi (int idx) const noexcept
@@ -2418,12 +2449,15 @@ double PartialEngine::getScaleLineWavelengthNm (int idx) const noexcept
     if (! isSpectralMode(mode))
         return 0.0;
 
-    const auto& scale = atomicScaleResultForMode(mode, atomicScaleMode.load(std::memory_order_relaxed));
+    const auto& scale = atomicScaleResultForMode(atomicScaleCache->sets, mode, atomicScaleMode.load(std::memory_order_relaxed));
     const int lineCount = (int) scale.scaleDegrees.size();
     if (lineCount <= 0)
         return 0.0;
 
-    return scale.scaleDegrees[(size_t) (idx % lineCount)].representativeWavelengthNm;
+    // Guard against negative / overflowing idx: a raw `idx % lineCount` can be
+    // negative for negative idx and index out of bounds. Clamp to the valid range.
+    const int lineIdx = juce::jlimit(0, lineCount - 1, idx % lineCount);
+    return scale.scaleDegrees[(size_t) lineIdx].representativeWavelengthNm;
 }
 
 float PartialEngine::getScaleLineAmplitude (int idx) const noexcept
@@ -2433,12 +2467,15 @@ float PartialEngine::getScaleLineAmplitude (int idx) const noexcept
     if (! isSpectralMode(mode))
         return 0.0f;
 
-    const auto& scale = atomicScaleResultForMode(mode, atomicScaleMode.load(std::memory_order_relaxed));
+    const auto& scale = atomicScaleResultForMode(atomicScaleCache->sets, mode, atomicScaleMode.load(std::memory_order_relaxed));
     const int lineCount = (int) scale.scaleDegrees.size();
     if (lineCount <= 0)
         return 0.0f;
 
-    return (float) scale.scaleDegrees[(size_t) (idx % lineCount)].velocity;
+    // Guard against negative / overflowing idx: a raw `idx % lineCount` can be
+    // negative for negative idx and index out of bounds. Clamp to the valid range.
+    const int lineIdx = juce::jlimit(0, lineCount - 1, idx % lineCount);
+    return (float) scale.scaleDegrees[(size_t) lineIdx].velocity;
 }
 
 int PartialEngine::getScaleStepMidi (int step) const noexcept
@@ -2447,7 +2484,7 @@ int PartialEngine::getScaleStepMidi (int step) const noexcept
                                   scaleMode.load(std::memory_order_relaxed));
     if (isSpectralMode(mode))
     {
-        const int lineCount = spectralLineCount(mode, atomicScaleMode.load(std::memory_order_relaxed));
+        const int lineCount = spectralLineCount(atomicScaleCache->sets, mode, atomicScaleMode.load(std::memory_order_relaxed));
         if (lineCount <= 0)
             return scaleRootMidi.load(std::memory_order_relaxed);
 
@@ -2506,7 +2543,7 @@ juce::String PartialEngine::getScaleRangeName() const
     if (isSpectralMode(mode))
     {
         const int atomicMode = atomicScaleMode.load(std::memory_order_relaxed);
-        const auto& scale = atomicScaleResultForMode(mode, atomicMode);
+        const auto& scale = atomicScaleResultForMode(atomicScaleCache->sets, mode, atomicMode);
         double lowHz = std::numeric_limits<double>::max();
         double highHz = 0.0;
         for (int i = 0; i < total; ++i)
@@ -2560,7 +2597,7 @@ juce::String PartialEngine::getScaleOneOctaveDebugText() const
     if (isSpectralMode(mode))
     {
         const int atomicMode = atomicScaleMode.load(std::memory_order_relaxed);
-        const auto& scale = atomicScaleResultForMode(mode, atomicMode);
+        const auto& scale = atomicScaleResultForMode(atomicScaleCache->sets, mode, atomicMode);
 
         s << "mode       : " << atomicScaleModeName(atomicMode) << "\n";
         s << "raw lines  : " << (int) scale.rawLines.size()
@@ -2625,14 +2662,14 @@ double PartialEngine::getSpectralElementRootWavelengthNm() const noexcept
 {
     const int element = juce::jlimit(kElementHydrogen, kLastElement,
                                      spectralElement.load(std::memory_order_relaxed));
-    return elementReferenceWavelength(element);
+    return elementReferenceWavelength(atomicScaleCache->sets, element);
 }
 
 int PartialEngine::getSpectralElementLineCount() const noexcept
 {
     const int element = juce::jlimit(kElementHydrogen, kLastElement,
                                      spectralElement.load(std::memory_order_relaxed));
-    return elementLineCount(element);
+    return elementLineCount(atomicScaleCache->sets, element);
 }
 
 int PartialEngine::getActiveGrainCount() const noexcept
@@ -2699,7 +2736,6 @@ void PartialEngine::clearAllVoices()
             v.sourceMode = kEngineSampleLibrary;
             v.playbackMode = kSamplePlaybackDirect;
             v.elementIndex = kElementHelium;
-            v.elementPartials = 0;
             v.elementPhase.fill(0.0f);
         for (auto& g : v.grains)
         {
@@ -2735,6 +2771,8 @@ void PartialEngine::clearAllVoices()
         k.voiceIdx.fill(-1);
     }
     activeVoiceCount.store(0);
+    // Every voice above was set inactive; keep the active-voice index list in sync.
+    clearActiveVoiceList();
 }
 
 void PartialEngine::clearAllSeats()
@@ -3335,6 +3373,62 @@ void PartialEngine::maybeTrigger (int row, int col, int sIdx, float x, bool forc
                        y });
 }
 
+// ---- active-voice index list helpers (audio-thread only) -------------------
+// The list mirrors the voices[].active flags exactly: activeVoiceSlot[i] >= 0
+// iff voices[i].active. It is kept sorted ascending so renderVoices() visits
+// live voices in the same order the old full 0..MAX_VOICES sweep did, keeping
+// audio output byte-for-byte identical. All operations touch only fixed-size
+// arrays (no allocation, no locking).
+
+void PartialEngine::clearActiveVoiceList() noexcept
+{
+    // Reset the whole slot map (not just live entries) so the list is correct
+    // regardless of prior state. Only invoked from reset()/clearAllVoices(),
+    // never from the per-block hot path.
+    activeVoiceSlot.fill(-1);
+    activeVoiceCountRT = 0;
+}
+
+void PartialEngine::addActiveVoice (int idx) noexcept
+{
+    if (idx < 0 || idx >= MAX_VOICES)
+        return;
+    if (activeVoiceSlot[(size_t) idx] >= 0)
+        return; // already present
+
+    // Insert keeping the list sorted ascending.
+    int p = activeVoiceCountRT;
+    while (p > 0 && activeVoiceList[(size_t) (p - 1)] > idx)
+    {
+        const int moved = activeVoiceList[(size_t) (p - 1)];
+        activeVoiceList[(size_t) p] = moved;
+        activeVoiceSlot[(size_t) moved] = p;
+        --p;
+    }
+    activeVoiceList[(size_t) p] = idx;
+    activeVoiceSlot[(size_t) idx] = p;
+    ++activeVoiceCountRT;
+}
+
+void PartialEngine::removeActiveVoice (int idx) noexcept
+{
+    if (idx < 0 || idx >= MAX_VOICES)
+        return;
+    const int p = activeVoiceSlot[(size_t) idx];
+    if (p < 0)
+        return; // not present
+
+    // Shift the (sorted) tail left to close the gap.
+    for (int j = p; j < activeVoiceCountRT - 1; ++j)
+    {
+        const int moved = activeVoiceList[(size_t) (j + 1)];
+        activeVoiceList[(size_t) j] = moved;
+        activeVoiceSlot[(size_t) moved] = j;
+    }
+    activeVoiceSlot[(size_t) idx] = -1;
+    --activeVoiceCountRT;
+}
+
 int PartialEngine::allocateVoice (int row, int col, int midi,
                                   double frequencyHz, float velocityGain,
                                   float detuneCents, float gainScale, float panOffset,
@@ -3369,6 +3463,7 @@ int PartialEngine::allocateVoice (int row, int col, int midi,
 
     auto& v = voices[(size_t) idx];
     v.active    = true;
+    addActiveVoice(idx);
     v.releasing = false;
     v.seatRow   = row;
     v.seatCol   = col;
@@ -3382,8 +3477,6 @@ int PartialEngine::allocateVoice (int row, int col, int midi,
                                   samplePlaybackMode.load(std::memory_order_relaxed));
     v.elementIndex = juce::jlimit(kElementHydrogen, kLastElement,
                                   spectralElement.load(std::memory_order_relaxed));
-    v.elementPartials = juce::jlimit(1, MAX_ELEMENT_PARTIALS,
-                                     elementLineCount(v.elementIndex));
     for (auto& phase : v.elementPhase)
         phase = rngVoice.nextFloat() * kTwoPi;
 
@@ -3484,6 +3577,7 @@ void PartialEngine::freeVoice (int idx)
         }
     }
 	    v.active = false; v.releasing = false;
+	    removeActiveVoice(idx);
 	    v.seatRow = v.seatCol = -1;
 	    v.targetMidi = 60;
 	    v.targetFrequencyHz = midiToHz(60);
@@ -3493,7 +3587,6 @@ void PartialEngine::freeVoice (int idx)
         v.sourceMode = kEngineSampleLibrary;
         v.playbackMode = kSamplePlaybackDirect;
         v.elementIndex = kElementHelium;
-        v.elementPartials = 0;
         v.elementPhase.fill(0.0f);
     for (auto& g : v.grains)
     {
@@ -3639,15 +3732,29 @@ void PartialEngine::renderVoices (float* L, float* R, int n)
     // overlap-add level normalization (Hann avg = 0.5, so 2/N preserves unity at N overlap)
     const float grainNorm      = 2.0f / (float) numGrains;
 
-    for (auto& v : voices)
+    // Iterate only the active voices instead of sweeping all MAX_VOICES. The
+    // active list is sorted ascending, so this visits voices in the exact same
+    // order as the old `for (auto& v : voices)` loop -> identical audio output.
+    // We snapshot the list (stack, fixed size, no allocation) because the loop
+    // body frees finished voices via freeVoice(), which mutates the live list;
+    // iterating a snapshot keeps indices valid for the rest of the block. The
+    // snapshot is taken after releaseExtraUnisonVoices()/trimVoicesToLimit()
+    // above, so it already reflects any voices they freed.
+    std::array<int, MAX_VOICES> renderList;
+    const int renderCount = activeVoiceCountRT;
+    for (int k = 0; k < renderCount; ++k)
+        renderList[(size_t) k] = activeVoiceList[(size_t) k];
+
+    for (int k = 0; k < renderCount; ++k)
     {
+        auto& v = voices[(size_t) renderList[(size_t) k]];
         if (! v.active) continue;
         ++active;
 
         if (v.sourceMode == kEngineElementSynth)
         {
             const int element = juce::jlimit(kElementHydrogen, kLastElement, v.elementIndex);
-            const auto& spectrum = atomicRawResultForElement(element);
+            const auto& spectrum = atomicRawResultForElement(atomicScaleCache->sets, element);
             const int lineCount = (int) spectrum.timbrePartials.size();
             if (lineCount <= 0)
                 continue;
@@ -3657,7 +3764,7 @@ void PartialEngine::renderVoices (float* L, float* R, int n)
                                                      spectralPartialCount.load(std::memory_order_relaxed) - 1);
             const int partials = partialSolo ? 1
                                              : juce::jlimit(1, juce::jmin(lineCount, MAX_ELEMENT_PARTIALS),
-                                                           v.elementPartials);
+                                                           spectralPartialCount.load(std::memory_order_relaxed));
             const float stretch = juce::jlimit(-0.35f, 0.35f, spectralStretch.load(std::memory_order_relaxed));
             const float bright = juce::jlimit(0.0f, 1.0f,
                                               brightness.load() * 0.52f
@@ -3717,7 +3824,17 @@ void PartialEngine::renderVoices (float* L, float* R, int n)
                     const float amp = partialAmps[(size_t) pi];
 
                     float& phase = v.elementPhase[(size_t) partialIndex];
-                    mono += std::sin(phase) * amp;
+                    // Linearly-interpolated sine LUT lookup; phase stays in radians [0, 2*pi).
+                    // Mask the integer index to [0, kSineTableSize-1] (power-of-two table) so a
+                    // float-rounding edge where t rounds up to kSineTableSize (phase ~= 2*pi)
+                    // can never read past the table. idx+1 then stays within the guard slot.
+                    const float t = phase * (float) (kSineTableSize / kTwoPi);
+                    const int   ti = (int) t;
+                    const float frac = t - (float) ti;
+                    const int   idx = ti & (kSineTableSize - 1);
+                    const float s0 = kSineTable[(size_t) idx];
+                    const float s1 = kSineTable[(size_t) idx + 1];
+                    mono += (s0 + frac * (s1 - s0)) * amp;
                     phase += (float) (kTwoPi * partialHz / sampleRate);
                     while (phase >= kTwoPi) phase -= kTwoPi;
                     while (phase < 0.0f) phase += kTwoPi;
@@ -4098,10 +4215,19 @@ void PartialEngine::applyLimiter (float* L, float* R, int n)
     constexpr float attackPer  = 0.35f;    // per-sample attack toward gainTarget when over
     constexpr float releasePer = 0.00006f; // per-sample release toward 1.0
 
+    // A single NaN/Inf (e.g. from a corrupted feedback path) otherwise sticks in
+    // limGain forever, because every comparison against it is false. Sanitize the
+    // gain and each sample so a transient non-finite value cannot kill output.
+    if (! std::isfinite(limGain))
+        limGain = 1.0f;
+
     for (int i = 0; i < n; ++i)
     {
-        const float lN = L[i] * limGain;
-        const float rN = R[i] * limGain;
+        float l = std::isfinite(L[i]) ? L[i] : 0.0f;
+        float r = std::isfinite(R[i]) ? R[i] : 0.0f;
+
+        const float lN = l * limGain;
+        const float rN = r * limGain;
         const float peak = juce::jmax(std::abs(lN), std::abs(rN));
 
         if (peak > ceiling)
@@ -4114,8 +4240,11 @@ void PartialEngine::applyLimiter (float* L, float* R, int n)
             limGain += (1.0f - limGain) * releasePer;
         }
 
-        L[i] = juce::jlimit(-1.0f, 1.0f, L[i] * limGain);
-        R[i] = juce::jlimit(-1.0f, 1.0f, R[i] * limGain);
+        if (! std::isfinite(limGain))
+            limGain = 1.0f;
+
+        L[i] = juce::jlimit(-1.0f, 1.0f, l * limGain);
+        R[i] = juce::jlimit(-1.0f, 1.0f, r * limGain);
     }
 }
 

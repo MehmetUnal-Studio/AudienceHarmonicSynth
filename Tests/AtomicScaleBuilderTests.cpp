@@ -1,7 +1,9 @@
 #include "../Source/AtomicScaleBuilder.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <set>
 #include <string>
 #include <vector>
@@ -193,6 +195,34 @@ int main()
              "scientific scale respects 48 degree default cap");
     r.expect(denseScientific.timbrePartials.size() == denseScientific.rawLines.size(),
              "scientific mode still preserves all timbre partials");
+
+    Builder::Options hostile = performable;
+    hostile.rootHz = std::numeric_limits<double>::infinity();
+    hostile.minSeparationCents = std::numeric_limits<double>::quiet_NaN();
+    auto hostileLines = hydrogenAngstromLines();
+    hostileLines.push_back({ "nan", "nan", std::numeric_limits<double>::quiet_NaN(),
+                             Unit::Nanometer, 1.0 });
+    hostileLines.push_back({ "inf", "inf", std::numeric_limits<double>::infinity(),
+                             Unit::Nanometer, 1.0 });
+    hostileLines.push_back({ "bad-intensity", "bad-intensity", 500.0,
+                             Unit::Nanometer, std::numeric_limits<double>::infinity() });
+    const auto hardened = Builder::buildPlayableAtomicScale(hostileLines, hostile);
+    r.expect(std::abs(hardened.rootHz - 130.8128) < 0.0001,
+             "non-finite root frequency falls back deterministically");
+    r.expect(hardened.rawLines.size() == hydrogen.rawLines.size(),
+             "non-finite wavelengths and intensities are rejected");
+    r.expect(! hardened.scaleDegrees.empty()
+          && std::all_of(hardened.scaleDegrees.begin(), hardened.scaleDegrees.end(), [] (const auto& degree) {
+                 return std::isfinite(degree.cents)
+                     && std::isfinite(degree.frequencyHz)
+                     && std::isfinite(degree.velocity);
+             }),
+             "hostile numeric input never leaks NaN or Inf into scale degrees");
+    r.expect(Builder::normalizedCents(std::numeric_limits<double>::quiet_NaN()) == 0.0,
+             "public cents normalizer handles NaN");
+    r.expect(std::isinf(Builder::circularDistanceCents(
+                 std::numeric_limits<double>::infinity(), 0.0)),
+             "invalid circular-distance input is explicitly unreachable");
 
     return r.result();
 }

@@ -1,351 +1,576 @@
-# Audience Harmonic Synth
+# Cosmic Microwave
 
-Version 1.0.35
+Formerly named **SpektraSynth**.
 
-VST3 + Standalone JUCE instrument driven by an audience's phones. Each
-participant is identified by seat position (row letter + column number). Their
-X/Y touch data triggers and shapes either direct sample playback, granular
-sample playback, or an element spectral synth voice, so a crowd becomes a
-collective harmonic texture.
+Version 2.8.0
 
-## Mapping
+2.8.0 adds an explicit Ensemble **Same Note** articulation choice. **Tie** keeps the
+historical sound by extending ownership when a held source repeats the same pitch.
+**Retrigger** emits a safe Note Off followed by Note On for every admitted Ensemble
+pulse, without enabling MPE or performance controller messages. Flow and Grid always
+use Tie.
 
-OSC into UDP `6060`:
+2.7.1 fixes a Grid admission deadlock: when a fixed-duration MIDI tail ends,
+the matching Grid active slot is now released from renderer feedback, so queued
+sources continue after the first active group. Pending-pressure telemetry is
+saturated safely and can reduce density without closing the queue it must drain.
+
+Cosmic Microwave is a JUCE VST3 and standalone OSC-to-MIDI router for
+audience interaction. It receives already-separated zone streams over UDP, keeps each
+source's single-touch lifecycle intact, maps normalized movement through either tonal or
+element-derived Atomic Scale pitch maps, and sends Notes Only MIDI to Ableton, a
+virtual MIDI endpoint, or a system MIDI device.
+
+Cosmic Microwave 2.8.0 is behaviourally MIDI-only: it does not generate sound. The VST3
+keeps a silent stereo instrument shell, its existing class identity, and its instrument
+placement so Ableton sets made with the earlier product can still resolve the device.
+
+## OSC mapping
+
+Each instance listens on one configured UDP port. The upstream server is responsible
+for separating zones before they reach the plugin; for example:
+
+| Zone | UDP port | Virtual MIDI endpoint |
+|---|---:|---|
+| A | `6062` | `Cosmic Microwave 6062 Out` |
+| B | `6063` | `Cosmic Microwave 6063 Out` |
+| C | `6064` | `Cosmic Microwave 6064 Out` |
+| D | `6065` | `Cosmic Microwave 6065 Out` |
+| E | `6066` | `Cosmic Microwave 6066 Out` |
+| F | `6067` | `Cosmic Microwave 6067 Out` |
+| G | `6068` | `Cosmic Microwave 6068 Out` |
+| H | `6069` | `Cosmic Microwave 6069 Out` |
+
+The port does not define the zone. Set **Expected Zone** to `A..Z` to make a production
+instance reject otherwise-valid messages from every other zone, or leave it at **Any**
+for diagnostics. **Exclusive UDP Port** is enabled in new sessions, so a second plugin
+instance cannot silently subscribe to the same port. A zone-policy change is a routing
+boundary and safely releases held notes before the new filter becomes active.
+
+Production messages are:
 
 ```text
-/cs/<row>/<col>/finger0/on    1          seat activates
-/cs/<row>/<col>/finger0/on    0          seat deactivates
-/cs/<row>/<col>/finger0/off              seat deactivates
-/cs/<row>/<col>/finger0/line  <0..127>   X position, mapped to the selected scale
-/cs/<row>/<col>/finger0/v     <0..1>     Y position, mapped to voice amplitude
+/cs/<zone>/<source>/finger0/u     <0..1>     horizontal position
+/cs/<zone>/<source>/finger0/v     <0..1>     vertical position
+/cs/<zone>/<source>/finger0/on    1          activate touch
+/cs/<zone>/<source>/finger0/on    0          release touch
 ```
 
-Rows are `A..Z`; columns are `0..99`. X is quantized to the selected root,
-scale, and octave range. The default is C major over four octaves. Each trigger creates a three-voice unison layer using the
-closest matching sample from the active library, then pitch-shifts to the target
-MIDI note. Sample libraries default to direct sampler playback; the granular
-engine is selected explicitly from `Sample Playback`.
+Legacy `/off` and `/line 0..127` inputs remain accepted for older patches, but the
+live service sends `u`, `v`, and `on` only.
+
+- Zones are `A..Z`.
+- Source IDs are `0..255`.
+- The live product accepts `finger0` only. Secondary finger tokens are ignored before
+  state and telemetry, matching the one-person/one-touch performance model.
+- OSC `int32` and `float32` arguments are accepted; non-finite values are ignored.
+- `u` and `v` are clamped to `0..1`. Legacy `line` is divided by 127 and clamped.
+- Each source owns one ordered touch/note lifecycle.
+- Production OSC bundles must use the immediate timetag. Dated bundles are ignored so
+  they are never executed early against Ableton's independent musical clock.
+- Repeated movement is reduced to its latest U/V value while ordered On/Off traffic is
+  kept in a separate priority queue. A movement flood therefore cannot trap a note.
+- If an active live touch receives no valid U, V, or On heartbeat for three seconds,
+  Cosmic Microwave publishes an internal ordered Cancel. It immediately releases only
+  that source/finger's scheduled tails; simulator voices are excluded.
+
+### Notes Only performance contract
+
+```text
+U/X -> selected Tonal or Atomic MIDI note
+V/Y -> velocity for the next Note On
+On 1 -> Note On
+On 0 -> end the semantic touch; its already-created MIDI tail keeps its deadline
+```
+
+Note-on velocity is limited to `1..127`.
+Horizontal position is divided into equal regions across the selected root, pitch map,
+and octave range. New sessions default to **Atomic / Zinc / Core**, root C2, and a
+four-octave range.
+
+Normal performance output contains only Note On and Note Off. Cosmic Microwave does
+not generate CC11, CC74, Channel Pressure, Pitch Bend, RPN/MPE setup, or aggregate
+Crowd Macro CCs, and it has no LFO message gate or LFO modulation mode. The only
+controller exception is the explicit panic/safety sweep:
+CC123 and CC120 once on each of the 16 MIDI channels.
+
+### Note Duration
+
+**Note Duration** controls only the generated note length; it never quantizes the
+attack. Choices are `2n`, `4n`, `8n`, `16n`, and `32n`, with fresh instances and
+factory presets using `16n`. Every new Note On snapshots the current host BPM (or the
+saved Internal BPM when host tempo is unavailable), converts the musical value to an
+absolute sample deadline, and retains that deadline through later tempo automation.
+A fixed 4096-entry scheduler advances once per audio block, including silent blocks.
+With **Same Note = Tie**, repeated identical source/channel/note attacks coalesce to one
+ownership token. In Ensemble, **Retrigger** instead hard-releases and restarts that
+source's identical note on every admitted pulse; it does not change Note Duration and
+does not enable MPE. Panic, transport stop, route/zone changes, capacity shrink, and
+watchdog Cancel bypass the musical tail and clean up immediately.
+
+## Crowd Time Field
+
+Cosmic Microwave 2.8.0 can turn an asynchronous crowd into a shared rhythmic field
+without changing source identity or note ownership:
+
+| Mode | Behaviour |
+|---|---|
+| **Flow** | Pass lifecycle and movement through directly, preserving the earlier 2.1 timing behaviour. |
+| **Grid** | Queue attacks to the next selected musical division, with fair selection, an attacks-per-step limit, and an active-voice limit. Ordered Off ends the semantic scheduled voice; an admitted short tap receives the configured minimum gate. An already-started MIDI tail keeps its duration deadline, and completion of its final tail releases the active slot for the next queued source. |
+| **Ensemble** | Place each source in a deterministic lane across the selected spread, apply a fixed semantic gate, and requeue a still-held source for later pulses. **Same Note = Tie** preserves one sounding ownership across identical-pitch pulses; **Retrigger** performs Note Off then Note On on every admitted pulse. Fixed-duration MIDI tails may overlap later pulses. |
+
+New sessions default to **Flow / Host / 1/32** with the **Crowd Governor** in
+**Manual**, a **100% gate**, **16 attacks per step**, **16 active voices**, and a
+**16-step spread**. Flow passes the current lifecycle directly; the timing values are
+already prepared if the operator later selects Grid or Ensemble. Sessions
+saved with schema 6 or earlier open in **Manual**, preserving their established Time
+Field settings. State saved before schema 4 also receives **Flow**, preserving its
+immediate timing rather than silently quantizing an existing performance.
+
+With **Host** selected, a playing host's tempo and PPQ timeline define the grid. If
+that clock is missing or the transport is stopped, the scheduler continues from a
+process-wide monotonic timebase at the Internal BPM. Selecting **Internal** uses that
+common monotonic clock explicitly, so separate instances still share one absolute
+time reference.
+
+Grid and Ensemble retain the latest U/V values and sample them at scheduled attack and
+grid boundaries instead of forwarding every redundant movement packet. Ordered On/Off
+lifecycle events are not packet-round-robined or replaced by movement coalescing. In
+Ensemble, the UDP port supplies a stable lane seed so different zone instances do not
+all place the same source ID on the same tick. A pending short tap remains eligible for
+at least one complete lane cycle. **MERGED** is monitoring only: it counts pending work
+whose admission window elapsed. Held intent is renewed, while a released short tap can
+expire; the figure is not packet loss and does not produce a MIDI CC.
+
+### Adaptive Crowd Governor
+
+The Time Field header has one **Manual / Adaptive** switch. Adaptive measures the
+larger of the currently held source count and the number of unique live sources seen
+in the previous eight seconds, then applies this deterministic policy in Grid and
+Ensemble:
+
+| Observed sources | Attacks / step | Spread / steps | Active voices |
+|---:|---:|---:|---:|
+| 0-8 | 4 | 1 | 8 |
+| 9-24 | 4 | 2 | 10 |
+| 25-64 | 3 | 4 | 12 |
+| 65-128 | 2 | 8 | 14 |
+| 129-256 | 2 | 16 | 16 |
+
+Density rises quickly and falls slowly, with transition holds and hysteresis to prevent
+rapid switching near a band edge. Policy changes are soft: they affect future admission
+only and never cut an existing voice, replace an ordered Off, suppress the three-second
+watchdog, or block Panic. Flow bypasses the policy completely. Switching to Manual
+restores the saved/automated attack, active-limit, and spread values; Adaptive never
+overwrites them.
+
+### Pressure-aware Safety Governor
+
+The v2.5 **Safety Governor** is separate from the musical Adaptive Crowd Governor.
+It watches validated OSC ingress rate, lifecycle-queue pressure, dropped/coalesced
+motion, Time Field pending pressure, external-MIDI FIFO pressure and age, and audio
+callback deadline ratio. It escalates immediately through **NORMAL**, **HIGH**,
+**CRITICAL**, and **EMERGENCY**, then recovers one level at a time with hysteresis and
+holds. Higher states progressively thin redundant motion, lower new-attack and active
+voice ceilings, increase minimum spread, suspend macros, and finally close new attack
+admission. Flow remains direct in NORMAL and adopts those safety ceilings only while
+pressure is elevated. Releases, the watchdog, and Panic remain available. Show Console exposes
+the active state, reason flags, ingress/deadline/FIFO telemetry, and effective limits.
+
+### Global Conductor
+
+Up to 16 Cosmic Microwave instances in the same plugin process can share one of four
+**Global Conductor** groups. Set instances to Leader or Follower; the deterministically
+elected leader publishes a global attack budget (`1..64`) and voice budget (`1..128`)
+at 10 Hz. Each live zone receives a fair, density-weighted quota, with scarce capacity
+rotating deterministically. Groups are isolated. Missing, stale, or incoherent leader
+data fails back to each instance's local Time Field policy after 1.5 seconds; the audio
+thread never waits. `Off` keeps the instance local.
+
+## Pitch systems
+
+**Tonal** provides seven familiar 12-TET maps: Major, Natural Minor, Pentatonic,
+Dorian, Lydian, Harmonic Minor, and Whole Tone.
+
+**Atomic** derives one-octave pitch degrees from 29 stored element emission spectra
+spanning Hydrogen through Zinc (Nitrogen is unavailable in the current dataset). Five
+density modes expose progressively more detail; their maximum degree counts per octave
+are:
+
+| Atomic mode | Maximum degrees |
+|---|---:|
+| Core | 7 |
+| Extended | 12 |
+| Microtonal | 24 |
+| Scientific | 48 |
+| Raw 128 | 128 |
+
+The selected element may contain fewer usable spectral degrees than the mode cap. Root,
+root octave, and the `1..6` octave range transpose and repeat either pitch system.
+Notes Only sends the nearest 12-TET MIDI note for an Atomic target. Exact microtonal
+retuning, when required, belongs downstream in the receiving instrument rather than in
+Cosmic Microwave's performance stream.
+
+## Source-to-channel routing
+
+Notes Only defaults to **Per source 1-16**. Channel ownership is based on source ID,
+not packet order:
+
+```text
+1 -> Ch 1   2 -> Ch 2   ...   16 -> Ch 16   17 -> Ch 1
+0 -> Ch 16
+```
+
+All `u`, `v`, `on`, and `off` messages from one source's `finger0` touch use that
+source's channel. A second **Single channel** mode sends every source through one
+selected channel.
+
+## MIDI destinations
+
+The editor offers:
+
+- **Host MIDI Output** - the VST3 MIDI bus.
+- **Virtual: Cosmic Microwave <port> Out** - a stable endpoint derived from the
+  instance's UDP port.
+- Available system or hardware MIDI outputs.
+
+**MIDI Output Path** decides where generated MIDI is delivered:
+
+- **Host Only** sends only to the DAW bus.
+- **External Only** sends only to the selected virtual/hardware destination and clears
+  the host buffer fail-closed.
+- **Mirror** sends to both paths deliberately.
+
+**External Only** with the port-named virtual endpoint is the 2.8.0 factory performance default and
+the recommended route when an Ableton set needs separate receiving tracks for Channels
+1-16. Route changes are safety boundaries, so held state is released before switching.
+Schema-7-and-earlier sessions migrate to Mirror to preserve their historical dual-output
+behaviour.
+
+## Ableton layout
+
+For each audience zone:
+
+1. Put one Cosmic Microwave instance on its own track.
+2. Recall its **ZONE A..H** factory performance preset, or apply the zone's UDP port and
+   Expected Zone manually.
+3. Confirm **Notes Only** and **Per source 1-16**.
+4. Keep **External Only** and `Virtual: Cosmic Microwave <port> Out`, or use
+   **Host Only** when routing exclusively through Ableton's device output.
+5. On receiving tracks, choose the Cosmic Microwave device for Host Only or that
+   endpoint for External Only, then select the required channel.
+6. Put the sound-producing instruments on those receiving tracks.
+
+Each Cosmic Microwave instance has an independent set of Channels 1-16.
+
+### Source Capacity
+
+Each zone independently selects `64`, `128`, or `256` dense source IDs while keeping
+exactly 16 MIDI channels. This yields 4, 8, or 16 sources per channel. Fresh instances
+and factory presets use `64`; a legacy project with no saved capacity opens at `256`
+to preserve its earlier admission range. IDs outside the selected capacity are
+dropped and counted rather than wrapped or queued. Expansion never remaps an existing
+ID; shrink retires upper IDs deterministically and performs a bounded stuck-note
+cleanup before the remaining canonical sources are rehydrated.
+
+### Two-Omnisphere receiver layout
+
+The production Ableton template keeps Cosmic Microwave's sixteen MIDI channels and
+splits only the downstream receiver workload:
+
+```text
+one zone / one Cosmic Microwave
+  Ch 1..8  -> OMNI1 Multi parts 1..8
+  Ch 9..16 -> OMNI2 Multi parts 1..8
+```
+
+At Source Capacity `64`, each MIDI channel—and therefore each Omnisphere part—serves
+four source identities. Capacity `128` serves eight per part and `256` serves sixteen
+per part. This is still exactly sixteen MIDI channels; it is not 16 Omnisphere
+instances and it does not alter Cosmic Microwave's modulo mapping. Two 8-part receiver
+instances are the intended show-template CPU layout, but actual parallelism and load
+depend on Ableton, the selected patches, effects, audio buffer, and machine. Approve
+the complete multi-zone template only after a real show-machine CPU/dropout soak.
+
+## Editor
+
+The MIDI-only editor is split into **PERFORM** and **SHOW CONSOLE** views and contains:
+
+- a permanent build-derived **v2.8.0** version label in the header;
+- live **SOURCES**, **TOUCHES**, **NOTES**, and **ACTIVE NOTES** metrics;
+- an **OSC INPUT** card with port and validated-traffic status;
+- a source-routing summary with observed zone letters;
+- a simulator with one held mapping-test touch, a server-like pulsing crowd pool,
+  and ephemeral **Human / Dense / Stress** behaviour profiles;
+- a capacity-aware 64/128/256-source **SOURCE MATRIX** grouped into 16 fixed
+  MIDI-channel columns;
+- a **TIME FIELD** card for Flow/Grid/Ensemble timing, host/internal clocking,
+  Manual/Adaptive crowd policy, Ensemble Tie/Retrigger articulation, density limits, gate, spread, and live
+  Pending/Active/Merged telemetry;
+- a Tonal/Atomic pitch system with element and density selection;
+- Notes Only source/channel routing controls;
+- host, virtual, and hardware destination selection;
+- a global **PANIC** control;
+- explicit Host Only / External Only / Mirror routing, Expected Zone, and exclusive
+  UDP ownership controls;
+- a **FACTORY PERFORMANCE PRESET** selector in Show Console > Routing Safety for Zone A-H,
+  including port, zone, timing, pitch, Notes Only, and Conductor recall;
+- Safety Governor state, reasons, and pressure telemetry;
+- an eight-point Venue Preflight checklist for receiver, zone contract, UDP ownership,
+  MIDI route, safety, Time Field, Global Conductor, and Source Quality readiness;
+- process-local Global Conductor role/group/budget and live-quota controls; and
+- a visible Notes Only policy summary for operator verification.
+
+Show Console also displays commands for the external Capture/Replay Chaos Lab. The Lab
+is a separate Node.js rehearsal tool; it is not embedded in the plugin and performs no
+filesystem or network capture from the audio callback.
+
+### 64-Source Quality Controller and Ready Gate
+
+Show Console's **START 64 CHECK** begins a fresh runtime-only census for the selected
+Source Capacity (`64`, `128`, or `256`). Existing projects and presets open in
+**BYPASS**, so this feature never silently mutes an older session. While the check is
+WARMING, only new attacks wait in the existing Time Field scheduler; Note Off,
+watchdog Cancel, Panic, and notes that are already sounding remain release-safe.
+
+For the default 64-source show domain, every accepted live OSC identity `0..63` must
+send finite U, V, and On-1 evidence after START, remain actively held, and keep both U
+and V heartbeats fresh throughout one clean two-second pre-ready hold. U and V freshness
+is measured separately: neither axis can conceal a stale partner. The receiver allows
+up to 1.2 seconds of heartbeat age as a transport/jitter tolerance, while the server
+contract remains stricter and requires each held source to publish both axes with no
+gap longer than 900 ms.
+
+The clean hold also requires combined U/V motion at or below 50 events/s for every
+source and at or below 1,200 events/s for the whole instance. Capacity drops, motion
+drops, and lifecycle drops are counted separately. A capacity or lifecycle drop is a
+hard latched fault until a fresh check; a motion drop prevents the current clean pass
+and remains separately visible. Soft degradation after READY does not cut a running
+performance.
+
+Internal simulator population must be zero before the check can pass; simulator calls
+are deliberately excluded from evidence. This is a local Cosmic Microwave **signal
+census**, not proof of 64 connected browser sockets and not a complete venue sign-off.
+Server owner/roster health, collision counts, the frozen bridge route manifest, and a
+separate 60-second production-path soak with average/P95 traffic evidence must still
+pass independently.
+
+## Flagship parameters
+
+| Parameter | Choices/range | Default |
+|---|---|---|
+| MIDI Format | Off, Notes Only | Notes Only |
+| MIDI Output Path | Host Only, External Only, Mirror | External Only |
+| Expected OSC Zone | Any, A..Z | A |
+| Exclusive UDP Port | Off, On | On |
+| Safety Governor | Off, On | Off |
+| Notes Only Routing | Single Channel, Per Source 1-16 | Per Source 1-16 |
+| Fixed MIDI Channel | 1..16 | 1 |
+| Time Field Mode | Flow, Grid, Ensemble | Flow |
+| Time Field Clock | Host, Internal | Host |
+| Internal BPM | 40..240 BPM | 120 BPM |
+| Grid Division | 1/4, 1/8, 1/16, 1/32 | 1/32 |
+| Attacks Per Step | 1..16 | 16 |
+| Maximum Active Voices | 1..16 | 16 |
+| Gate Length | 5..100% | 100% |
+| Temporal Spread | 1, 2, 4, 8, 16 steps | 16 steps |
+| Adaptive Crowd Governor | Manual, Adaptive | Manual |
+| Note Duration | 2n, 4n, 8n, 16n, 32n | 16n |
+| Ensemble Same Note | Tie, Retrigger | Tie |
+| Source Capacity | 64 (4/ch), 128 (8/ch), 256 (16/ch) | 64 (4/ch) |
+| Global Conductor Role | Off, Leader, Follower | Leader |
+| Global Conductor Group | 1..4 | 1 |
+| Global Attack Budget | 1..64 | 16 |
+| Global Voice Budget | 1..128 | 16 |
+| Pitch System | Tonal, Atomic | Atomic |
+| Root | C..B | C |
+| Root Octave | 0..6 | 2 |
+| Scale | Major, Natural Minor, Pentatonic, Dorian, Lydian, Harmonic Minor, Whole Tone | Major |
+| Atomic Element | 29 elements, Hydrogen through Zinc | Zinc |
+| Atomic Scale Mode | Core, Extended, Microtonal, Scientific, Raw 128 | Core |
+| Octave Range | 1..6 | 4 |
+
+The factory route family begins at UDP `6062` / Zone A and ends at UDP `6069` /
+Zone H, with a matching port-named virtual endpoint on each route. A fresh instance
+retains the lowest free member of that family before publishing the route. The UDP
+port, selected MIDI destination,
+safety/routing policy, conductor settings, and macro mapping are also saved with plugin
+state. Incoming host MIDI is passed through
+unchanged whenever MIDI output is enabled and the selected output path includes the
+host.
+
+### Factory performance presets
+
+Show Console > Routing Safety contains eight complete factory recalls:
+
+| Preset | UDP | Expected Zone | Conductor role |
+|---|---:|---|---|
+| Zone A | 6062 | A | Leader |
+| Zone B | 6063 | B | Follower |
+| Zone C | 6064 | C | Follower |
+| Zone D | 6065 | D | Follower |
+| Zone E | 6066 | E | Follower |
+| Zone F | 6067 | F | Follower |
+| Zone G | 6068 | G | Follower |
+| Zone H | 6069 | H | Follower |
+
+Every recall applies the full factory performance baseline shown above: Notes Only,
+Per source 1-16, External Only and the matching port-named virtual endpoint, Flow /
+Host / 1/32, Note Duration 16n, Ensemble Same Note Tie, Source Capacity 64 (4/channel),
+Manual 16/16/100%/16, Atomic / Zinc / Core / C2 / four octaves,
+exclusive UDP ownership, Group 1 with 16/16 budgets, Safety Governor Off, and Crowd
+Macros Off. Recall is an explicit routing boundary: it sends Panic, clears ephemeral
+simulator/live cards, returns the simulator profile to Human, and then binds the new
+route. Enabling the Safety Governor after recall is an intentional show-readiness step;
+Venue Preflight reports its factory-Off state until the operator enables it.
+
+The preset selector is not a replacement for host state. A saved Ableton set or other
+host state restores its own parameter, port, and destination values and remains
+authoritative, even when that state is `CUSTOM`. Direct route edits and preset recalls
+also disable fresh auto-assignment and apply exactly. Factory values apply automatically
+only while a genuinely fresh instance claims its lowest free A-H route, or through an
+explicit preset recall. A partial/legacy blob is healed with its schema-specific
+compatibility defaults; only missing root UDP/destination metadata falls back to the
+Zone A `6062` virtual route.
+
+## Capture/Replay Chaos Lab
+
+`tools/cosmic-chaos-lab.mjs` is an external, dependency-free Node.js CLI for bounded
+UDP proxy/capture, deterministic replay (`0.25x..16x`), production-OSC generation, and
+seeded drop/duplicate/reorder/jitter/burst-loss rehearsal. Captures are newline-delimited
+JSON with the original datagram preserved as base64. Lifecycle packets have priority
+over coalescible motion in bounded queues. See [docs/chaos-lab.md](docs/chaos-lab.md).
 
 ## Build
+
+Requirements: CMake 3.22+, a C++17 toolchain, and internet access for the first
+configure. JUCE 8.0.4 is fetched with CMake `FetchContent`. Node.js 20+ is recommended
+for the external Chaos Lab; when Node is present, its regression suite joins CTest.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release -j
+ctest --test-dir build --output-on-failure
 ```
 
-The first configure downloads JUCE 8.0.4 via FetchContent. Release outputs:
+Flagship release outputs:
 
-- VST3: `build/AudienceHarmonicSynth_artefacts/Release/VST3/Audience Harmonic Synth.vst3`
-- Standalone: `build/AudienceHarmonicSynth_artefacts/Release/Standalone/Audience Harmonic Synth.app`
+- VST3: `build/AudienceHarmonicSynth_artefacts/Release/VST3/Cosmic Microwave.vst3`
+- Standalone: `build/AudienceHarmonicSynth_artefacts/Release/Standalone/Cosmic Microwave.app`
 
-The build copies `Samples/` into each bundle's `Contents/Resources/Samples`
-folder. During development, the plugin can also load the source-tree `Samples/`
-folder directly.
+On macOS, `AUDIENCE_SYNTH_AUTO_INSTALL` defaults to `ON` and copies plugin targets to
+the user VST3 folder. Configure with `-DAUDIENCE_SYNTH_AUTO_INSTALL=OFF` to build
+without installing. `AUDIENCE_SYNTH_BUILD_TESTS` controls the test targets and defaults
+to `ON`.
 
-## Parameters
+## Products
 
-| Parameter | Range | Default | What it does |
-|---|---:|---:|---|
-| Pitch | -12..12 semitones | 0 | Global transpose |
-| Layer Mix | 0..1 | 0.7 | Per-seat voice amplitude scale |
-| Attack | 10..3000 ms | 800 | Voice fade-in time |
-| Release | 100..6000 ms | 2500 | Voice release time |
-| Brightness | 0..1 | 0.6 | Low-pass response from X position |
-| Movement (Grain) | 0..1 | 0.45 | Grain density, length, and spread |
-| Grain Size | 40..800 ms | 260 | Base grain length before sound-mode shaping |
-| Grain Density | 0..1 | 0.55 | Simultaneous grain overlap per active voice |
-| Pitch Spread | 0..12 semitones | 0 | Scale-quantized pitch drift for grains |
-| Position Jitter | 0..1 | 0.35 | Random start offset around the voice playhead |
-| Stereo Spread | 0..1 | 0.45 | Random per-grain stereo placement |
-| Grain Envelope | 4 choices | Hann | Grain window shape: Hann, Triangle, Soft Gate, or Pulse |
-| Reverse Grains | on/off | off | Allows spawned grains to run backwards |
-| Freeze | on/off | off | Holds active grain clouds and freezes the reverb tail |
-| Engine Source | 2 choices | Sample Library | Chooses Sample Library or Element Spectral Synth |
-| Sample Playback | 2 choices | Sample Player | For Sample Library: direct sampler playback or Granular |
-| Reverb | 0..1 | 0.35 | Global reverb send |
-| Delay | 0..1 | 0.25 | Cross-feedback delay amount |
-| Wet Dry | 0..1 | 0.85 | Dry grain voice vs wet FX return balance |
-| Tape Drive | 0..1 | 0 | Soft tape-style saturation before the limiter |
-| Master | 0..1 | 0.7 | Output gain before limiter |
-| Energy | 0..1 | 0.5 | Macro for level, attack response, and trigger density |
-| Motion | 0..1 | 0.5 | Macro for grain spread and per-voice movement |
-| Tone | 0..1 | 0.5 | Macro for filter and ambience brightness |
-| Space | 0..1 | 0.5 | Macro for reverb and delay depth |
-| Root | C..B | C | Root note for X-axis quantization |
-| Scale | 7 choices | Major | Scale map for audience movement |
-| Octaves | 1..6 | 4 | X-axis note range |
-| Signature Mode | 5 choices | Choir Cloud | Engine personality: Choir Cloud, Glass Harmonics, Sub Swarm, Spectral Rain, or Frozen Hall |
-| Audio MIDI Output Mode | 3 choices | Audio Only | Renders internal audio only, MIDI only, or audio plus outgoing MIDI |
-| MIDI Output Type | 3 choices | Off | Sends no MIDI, normal MIDI notes, or MPE per-note pitch-bend output |
-| Normal MIDI Channel | 1..16 | 1 | Channel used when MIDI Output Type is Normal MIDI |
-| MPE Pitch Bend Range | 4 choices | 48 st | Pitch-bend range for MPE member channels; the receiving synth must match |
-| MPE Send Setup | on/off | on | Sends MPE lower-zone and bend-range RPN setup messages when needed |
-| MPE Pitch Mode | 2 choices | Retrigger | Retrigger degree changes or glide by updating per-note pitch bend when possible |
+The CMake project contains four MIDI-oriented products:
 
-## Performance UI
+| Product | Formats | Purpose |
+|---|---|---|
+| **Cosmic Microwave** | VST3 + Standalone | Flagship single-touch OSC-to-Notes-Only MIDI router documented here. |
+| **Cosmic Microwave MIDI** | VST3 + Standalone | MIDI-effect audience generator with scale processing. |
+| **Cosmic Microwave MIDI Generator** | VST3 | Ableton-focused MIDI-effect variant with scale correction/remapping. |
+| **Cosmic Microwave MIDI Device** | Standalone | Lightweight UDP-to-MIDI application. |
 
-Version 1.0.5 redesigns the editor around a compact DAW-friendly layout:
-always-visible top status bar, narrow library rail, audience map + musical
-scale strip, and dense lower control bands for macros, texture, voices, network,
-and simulator controls. It keeps the five signature sound modes and four macro controls
-(`Energy`, `Motion`, `Tone`, `Space`), root/scale/range controls, `Mute`, and
-`Panic`. The texture and voice panels now expose wet/dry, tape drive, freeze,
-reverse grains, grain size, density, pitch spread, position jitter, stereo
-spread, and grain envelope shape. The `Performance` toggle opens a large stage-readable overlay with
-OSC state, active seats, active voices, current library, scale range, and
-dominant note. The library rail includes search, rescan, cached sample counts,
-and active-library status.
-
-## Sample Libraries
-
-Libraries live as subfolders under `Samples/`. Files are scanned from the
-selected subfolder and may be `.wav`, `.aif`, `.aiff`, or `.flac`.
-
-Sample root notes are parsed from filenames, for example:
+## Runtime architecture
 
 ```text
-C2.wav
-F#3.wav
-Bb4.wav
+already-separated OSC zone / simulator
+  -> OscBridge validation + expected-zone filter + exclusive ownership
+  -> MidiAudienceModel (256 sources x one admitted live touch)
+  -> OscFingerRouter fixed-capacity event queue
+  -> PressureAwareSafetyGovernor (traffic/deadline/FIFO protection)
+  -> AdaptiveCrowdGovernor (soft Grid/Ensemble admission policy)
+  -> CrowdTimeField
+       -> Flow: direct lifecycle/motion
+       -> Grid: clocked attack queue
+       -> Ensemble: port-seeded temporal lanes
+  -> pitch lookup
+       -> MidiPitchMap (7 tonal 12-TET maps)
+       -> AtomicScaleMap (29 elements x 5 density modes)
+  -> MpeMidiOutput
+       -> Notes Only: fixed channel or stable source -> Ch 1..16
+  -> explicit Host Only / External Only / Mirror output policy
+       -> host MIDI bus
+       -> port-derived virtual or hardware MIDI destination
+
+up to 16 in-process instances
+  <-> GlobalConductorHub group (10 Hz density-weighted attack/voice quotas)
+
+external rehearsal process
+  -> tools/cosmic-chaos-lab.mjs proxy / capture / replay / generate
+
+host MIDI input -> Note On/Off-only thru when output is enabled, then routed by the
+                   same Host Only / External Only / Mirror policy
+stereo instrument output -> silent compatibility shell
 ```
 
-At load time the library trims trailing silence in memory and keeps a short
-fade-out tail. The Python tools can also prepare files on disk:
+The OSC callback validates bounded source/touch data before enqueueing it. The realtime
+path uses preallocated event and MIDI storage. Lifecycle and motion have independent
+bounded queues; motion keeps only the latest value for each axis and lifecycle always
+drains first. UI monitoring reads lightweight source snapshots rather than the network
+receiver directly.
 
-```sh
-python3 trim_silence.py "Samples/Piano Dream"
-python3 split_voice.py Sources/HumanVoices/HumanVoice.wav Samples/HumanLive C1 D1 E1 F1 G1 A1 B1
-```
+## Upgrade note
 
-## Simulator
+The renamed VST3 intentionally keeps SpektraSynth's manufacturer/plugin codes and
+bundle identity for existing session lookup. Do not keep `SpektraSynth.vst3` and
+`Cosmic Microwave.vst3` together in the scanned VST3 directory: they identify the
+same plugin class. Back up the old bundle outside the plugin folder, install Cosmic
+Microwave, and rescan the host.
 
-The editor includes a fake audience for testing without UDP traffic:
+Every fresh 2.8.0 instance atomically claims the lowest free complete factory route:
+`6062 / Zone A / Group 1 Leader`, then `6063..6069 / Zone B..H / Group 1 Follower`,
+with the matching port-named virtual MIDI endpoint. The retained exclusive OSC bind is
+the claim; a UDP number is never selected speculatively. All other fresh performance
+defaults remain External Only, Notes Only / Per source 1-16, Flow / Host / 1/32,
+Manual 16/16/100%/16, Atomic / Zinc / Core at C2 over four octaves, and 16/16
+Conductor budgets. Safety Governor is deliberately Off so readiness is an explicit
+operator decision; Crowd Expression controller output remains retired and forced off.
 
-- Add Participant
-- +25 Crowd
-- Remove Participant
-- Random Movement
-- Clear All
+If every A-H route is occupied, the fresh instance fails closed: it opens no OSC
+receiver, no virtual MIDI endpoint, and no Global Conductor registration. It does not
+silently wrap, share a port, or keep rescanning. After a route is released, use
+**RETRY AUTO** in Show Console > Routing Safety.
 
-## Architecture
+Factory performance presets for Zones A-H and direct UDP/zone/destination edits are
+explicit operator choices and always win exactly. Loading an existing Ableton set does
+not auto-assign over its saved state; complete host-restored state remains authoritative
+and stays on its exact saved route even when that route is currently busy, in which
+case it fails closed there instead of shifting zones. Partial legacy state uses
+schema-specific compatibility defaults; missing root UDP/destination metadata alone
+uses the Zone A `6062` virtual route.
 
-```text
-UDP / OSC / Simulator / UI Keyboard / MIDI Keyboard
-  -> OscBridge
-  -> PartialEngine lock-free event queue
-  -> voice allocation
-  -> shared pitch resolver
-       -> Normal Scale
-       -> Element Spectral Scale
-  -> Engine Source
-       -> Sample Library
-            -> Sample Playback
-                 -> Direct Sample Player
-                 -> Granular Sample Engine
-       -> Element Spectral Synth
-  -> signature mode, reverb, delay, tape saturation, limiter
-  -> audio output
+Existing state from schema 7 or earlier receives Mirror output, shared-port behaviour,
+and the Safety Governor disabled so an upgrade cannot silently change its routing or
+admission behaviour. Existing state from schema 6 or earlier receives Manual Crowd
+Governor mode, preserving its saved attack, active-limit, and spread behaviour. State
+from schema 3 or earlier additionally receives Flow timing. Schema-5 input remains
+compatible; schema 6 discarded its retired experimental fields. Schema 9 migrates
+former MPE output to Notes Only / Per source 1-16 and forces legacy Crowd Macro output
+off. Schema 10 adds Note Duration and Source Capacity: missing duration becomes 16n,
+fresh state defaults to 64 sources, and legacy state without a capacity value retains
+the former 256-source range.
+Schema 11 adds Ensemble Same Note. Missing or hostile values safely become **Tie**, so
+older sessions retain their established articulation. Current saves are stamped as
+schema 11. The historical schema-9 migration remains a
+separate step: it is still responsible for converting former MPE output to Notes Only
+and retiring Crowd Macro emission.
+Existing schema-2 MIDI-only sessions still
+migrate explicitly to Tonal so they keep their previous pitch-map intent.
+Released 1.x sessions that selected an element spectrum migrate to Atomic and recover
+the corresponding element; their stable `spectralElement` and `atomicScaleMode`
+parameter values are retained.
 
-Parallel MIDI path:
-  -> shared pitch resolver
-  -> MIDI Output Type
-       -> Normal MIDI: nearest MIDI note on one channel
-       -> MPE MIDI: nearest MIDI note + per-note pitch bend on member channels
-  -> host MIDI output
-```
+Repositories upgraded from pre-2.0 versions may still contain old media, preparation
+tools, or implementation files. The `AudienceHarmonicSynth` 2.8.0 target does not load
+or compile them; `CMakeLists.txt` is the authoritative runtime source list.
 
-The OSC callback only validates and enqueues seat events. The audio thread
-drains those events, updates voices, renders the selected sample/spectral path
-when audio is enabled, generates outgoing MIDI/MPE when MIDI is enabled, and
-publishes lightweight UI readouts for the editor visualizer.
+## Manual
 
-## Element Spectral Scale Clustering
-
-Element Spectral Synth keeps two related but separate representations of each
-atomic spectrum:
-
-- Raw/timbre spectrum: every positive-intensity emission line is preserved as
-  an additive timbre partial. Zero-intensity catalogue placeholders remain in
-  the source dataset but are not treated as playable or audible spectral lines.
-- Playable scale: nearby spectral lines can be clustered into a smaller set of
-  playable scale degrees.
-
-This means dense elements can become playable without deleting the physical
-spectral fingerprint. The full raw spectrum remains available to the timbre
-engine, while the scale view exposes a musically useful subset.
-
-The element source data is copied from the Max/Cosmic Unity `data/*.txt`
-datasets into this repository's `data/` folder. The plugin does not read those
-text files from the audio thread. Instead, run:
-
-```sh
-python3 tools/generate_element_spectral_data.py
-```
-
-to regenerate `Source/ElementSpectralData.cpp` and
-`Source/ElementSpectralData.h`. The generated C++ table is compiled into the
-plugin and then prewarmed by `PartialEngine::prepare`, so runtime spectral
-mapping remains realtime-safe.
-
-For each element, the longest positive-intensity wavelength is the spectral
-reference and maps to the played root:
-
-```text
-ratio_i = lambda_ref / lambda_i
-cents_i = 1200 * log2(ratio_i)
-cents_i = cents_i mod 1200
-```
-
-Pitch distance is measured in circular octave space, because `0 ct` and
-`1200 ct` are the same pitch class:
-
-```text
-distance(a, b) = min(abs(a - b), 1200 - abs(a - b))
-```
-
-The builder first keeps the root line, then sorts the remaining lines by
-log-compressed salience. A candidate line becomes a new scale degree only if it
-is far enough from all selected degrees. Otherwise, it is later assigned to the
-nearest selected degree as part of that degree's cluster.
-
-Default scale-reduction modes:
-
-| Atomic Scale Mode | Max degrees | Minimum separation | Use case |
-|---|---:|---:|---|
-| Core | 7 | 80 ct | sparse melodic performance |
-| Extended | 12 | 40 ct | default playable atomic scale |
-| Microtonal | 24 | 20 ct | denser microtonal performance |
-| Scientific | 48 | 10 ct | high-detail inspection |
-| Raw | unlimited | 0 ct | one degree per raw line |
-
-Every raw line is assigned to exactly one scale-degree cluster. Each cluster
-stores:
-
-- representative wavelength
-- representative cents and frequency
-- total and maximum intensity
-- cluster density
-- cluster spread in cents
-- source line IDs back to the raw dataset
-
-The representative pitch defaults to a medoid: a real source line inside the
-cluster with the smallest weighted circular distance to the other clustered
-lines. This avoids inventing artificial average pitches while still choosing a
-central, musically stable representative. The root cluster is special: the
-longest wavelength always remains fixed at `0 ct`.
-
-Timbre partials are not reduced:
-
-```text
-timbre_ratio_i = lambda_ref / lambda_i
-timbre_amp_i   = intensity_i / max_intensity
-partial_freq_i = played_root_hz * timbre_ratio_i
-```
-
-Scale-degree velocity is derived from cluster total intensity, but this is only
-used for scale weighting and display. It does not replace the raw partial
-amplitudes used by the timbre engine.
-
-In short:
-
-```text
-source data     -> original catalogue rows, including silent placeholders
-raw spectrum    -> positive-intensity emission lines
-timbre partials -> all positive lines preserved for additive tone color
-playable scale  -> clustered representative degrees for performance
-```
-
-## MIDI Scale Module
-
-The Ableton-focused `Audience MIDI Generator` target includes a Scale MIDI
-module before MIDI is sent to the host/external output. When enabled, note
-events are locked to a selected root, scale type, and correction mode while
-velocity, timing, channel, CC, pitch bend, aftertouch, and other non-note data
-pass through unchanged.
-
-Scale controls:
-
-- Scale On
-- Root: C through B
-- Scale Type: Major, Natural Minor, Harmonic Minor, Melodic Minor, Major
-  Pentatonic, Minor Pentatonic, Blues, Dorian, Phrygian, Lydian, Mixolydian,
-  Locrian, Chromatic, Custom
-- Correction: Nearest, Up, Down
-- Pitch-class remap matrix: each input pitch class can be redirected to any
-  output pitch class after scale correction and before transpose
-
-Note-on mappings are stored per original note and MIDI channel, so note-offs
-return to the exact remapped output note and avoid stuck notes. The Custom
-scale data model is saved as a 12-bit mask parameter and can be edited from the
-pitch-class pad strip. Version 1.0.17 also ports the Ableton-style prototype UI
-into JUCE with the audience venue, note pulse, crowd controls, Scale editor,
-I/O card, range card, and dual activity logs. Version 1.0.18 makes the activity
-logs collapsible by default, keeps octave/range controls visible in DAW-sized
-windows, and shows note names with octaves in the outgoing MIDI debug stream.
-Version 1.0.19 adds a Scale Keyboard strip to the audio synth: on-screen keys
-and the computer keyboard trigger the currently selected scale/spectral steps
-directly without registering them as audience seats. Version 1.0.20 adds the
-Element Spectral Synth engine: atomic element datasets can be rendered as
-an additive partial bank, with the longest wavelength mapped to the played root
-and relative intensity normalized as each line's amplitude. In this mode the
-instrument no longer needs a sample library for tone generation; audience X/Y,
-root, scale, range, macros, FX, and the keyboard strip continue to drive it.
-Version 1.0.21 keeps timbre and scale separate: every raw spectral line
-remains available as an additive timbre partial, while the playable atomic
-scale can be reduced into Core, Extended, Microtonal, Scientific, or Raw degree
-sets. Core favors a sparse 7-degree musical scale, Extended keeps up to 12
-performable degrees, Microtonal and Scientific preserve progressively denser
-pitch detail, and Raw exposes every spectral line as pitch material. Reduced
-scale degrees keep traceable clusters back to the original lines, so dense
-elements become playable without deleting spectral data. Version 1.0.22 adds
-Partial Solo auditioning: the full atomic timbre remains the default, but the
-PARTIAL control can isolate one raw spectral line at a time so individual
-frequencies can be heard directly.
-Version 1.0.23 adds the next two periodic elements, Lithium and Beryllium, to
-both the Element Spectral Synth and the playable spectral-scale list.
-Version 1.0.24 adds the next five available element datasets in formation/order
-sequence: Boron, Carbon, Oxygen, Fluorine, and Neon. The source data folder does
-not currently include Nitrogen, so it is intentionally left out until a matching
-`N.txt` spectral dataset is available.
-Version 1.0.25 separates Sample Library from Sample Playback: sample libraries
-now default to Kontakt-style direct sample playback, while the existing granular
-engine remains available behind the `Granular` playback mode.
-Version 1.0.26 lets incoming MIDI notes play the same Scale Keyboard path as the
-on-screen/computer keyboard: the current root MIDI note triggers scale step 1
-and successive MIDI keys walk upward through the displayed scale/spectral steps.
-Spectral keyboard keys also show stronger emission lines with brighter strength
-bars, while Partial Solo auditions every raw line at equal loudness.
-Version 1.0.27 adds MIDI/MPE output to the main audio instrument without
-replacing the internal engine. Output can now be Audio Only, MIDI Only, or
-Audio + MIDI. Normal MIDI emits nearest scale notes, while MPE uses member
-channels with per-note pitch bend so Element/Atomic spectral cents are preserved
-for compatible receiving synths.
-Version 1.0.28 improves the performance debug overlay by moving outgoing
-MIDI/MPE monitoring into the upper console area and active-seat diagnostics into
-the wider lower pane. It also reduces duplicate MPE retrigger spam by treating
-same-source, same-note, same-bend Note On events as expression updates instead
-of forcing a Note Off / Note On cycle.
-Version 1.0.29 improves external MIDI keyboard input: notes that fall outside
-the scale-degree keyboard range now fall back to the nearest displayed
-scale/spectral step instead of being ignored. This makes compact atomic scales,
-such as Hydrogen Core, playable from normal MIDI keyboards even when a pressed
-key is beyond the current degree count.
-Version 1.0.30 improves spectral MIDI keyboard playability and polyphony. In
-Element/Atomic Spectral Scale mode, incoming external MIDI notes are mapped onto
-the same one-octave scale keyboard degrees shown in the UI, so compact scales
-such as Lithium can be played from a normal C1-C2 keyboard octave without
-collapsing held notes into a single nearest pitch.
-Version 1.0.31 adds the next five available spectral elements after Neon:
-Sodium, Magnesium, Aluminium, Silicon, and Phosphorus. Nitrogen remains omitted
-until a matching local `N.txt` dataset is available.
-Version 1.0.32 adds the next five available spectral elements after Phosphorus:
-Sulfur, Chlorine, Argon, Potassium, and Calcium.
-Version 1.0.33 adds the next five available spectral elements after Calcium:
-Scandium, Titanium, Vanadium, Chromium, and Manganese.
-Version 1.0.34 adds the next five available spectral elements after Manganese:
-Iron, Cobalt, Nickel, Copper, and Zinc.
-Version 1.0.35 publishes the Elemental Spektra UI/review pass: spectral line
-activity now drives synchronized Wavelength Wheel and Scale Keyboard
-highlighting from active voice snapshots, element spectra can be browsed from
-the left library rail, and the Max-derived spectral data/generator remain
-tracked for reproducible element tables.
+Start with [docs/manual/README.md](docs/manual/README.md). The most useful chapters for
+a live setup are the [UI guide](docs/manual/02-ui-guide.md),
+[MIDI output setup](docs/manual/03-midi-output-setup.md), and
+[OSC/Ableton routing guide](docs/manual/04-osc-audience.md).

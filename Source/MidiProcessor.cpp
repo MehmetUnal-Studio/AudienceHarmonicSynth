@@ -535,7 +535,7 @@ juce::StringArray AudienceMidiProcessor::getMidiOutputOptions() const
 {
     juce::StringArray options;
     options.add("Host MIDI Output");
-    options.add("Virtual: Audience MIDI Generator Out");
+    options.add("Virtual: Cosmic Microwave MIDI Generator Out");
 
     for (const auto& device : juce::MidiOutput::getAvailableDevices())
         options.add(device.name);
@@ -564,8 +564,8 @@ void AudienceMidiProcessor::setMidiOutputOptionIndex (int index)
     if (midiOutputOptionIndex.load(std::memory_order_relaxed) == 1)
     {
         const juce::String portName = instanceId <= 1
-            ? "Audience MIDI Generator Out"
-            : "Audience MIDI Generator Out " + juce::String(instanceId);
+            ? "Cosmic Microwave MIDI Generator Out"
+            : "Cosmic Microwave MIDI Generator Out " + juce::String(instanceId);
 
         midiOutput = juce::MidiOutput::createNewDevice(portName);
         if (midiOutput != nullptr)

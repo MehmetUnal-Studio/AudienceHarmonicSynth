@@ -1,17 +1,25 @@
 cmake_minimum_required(VERSION 3.22)
-project(AudienceHarmonicSynth VERSION 1.0.35 LANGUAGES C CXX)
+
+# This must be initialised before project(). Otherwise CMake creates an empty
+# cache entry during compiler detection and the native SDK version silently
+# becomes the plug-in's minimum supported macOS version.
+if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET STREQUAL "")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment target" FORCE)
+endif()
+
+project(AudienceHarmonicSynth VERSION 2.8.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "macOS deployment target")
 
 set(AUDIENCE_HARMONIC_SYNTH_VERSION "${PROJECT_VERSION}")
 set(AUDIENCE_HARMONIC_SYNTH_FORMATS VST3 Standalone)
 set(AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_INPUT TRUE)
 set(AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_OUTPUT TRUE)
+option(AUDIENCE_SYNTH_AUTO_INSTALL "Auto-install plug-ins to the user VST3 folder after build (macOS dev convenience)" ON)
 
 if(ANDROID)
-    set(AUDIENCE_HARMONIC_SYNTH_VERSION "1.0.1")
+    set(AUDIENCE_HARMONIC_SYNTH_VERSION "${PROJECT_VERSION}")
     set(AUDIENCE_HARMONIC_SYNTH_FORMATS Standalone)
     set(AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_INPUT FALSE)
     set(AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_OUTPUT FALSE)
@@ -29,18 +37,20 @@ FetchContent_MakeAvailable(JUCE)
 
 juce_add_plugin(AudienceHarmonicSynth
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audienceharmonicsynth"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynth"
     VERSION                     "${AUDIENCE_HARMONIC_SYNTH_VERSION}"
     IS_SYNTH                    TRUE
     NEEDS_MIDI_INPUT            ${AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_INPUT}
     NEEDS_MIDI_OUTPUT           ${AUDIENCE_HARMONIC_SYNTH_NEEDS_MIDI_OUTPUT}
     IS_MIDI_EFFECT              FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    COPY_PLUGIN_AFTER_BUILD     TRUE
+    # The explicit install step below removes legacy same-CID bundle names
+    # before copying the one canonical Cosmic Microwave bundle.
+    COPY_PLUGIN_AFTER_BUILD     FALSE
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Ahss
     FORMATS                     ${AUDIENCE_HARMONIC_SYNTH_FORMATS}
-    PRODUCT_NAME                "Audience Harmonic Synth"
+    PRODUCT_NAME                "Cosmic Microwave"
 )
 
 juce_generate_juce_header(AudienceHarmonicSynth)
@@ -56,31 +66,38 @@ endif()
 
 target_sources(AudienceHarmonicSynth PRIVATE
     Source/PluginProcessor.cpp
+    Source/PluginStateMigration.cpp
+    Source/MpeMidiOutput.cpp
     Source/PluginEditor.cpp
-    Source/AuroraComponent.cpp
-    Source/LibraryRail.cpp
-    Source/DebugPanel.cpp
-    Source/AtomicScaleBuilder.cpp
-    Source/ElementSpectralData.cpp
-    Source/PartialEngine.cpp
-    Source/SampleLibrary.cpp
+    Source/AdaptiveCrowdGovernor.cpp
+    Source/PressureAwareSafetyGovernor.cpp
+    Source/GlobalConductorHub.cpp
+    Source/AtomicScaleMap.cpp
+    Source/AtomicScaleCatalog.cpp
+    Source/CrowdTimeField.cpp
+    Source/CrowdExpressionMacros.cpp
+    Source/MidiAudienceModel.cpp
+    Source/SourceQualityController.cpp
+    Source/MidiPitchMap.cpp
     Source/OscBridge.cpp
+    Source/OscFingerRouter.cpp
+    Source/CrowdSimulatorModel.cpp
     Source/Simulator.cpp
 )
 
 juce_add_plugin(AudienceHarmonicMidi
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audienceharmonicmidi"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmidi"
     IS_SYNTH                    FALSE
     NEEDS_MIDI_INPUT            TRUE
     NEEDS_MIDI_OUTPUT           TRUE
     IS_MIDI_EFFECT              TRUE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    COPY_PLUGIN_AFTER_BUILD     TRUE
+    COPY_PLUGIN_AFTER_BUILD     ${AUDIENCE_SYNTH_AUTO_INSTALL}
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Ahmd
     FORMATS                     VST3 Standalone
-    PRODUCT_NAME                "Audience Harmonic MIDI"
+    PRODUCT_NAME                "Cosmic Microwave MIDI"
 )
 
 juce_generate_juce_header(AudienceHarmonicMidi)
@@ -91,22 +108,23 @@ target_sources(AudienceHarmonicMidi PRIVATE
     Source/MidiEngine.cpp
     Source/MidiScaleModule.cpp
     Source/OscBridge.cpp
+    Source/CrowdSimulatorModel.cpp
     Source/Simulator.cpp
 )
 
 juce_add_plugin(AudienceMidiGenerator
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audiencemidigenerator"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmidigenerator"
     IS_SYNTH                    FALSE
     NEEDS_MIDI_INPUT            TRUE
     NEEDS_MIDI_OUTPUT           TRUE
     IS_MIDI_EFFECT              TRUE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    COPY_PLUGIN_AFTER_BUILD     TRUE
+    COPY_PLUGIN_AFTER_BUILD     ${AUDIENCE_SYNTH_AUTO_INSTALL}
     PLUGIN_MANUFACTURER_CODE    Mhmt
     PLUGIN_CODE                 Amgn
     FORMATS                     VST3
-    PRODUCT_NAME                "Audience MIDI Generator"
+    PRODUCT_NAME                "Cosmic Microwave MIDI Generator"
 )
 
 juce_generate_juce_header(AudienceMidiGenerator)
@@ -117,13 +135,14 @@ target_sources(AudienceMidiGenerator PRIVATE
     Source/MidiEngine.cpp
     Source/MidiScaleModule.cpp
     Source/OscBridge.cpp
+    Source/CrowdSimulatorModel.cpp
     Source/Simulator.cpp
 )
 
 juce_add_gui_app(AudienceMidiDevice
     COMPANY_NAME                "MehmetUnal"
-    BUNDLE_ID                   "com.mehmetunal.audiencemididevice"
-    PRODUCT_NAME                "Audience MIDI Device"
+    BUNDLE_ID                   "com.mehmetunal.spektrasynthmididevice"
+    PRODUCT_NAME                "Cosmic Microwave MIDI Device"
 )
 
 juce_generate_juce_header(AudienceMidiDevice)
@@ -132,14 +151,15 @@ target_sources(AudienceMidiDevice PRIVATE
     Source/AudienceMidiDeviceApp.cpp
     Source/MidiEngine.cpp
     Source/OscBridge.cpp
+    Source/CrowdSimulatorModel.cpp
     Source/Simulator.cpp
 )
 
 target_compile_definitions(AudienceHarmonicSynth PRIVATE
+    COSMIC_MIDI_DIAGNOSTICS=$<CONFIG:Debug>
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
-    AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/Samples"
 )
 
 target_compile_definitions(AudienceHarmonicMidi PRIVATE
@@ -164,8 +184,6 @@ target_link_libraries(AudienceHarmonicSynth PRIVATE
     juce::juce_audio_processors
     juce::juce_audio_devices
     juce::juce_audio_basics
-    juce::juce_audio_formats
-    juce::juce_dsp
     juce::juce_gui_basics
     juce::juce_gui_extra
     juce::juce_osc
@@ -227,35 +245,40 @@ target_link_libraries(AudienceMidiDevice PRIVATE
     juce::juce_recommended_warning_flags
 )
 
-option(AUDIENCE_SYNTH_BUILD_TESTS "Build Audience Harmonic Synth test harnesses" ON)
+option(AUDIENCE_SYNTH_BUILD_TESTS "Build Cosmic Microwave MIDI routing test harnesses" ON)
 
 if(AUDIENCE_SYNTH_BUILD_TESTS)
     enable_testing()
 
-    add_executable(AudienceSignalFlowTests
-        Tests/SignalFlowTests.cpp
+    # Developer-only source-data compiler. It is deliberately excluded from the
+    # default build: the shipped plug-in consumes the compact generated catalog,
+    # while this tool retains the full scientific source dataset and builder.
+    add_executable(GenerateAtomicScaleCatalog EXCLUDE_FROM_ALL
+        tools/GenerateAtomicScaleCatalog.cpp
         Source/AtomicScaleBuilder.cpp
         Source/ElementSpectralData.cpp
-        Source/PartialEngine.cpp
-        Source/SampleLibrary.cpp
     )
 
-    target_compile_definitions(AudienceSignalFlowTests PRIVATE
-        JUCE_WEB_BROWSER=0
-        JUCE_USE_CURL=0
-        AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/Samples"
+    add_executable(GenerateCrowdSimulatorTrace EXCLUDE_FROM_ALL
+        tools/GenerateCrowdSimulatorTrace.cpp
+        Source/CrowdSimulatorModel.cpp
     )
 
-    target_link_libraries(AudienceSignalFlowTests PRIVATE
-        juce::juce_audio_formats
-        juce::juce_audio_basics
-        juce::juce_dsp
-        juce::juce_core
+    target_link_libraries(GenerateCrowdSimulatorTrace PRIVATE
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
     )
 
-    add_test(NAME AudienceSignalFlowTests COMMAND AudienceSignalFlowTests)
+    target_compile_definitions(GenerateAtomicScaleCatalog PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(GenerateAtomicScaleCatalog PRIVATE
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
 
     add_executable(AudienceMidiMappingTests
         Tests/MidiMappingTests.cpp
@@ -312,6 +335,26 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_test(NAME AudienceMidiPitchTests COMMAND AudienceMidiPitchTests)
 
+    add_executable(AudienceMidiOutputTests
+        Tests/MidiOutputTests.cpp
+        Source/MpeMidiOutput.cpp
+    )
+
+    target_compile_definitions(AudienceMidiOutputTests PRIVATE
+        COSMIC_MIDI_DIAGNOSTICS=1
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceMidiOutputTests PRIVATE
+        juce::juce_audio_basics
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceMidiOutputTests COMMAND AudienceMidiOutputTests)
+
     add_executable(AudienceOscBridgeTests
         Tests/OscBridgeTests.cpp
         Source/OscBridge.cpp
@@ -332,6 +375,153 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_test(NAME AudienceOscBridgeTests COMMAND AudienceOscBridgeTests)
 
+    add_executable(AudienceOscFingerRouterTests
+        Tests/OscFingerRouterTests.cpp
+        Source/OscFingerRouter.cpp
+    )
+
+    target_compile_definitions(AudienceOscFingerRouterTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceOscFingerRouterTests PRIVATE
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceOscFingerRouterTests COMMAND AudienceOscFingerRouterTests)
+
+    add_executable(AudienceMidiAudienceModelTests
+        Tests/MidiAudienceModelTests.cpp
+        Source/MidiAudienceModel.cpp
+        Source/OscFingerRouter.cpp
+        Source/SourceQualityController.cpp
+    )
+
+    target_compile_definitions(AudienceMidiAudienceModelTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceMidiAudienceModelTests PRIVATE
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceMidiAudienceModelTests COMMAND AudienceMidiAudienceModelTests)
+
+    add_executable(AudienceSimulatorTests
+        Tests/SimulatorTests.cpp
+        Source/CrowdSimulatorModel.cpp
+        Source/Simulator.cpp
+        Source/MidiAudienceModel.cpp
+        Source/OscFingerRouter.cpp
+        Source/SourceQualityController.cpp
+    )
+
+    target_compile_definitions(AudienceSimulatorTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceSimulatorTests PRIVATE
+        juce::juce_events
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceSimulatorTests COMMAND AudienceSimulatorTests)
+
+    # Link against the production shared-code target so this test exercises the
+    # actual AudienceProcessor::processBlock integration instead of duplicating
+    # its simulator-population/Governor handoff in a unit-test helper.
+    add_executable(AudienceProcessorSimulatorGovernorTests
+        Tests/ProcessorSimulatorGovernorTests.cpp
+    )
+
+    target_compile_definitions(AudienceProcessorSimulatorGovernorTests PRIVATE
+        JucePlugin_Name="Cosmic Microwave"
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceProcessorSimulatorGovernorTests PRIVATE
+        AudienceHarmonicSynth
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceProcessorSimulatorGovernorTests
+             COMMAND AudienceProcessorSimulatorGovernorTests)
+
+    add_executable(AudienceProcessorMidiHotplugTests
+        Tests/ProcessorMidiHotplugTests.cpp
+    )
+
+    target_compile_definitions(AudienceProcessorMidiHotplugTests PRIVATE
+        JucePlugin_Name="Cosmic Microwave"
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceProcessorMidiHotplugTests PRIVATE
+        AudienceHarmonicSynth
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceProcessorMidiHotplugTests
+             COMMAND AudienceProcessorMidiHotplugTests)
+
+    add_executable(AudienceProcessorAutoRoutingTests
+        Tests/ProcessorAutoRoutingTests.cpp
+    )
+
+    target_compile_definitions(AudienceProcessorAutoRoutingTests PRIVATE
+        JucePlugin_Name="Cosmic Microwave"
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudienceProcessorAutoRoutingTests PRIVATE
+        AudienceHarmonicSynth
+        juce::juce_audio_utils
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceProcessorAutoRoutingTests
+             COMMAND AudienceProcessorAutoRoutingTests)
+    set_tests_properties(AudienceProcessorAutoRoutingTests PROPERTIES TIMEOUT 45)
+
+    # These processor integration executables create system-wide CoreMIDI
+    # endpoints and exercise the same default UDP route.  Running them in
+    # parallel can make one test observe the other's temporary endpoint/port
+    # churn even though each executable is deterministic in isolation.
+    set_tests_properties(
+        AudienceProcessorSimulatorGovernorTests
+        AudienceProcessorMidiHotplugTests
+        AudienceProcessorAutoRoutingTests
+        PROPERTIES RESOURCE_LOCK cosmic_midi_routing)
+
+    add_executable(AudienceMidiPitchMapTests
+        Tests/MidiPitchMapTests.cpp
+        Source/MidiPitchMap.cpp
+    )
+
+    target_link_libraries(AudienceMidiPitchMapTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceMidiPitchMapTests COMMAND AudienceMidiPitchMapTests)
+
     add_executable(AudienceAtomicScaleBuilderTests
         Tests/AtomicScaleBuilderTests.cpp
         Source/AtomicScaleBuilder.cpp
@@ -350,88 +540,224 @@ if(AUDIENCE_SYNTH_BUILD_TESTS)
 
     add_test(NAME AudienceAtomicScaleBuilderTests COMMAND AudienceAtomicScaleBuilderTests)
 
-    add_executable(AudiencePerformanceSmokeTests
-        Tests/PerformanceSmokeTests.cpp
-        Source/AtomicScaleBuilder.cpp
-        Source/ElementSpectralData.cpp
-        Source/PartialEngine.cpp
-        Source/SampleLibrary.cpp
+    add_executable(AudienceAtomicScaleMapTests
+        Tests/AtomicScaleMapTests.cpp
+        Source/AtomicScaleMap.cpp
     )
 
-    target_compile_definitions(AudiencePerformanceSmokeTests PRIVATE
-        JUCE_WEB_BROWSER=0
-        JUCE_USE_CURL=0
-        AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH="${CMAKE_CURRENT_SOURCE_DIR}/Samples"
+    target_link_libraries(AudienceAtomicScaleMapTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
     )
 
-    target_link_libraries(AudiencePerformanceSmokeTests PRIVATE
-        juce::juce_audio_formats
+    add_test(NAME AudienceAtomicScaleMapTests COMMAND AudienceAtomicScaleMapTests)
+
+    add_executable(AudienceAtomicScaleCatalogTests
+        Tests/AtomicScaleCatalogTests.cpp
+        Source/AtomicScaleCatalog.cpp
+        Source/AtomicScaleMap.cpp
+    )
+
+    target_link_libraries(AudienceAtomicScaleCatalogTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceAtomicScaleCatalogTests COMMAND AudienceAtomicScaleCatalogTests)
+
+    add_executable(AudienceAtomicMidiIntegrationTests
+        Tests/AtomicMidiIntegrationTests.cpp
+        Source/AtomicScaleCatalog.cpp
+        Source/AtomicScaleMap.cpp
+        Source/MpeMidiOutput.cpp
+    )
+
+    target_compile_definitions(AudienceAtomicMidiIntegrationTests PRIVATE
+        COSMIC_MIDI_DIAGNOSTICS=1
+    )
+
+    target_link_libraries(AudienceAtomicMidiIntegrationTests PRIVATE
         juce::juce_audio_basics
-        juce::juce_dsp
         juce::juce_core
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags
     )
 
-    add_test(NAME AudiencePerformanceSmokeTests COMMAND AudiencePerformanceSmokeTests)
+    add_test(NAME AudienceAtomicMidiIntegrationTests COMMAND AudienceAtomicMidiIntegrationTests)
+
+    add_executable(AudienceAdaptiveCrowdGovernorTests
+        Tests/AdaptiveCrowdGovernorTests.cpp
+        Source/AdaptiveCrowdGovernor.cpp
+    )
+
+    target_link_libraries(AudienceAdaptiveCrowdGovernorTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceAdaptiveCrowdGovernorTests
+             COMMAND AudienceAdaptiveCrowdGovernorTests)
+
+    add_executable(AudiencePressureAwareSafetyGovernorTests
+        Tests/PressureAwareSafetyGovernorTests.cpp
+        Source/PressureAwareSafetyGovernor.cpp
+    )
+
+    target_link_libraries(AudiencePressureAwareSafetyGovernorTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudiencePressureAwareSafetyGovernorTests
+             COMMAND AudiencePressureAwareSafetyGovernorTests)
+
+    add_executable(AudienceSourceQualityControllerTests
+        Tests/SourceQualityControllerTests.cpp
+        Source/SourceQualityController.cpp
+    )
+
+    target_link_libraries(AudienceSourceQualityControllerTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceSourceQualityControllerTests
+             COMMAND AudienceSourceQualityControllerTests)
+
+    add_executable(AudienceGlobalConductorHubTests
+        Tests/GlobalConductorHubTests.cpp
+        Source/GlobalConductorHub.cpp
+    )
+
+    target_link_libraries(AudienceGlobalConductorHubTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceGlobalConductorHubTests
+             COMMAND AudienceGlobalConductorHubTests)
+
+    add_executable(AudienceCrowdTimeFieldTests
+        Tests/CrowdTimeFieldTests.cpp
+        Source/CrowdTimeField.cpp
+    )
+
+    target_link_libraries(AudienceCrowdTimeFieldTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceCrowdTimeFieldTests COMMAND AudienceCrowdTimeFieldTests)
+
+    add_executable(AudienceCrowdExpressionMacrosTests
+        Tests/CrowdExpressionMacrosTests.cpp
+        Source/CrowdExpressionMacros.cpp
+    )
+
+    target_link_libraries(AudienceCrowdExpressionMacrosTests PRIVATE
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceCrowdExpressionMacrosTests
+             COMMAND AudienceCrowdExpressionMacrosTests)
+
+    add_executable(AudienceCrowdMidiIntegrationTests
+        Tests/CrowdMidiIntegrationTests.cpp
+        Source/AdaptiveCrowdGovernor.cpp
+        Source/CrowdTimeField.cpp
+        Source/MidiAudienceModel.cpp
+        Source/MpeMidiOutput.cpp
+        Source/OscFingerRouter.cpp
+        Source/SourceQualityController.cpp
+    )
+
+    target_compile_definitions(AudienceCrowdMidiIntegrationTests PRIVATE
+        COSMIC_MIDI_DIAGNOSTICS=1
+    )
+
+    target_link_libraries(AudienceCrowdMidiIntegrationTests PRIVATE
+        juce::juce_audio_basics
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudienceCrowdMidiIntegrationTests COMMAND AudienceCrowdMidiIntegrationTests)
+
+    add_executable(AudiencePluginStateMigrationTests
+        Tests/PluginStateMigrationTests.cpp
+        Source/PluginStateMigration.cpp
+    )
+
+    target_compile_definitions(AudiencePluginStateMigrationTests PRIVATE
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+    )
+
+    target_link_libraries(AudiencePluginStateMigrationTests PRIVATE
+        juce::juce_data_structures
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags
+    )
+
+    add_test(NAME AudiencePluginStateMigrationTests COMMAND AudiencePluginStateMigrationTests)
+
+    find_program(COSMIC_NODE_EXECUTABLE NAMES node nodejs)
+    if(COSMIC_NODE_EXECUTABLE)
+        add_test(NAME AudienceChaosLabTests
+                 COMMAND "${COSMIC_NODE_EXECUTABLE}" --test
+                         "${CMAKE_CURRENT_SOURCE_DIR}/Tests/ChaosLabTests.mjs")
+        set_tests_properties(AudienceChaosLabTests PROPERTIES
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+    else()
+        message(WARNING "Node.js was not found; AudienceChaosLabTests will be skipped")
+    endif()
 endif()
 
-if(NOT ANDROID)
+if(APPLE AND NOT ANDROID)
     foreach(format_target IN ITEMS AudienceHarmonicSynth_VST3 AudienceHarmonicSynth_Standalone)
-        if(APPLE)
-            add_custom_command(TARGET ${format_target} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "${CMAKE_CURRENT_SOURCE_DIR}/Samples"
-                    "$<TARGET_BUNDLE_CONTENT_DIR:${format_target}>/Resources/Samples"
-                COMMAND /usr/bin/find
-                    "$<TARGET_BUNDLE_CONTENT_DIR:${format_target}>/Resources/Samples"
-                    -name "*.orig" -delete
-                COMMAND /usr/bin/find
-                    "$<TARGET_BUNDLE_CONTENT_DIR:${format_target}>/Resources/Samples"
-                    -name ".DS_Store" -delete
-                COMMAND codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:${format_target}>"
-                COMMENT "Copying sample libraries into ${format_target} resources"
-            )
-        else()
-            add_custom_command(TARGET ${format_target} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "${CMAKE_CURRENT_SOURCE_DIR}/Samples"
-                    "$<TARGET_FILE_DIR:${format_target}>/Resources/Samples"
-                COMMENT "Copying sample libraries into ${format_target} resources"
-            )
-        endif()
+        add_custom_command(TARGET ${format_target} POST_BUILD
+            COMMAND codesign --force --deep --sign - "$<TARGET_BUNDLE_DIR:${format_target}>"
+            COMMENT "Signing MIDI-only ${format_target} bundle"
+        )
     endforeach()
 endif()
 
-if(APPLE AND NOT ANDROID)
+# B15: the macOS auto-install (clean copy) of the AudienceHarmonicSynth VST3
+# into the user plug-ins folder is the default local-dev workflow. Configure
+# with -DAUDIENCE_SYNTH_AUTO_INSTALL=OFF for CI or build-only environments.
+# The install removes legacy same-CID names before copying the canonical bundle.
+if(AUDIENCE_SYNTH_AUTO_INSTALL AND APPLE AND NOT ANDROID)
     add_custom_command(TARGET AudienceHarmonicSynth_VST3 POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E rm -rf
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience Harmonic Synth.vst3"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "$<TARGET_BUNDLE_DIR:AudienceHarmonicSynth_VST3>"
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience Harmonic Synth.vst3"
-        COMMENT "Installing cleaned VST3 bundle"
+        COMMAND ${CMAKE_COMMAND}
+            "-DSOURCE_BUNDLE=$<TARGET_BUNDLE_DIR:AudienceHarmonicSynth_VST3>"
+            "-DUSER_VST3_ROOT=$ENV{HOME}/Library/Audio/Plug-Ins/VST3"
+            "-DSYSTEM_VST3_ROOT=/Library/Audio/Plug-Ins/VST3"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/InstallCosmicMicrowaveVST3.cmake"
+        COMMENT "Replacing legacy same-CID bundles with canonical Cosmic Microwave VST3"
     )
 endif()
 
-if(APPLE AND NOT ANDROID)
+if(AUDIENCE_SYNTH_AUTO_INSTALL AND APPLE AND NOT ANDROID)
     add_custom_command(TARGET AudienceHarmonicMidi_VST3 POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience Harmonic MIDI.vst3"
+            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Cosmic Microwave MIDI.vst3"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "$<TARGET_BUNDLE_DIR:AudienceHarmonicMidi_VST3>"
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience Harmonic MIDI.vst3"
+            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Cosmic Microwave MIDI.vst3"
         COMMENT "Installing MIDI VST3 bundle"
     )
 endif()
 
-if(APPLE AND NOT ANDROID)
+if(AUDIENCE_SYNTH_AUTO_INSTALL AND APPLE AND NOT ANDROID)
     add_custom_command(TARGET AudienceMidiGenerator_VST3 POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E rm -rf
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience MIDI Generator.vst3"
+            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Cosmic Microwave MIDI Generator.vst3"
         COMMAND ${CMAKE_COMMAND} -E copy_directory
             "$<TARGET_BUNDLE_DIR:AudienceMidiGenerator_VST3>"
-            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Audience MIDI Generator.vst3"
+            "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Cosmic Microwave MIDI Generator.vst3"
         COMMENT "Installing Ableton MIDI Generator VST3 bundle"
     )
 endif()

@@ -6,7 +6,7 @@
 /*
     DebugPanel
 
-    Toggleable overlay for MIDI/MPE diagnostics. Activates / deactivates
+    Toggleable overlay for OSC and Notes Only MIDI diagnostics. Activates / deactivates
     from the ribbon toggle.
 */
 class DebugPanel : public juce::Component, private juce::Timer
@@ -28,5 +28,6 @@ private:
     juce::TextEditor   midiView;
     juce::TextEditor   reportView;
     juce::TextButton   copyReportButton { "Copy Report" };
+    juce::TextButton   copyMidiButton { "Copy" };
     juce::String       lastReport;
 };

@@ -1,14 +1,24 @@
 #include "../Source/PartialEngine.h"
 #include "../Source/SampleLibrary.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 #include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <iostream>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
 #include <vector>
+
+// PartialEngine owns several large fixed real-time arrays. Keep test instances
+// on the heap so this long Debug test does not reserve every scoped instance in
+// one main-thread stack frame.
+#define HEAP_PARTIAL_ENGINE(name)                         \
+    auto name##Storage = std::make_unique<PartialEngine>(); \
+    auto& name = *name##Storage
 
 #ifndef AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH
 #define AUDIENCE_SYNTH_SOURCE_SAMPLES_PATH ""
@@ -51,15 +61,27 @@ namespace
             std::cout << "\n";
         }
 
+        // B10: record a deliberately-skipped assertion. A skip is neither a
+        // pass nor a failure; it is logged with its reason and never affects
+        // the exit code. Used only when the sample library is genuinely absent
+        // (and even a synthetic stand-in could not be created).
+        void skip (const std::string& name, const std::string& reason)
+        {
+            ++skipped;
+            std::cout << "SKIP  " << name << "  (" << reason << ")\n";
+        }
+
         int result() const
         {
-            std::cout << "\nSummary: " << passed << " passed, " << failed << " failed\n";
+            std::cout << "\nSummary: " << passed << " passed, " << failed
+                      << " failed, " << skipped << " skipped\n";
             return failed == 0 ? 0 : 1;
         }
 
     private:
         int passed = 0;
         int failed = 0;
+        int skipped = 0;
     };
 
     juce::File samplesRoot()
@@ -70,6 +92,126 @@ namespace
     juce::File pianoDreamDir()
     {
         return samplesRoot().getChildFile("Piano Dream");
+    }
+
+    // ---- B10: graceful degradation when the sample library is ABSENT -----
+    //
+    // The bundled "Piano Dream" library is the default fixture and, when it is
+    // present, every sample-dependent test below runs against it exactly as
+    // before. When it is missing (e.g. a checkout without the large WAV assets)
+    // we synthesise a tiny stand-in WAV library into a temp dir so the *code
+    // path* (load -> index -> trigger -> render) still exercises. The stand-in
+    // covers the full 88-key piano range with short decaying sines named by
+    // note (A0.wav .. C8.wav), so SampleLibrary's filename->MIDI parsing,
+    // auto-trim and closest-match lookup all behave like a real library for the
+    // MIDI notes these tests touch (all >= C2). Pitch/scale mappings are engine
+    // logic and do not depend on sample timbre, so the assertions still hold.
+    //
+    // Producing real audio data (rather than skipping) keeps coverage of the
+    // sample render path on sample-less machines; we only fall back to SKIP if
+    // even the synthetic library cannot be written.
+
+    // Write one mono 16-bit WAV containing a SUSTAINED tone at `freqHz`.
+    // Returns true on success.
+    //
+    // The tone is deliberately long (3 s) and held near a constant amplitude
+    // (only a short attack and a short release fade at the very edges) so it
+    // behaves like a real sustaining instrument sample: the sample player keeps
+    // feeding audible data for the full duration of every render window used by
+    // the tests (the longest is ~0.8 s). A fast-decaying tone would fall silent
+    // before those windows finish and would (correctly) trip the engine's
+    // voice-amplitude / active-unison assertions, so we keep it sustained. A
+    // couple of low harmonics give it a slightly instrument-like spectrum. The
+    // long sustain also means SampleLibrary's auto-trim keeps essentially the
+    // whole buffer (trimmedLength >> 512).
+    bool writeSyntheticWav (const juce::File& file, double freqHz)
+    {
+        constexpr double sr      = 44100.0;
+        constexpr double seconds = 3.0;
+        const int        len     = (int) (sr * seconds);
+        const int        attack  = (int) (sr * 0.005);   // 5 ms attack
+        const int        release = (int) (sr * 0.030);   // 30 ms release fade
+
+        juce::AudioBuffer<float> buffer (1, len);
+        auto* data = buffer.getWritePointer (0);
+        const double twoPiF = 2.0 * juce::MathConstants<double>::pi * freqHz;
+        for (int i = 0; i < len; ++i)
+        {
+            const double t = (double) i / sr;
+            double s = std::sin (twoPiF * t)
+                     + 0.30 * std::sin (2.0 * twoPiF * t)
+                     + 0.15 * std::sin (3.0 * twoPiF * t);
+
+            double env = 0.35;                            // sustained level
+            if (i < attack)                env *= (double) i / (double) attack;
+            else if (i > len - release)    env *= (double) (len - i) / (double) release;
+
+            data[i] = (float) (env * s / 1.45);           // normalise harmonics
+        }
+
+        file.deleteFile();
+        std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+        if (stream == nullptr)
+            return false;
+
+        juce::WavAudioFormat format;
+        std::unique_ptr<juce::AudioFormatWriter> writer (
+            format.createWriterFor (stream.get(), sr, 1, 16, {}, 0));
+        if (writer == nullptr)
+            return false;
+
+        stream.release(); // writer now owns the stream
+        return writer->writeFromAudioSampleBuffer (buffer, 0, len);
+    }
+
+    // Build (once) a synthetic library covering MIDI 21..108 (A0..C8). Returns
+    // the directory, or a non-existent File if generation failed.
+    juce::File buildSyntheticLibrary()
+    {
+        static const char* const names[] =
+            { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" };
+
+        auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("SpektraSynthTests_SynthSamples");
+        dir.createDirectory();
+
+        int written = 0;
+        for (int midi = 21; midi <= 108; ++midi)   // full 88-key piano range
+        {
+            const int oct = midi / 12 - 1;
+            const juce::String noteName =
+                juce::String (names[midi % 12]) + juce::String (oct);
+            const double freq = 440.0 * std::pow (2.0, (midi - 69) / 12.0);
+            if (writeSyntheticWav (dir.getChildFile (noteName + ".wav"), freq))
+                ++written;
+        }
+
+        return written > 0 ? dir : juce::File();
+    }
+
+    // Resolve the directory the sample-dependent tests should load from:
+    //   - the real Piano Dream library if it is present, else
+    //   - a synthetic stand-in generated into a temp dir (computed once).
+    // `usingSynthetic` reports which path was taken (for logging).
+    const juce::File& effectiveSampleDir (bool& usingSynthetic)
+    {
+        static bool       synthetic = false;
+        static juce::File resolved = []
+        {
+            auto real = pianoDreamDir();
+            if (real.isDirectory())
+                return real;
+            return juce::File();
+        }();
+
+        if (resolved == juce::File() && ! synthetic)
+        {
+            resolved  = buildSyntheticLibrary();
+            synthetic = (resolved != juce::File());
+        }
+
+        usingSynthetic = synthetic;
+        return resolved;
     }
 
     bool nearHz (double actual, double expected, double tolerance = 0.01)
@@ -199,7 +341,11 @@ namespace
 
     bool loadPianoDream (PartialEngine& engine)
     {
-        return engine.loadSampleLibrary(pianoDreamDir()) > 0;
+        bool synthetic = false;
+        const auto& dir = effectiveSampleDir(synthetic);
+        if (dir == juce::File())
+            return false; // no real and no synthetic library available
+        return engine.loadSampleLibrary(dir) > 0;
     }
 }
 
@@ -207,10 +353,25 @@ int main()
 {
     Runner r;
 
-    r.expect(samplesRoot().isDirectory(), "samples root exists",
-             samplesRoot().getFullPathName().toStdString());
-    r.expect(pianoDreamDir().isDirectory(), "Piano Dream library exists",
-             pianoDreamDir().getFullPathName().toStdString());
+    // B10: the "samples present" assertions stay exactly as before WHEN the
+    // bundled library exists (the normal case here). When it is absent we log a
+    // SKIP with the offending path instead of failing, and steer the dependent
+    // tests onto the synthetic stand-in (validated just below).
+    const bool samplesPresent = pianoDreamDir().isDirectory();
+    if (samplesPresent)
+    {
+        r.expect(samplesRoot().isDirectory(), "samples root exists",
+                 samplesRoot().getFullPathName().toStdString());
+        r.expect(pianoDreamDir().isDirectory(), "Piano Dream library exists",
+                 pianoDreamDir().getFullPathName().toStdString());
+    }
+    else
+    {
+        r.skip("samples root exists",
+               "sample library absent: " + samplesRoot().getFullPathName().toStdString());
+        r.skip("Piano Dream library exists",
+               "sample library absent: " + pianoDreamDir().getFullPathName().toStdString());
+    }
 
     r.expect(SampleLibrary::parseRootMidiFromName("C4") == 60, "parse C4 -> MIDI 60");
     r.expect(SampleLibrary::parseRootMidiFromName("A4") == 69, "parse A4 -> MIDI 69");
@@ -218,21 +379,43 @@ int main()
     r.expect(SampleLibrary::parseRootMidiFromName("Bb2") == 46, "parse Bb2 -> MIDI 46");
 
     {
-        SampleLibrary lib;
-        const int loaded = lib.loadFromDirectory(pianoDreamDir());
-        r.expect(loaded >= 40, "sample library loads many notes",
-                 "loaded=" + std::to_string(loaded));
-        r.expect(lib.getSampleForMidi(60) != nullptr, "closest sample lookup C4");
-        if (const auto* s = lib.getSampleForMidi(60))
+        // Load the real library if present, else the synthetic stand-in. The
+        // assertions hold for both: the synthetic set covers >= 40 notes,
+        // C4 (MIDI 60), full-length decaying sines and one audio channel.
+        bool usingSynthetic = false;
+        const auto& dir = effectiveSampleDir(usingSynthetic);
+
+        if (dir == juce::File())
         {
-            r.expect(s->trimmedLength > 512, "loaded sample has playable trimmed length",
-                     "trimmedLength=" + std::to_string(s->trimmedLength));
-            r.expect(s->buffer.getNumChannels() >= 1, "loaded sample has audio channels");
+            // Genuinely no samples AND synthetic generation failed: skip the
+            // sample-content assertions rather than fail.
+            r.skip("sample library loads many notes", "no sample library available (real or synthetic)");
+            r.skip("closest sample lookup C4", "no sample library available (real or synthetic)");
+            r.skip("loaded sample has playable trimmed length", "no sample library available (real or synthetic)");
+            r.skip("loaded sample has audio channels", "no sample library available (real or synthetic)");
+        }
+        else
+        {
+            if (usingSynthetic)
+                std::cout << "NOTE  sample library absent; using synthetic stand-in at "
+                          << dir.getFullPathName().toStdString() << "\n";
+
+            SampleLibrary lib;
+            const int loaded = lib.loadFromDirectory(dir);
+            r.expect(loaded >= 40, "sample library loads many notes",
+                     "loaded=" + std::to_string(loaded));
+            r.expect(lib.getSampleForMidi(60) != nullptr, "closest sample lookup C4");
+            if (const auto* s = lib.getSampleForMidi(60))
+            {
+                r.expect(s->trimmedLength > 512, "loaded sample has playable trimmed length",
+                         "trimmedLength=" + std::to_string(s->trimmedLength));
+                r.expect(s->buffer.getNumChannels() >= 1, "loaded sample has audio channels");
+            }
         }
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads Piano Dream");
         engine.scaleRootMidi.store(36);
@@ -247,7 +430,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for spectral scale tables");
         engine.scaleRootMidi.store(72);
@@ -370,7 +553,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for silence test");
         const auto stats = renderSeconds(engine, 0.5);
@@ -382,7 +565,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for trigger test");
         const auto stats = triggerSeatAndRender(engine, 0.0f, 1.0f, 0.6);
@@ -402,7 +585,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.samplePlaybackMode.store(1);
         engine.grainDensity.store(0.8f);
@@ -417,7 +600,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.spectralElement.store(1);
@@ -445,7 +628,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.spectralElement.store(2);
@@ -467,7 +650,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.spectralElement.store(3);
@@ -527,7 +710,7 @@ int main()
 
         for (const auto& e : expectations)
         {
-            PartialEngine engine;
+            HEAP_PARTIAL_ENGINE(engine);
             configureDryTestEngine(engine);
             engine.engineSource.store(1);
             engine.spectralElement.store(e.index);
@@ -551,7 +734,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.spectralElement.store(1);
@@ -573,7 +756,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for scale keyboard test");
         engine.setKeyboardStep(0, 2, 1.0f, true);
@@ -597,7 +780,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for realtime MIDI keyboard polyphony test");
         engine.scaleRootMidi.store(36);
@@ -615,7 +798,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for direct MIDI keyboard polyphony test");
 
@@ -640,7 +823,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for MIDI keyboard spectral fallback test");
         engine.scaleRootMidi.store(48);
@@ -654,7 +837,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.scaleRootMidi.store(12);
         engine.scaleMode.store(9); // Lithium Spectrum
@@ -680,7 +863,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.engineSource.store(1);
         engine.scaleRootMidi.store(12);
@@ -699,7 +882,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for X movement replacement test");
         engine.releaseMs.store(6000.0f);
@@ -721,7 +904,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for polyphony limit test");
 
@@ -737,7 +920,7 @@ int main()
     }
 
     {
-        PartialEngine normalCrowd;
+        HEAP_PARTIAL_ENGINE(normalCrowd);
         configureDryTestEngine(normalCrowd);
         normalCrowd.polyphonyMode.store(0);
         r.expect(loadPianoDream(normalCrowd), "engine loads samples for adaptive normal crowd test");
@@ -755,7 +938,7 @@ int main()
     }
 
     {
-        PartialEngine highCrowd;
+        HEAP_PARTIAL_ENGINE(highCrowd);
         configureDryTestEngine(highCrowd);
         highCrowd.polyphonyMode.store(1);
         r.expect(loadPianoDream(highCrowd), "engine loads samples for adaptive high crowd test");
@@ -773,13 +956,13 @@ int main()
     }
 
     {
-        PartialEngine low;
+        HEAP_PARTIAL_ENGINE(low);
         configureDryTestEngine(low);
         r.expect(loadPianoDream(low), "engine loads samples for low Y test");
         triggerSeatAndRender(low, 0.45f, 0.15f, 0.8);
         const float lowAmp = maxVoiceAmp(low);
 
-        PartialEngine high;
+        HEAP_PARTIAL_ENGINE(high);
         configureDryTestEngine(high);
         r.expect(loadPianoDream(high), "engine loads samples for high Y test");
         triggerSeatAndRender(high, 0.45f, 1.0f, 0.8);
@@ -791,13 +974,13 @@ int main()
     }
 
     {
-        PartialEngine lowPitch;
+        HEAP_PARTIAL_ENGINE(lowPitch);
         configureDryTestEngine(lowPitch);
         r.expect(loadPianoDream(lowPitch), "engine loads samples for low pitch test");
         lowPitch.scaleOctaves.store(1);
         triggerSeatAndRender(lowPitch, 0.0f, 1.0f, 0.35);
 
-        PartialEngine highPitch;
+        HEAP_PARTIAL_ENGINE(highPitch);
         configureDryTestEngine(highPitch);
         r.expect(loadPianoDream(highPitch), "engine loads samples for high pitch test");
         highPitch.scaleOctaves.store(1);
@@ -808,7 +991,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for off/release test");
         triggerSeatAndRender(engine, 0.25f, 1.0f, 0.4);
@@ -823,7 +1006,7 @@ int main()
     }
 
     {
-        PartialEngine dryRelease;
+        HEAP_PARTIAL_ENGINE(dryRelease);
         configureDryTestEngine(dryRelease);
         dryRelease.samplePlaybackMode.store(1);
         r.expect(loadPianoDream(dryRelease), "engine loads samples for freeze off test");
@@ -833,7 +1016,7 @@ int main()
         const int dryVoices = dryRelease.getActiveVoiceCount();
         const float dryMaxAmp = maxVoiceAmp(dryRelease);
 
-        PartialEngine frozen;
+        HEAP_PARTIAL_ENGINE(frozen);
         configureDryTestEngine(frozen);
         frozen.samplePlaybackMode.store(1);
         frozen.freeze.store(1);
@@ -852,13 +1035,13 @@ int main()
     }
 
     {
-        PartialEngine mutedByMaster;
+        HEAP_PARTIAL_ENGINE(mutedByMaster);
         configureDryTestEngine(mutedByMaster);
         mutedByMaster.masterGain.store(0.0f);
         r.expect(loadPianoDream(mutedByMaster), "engine loads samples for master mute test");
         const auto mutedStats = triggerSeatAndRender(mutedByMaster, 0.5f, 1.0f, 0.7);
 
-        PartialEngine loud;
+        HEAP_PARTIAL_ENGINE(loud);
         configureDryTestEngine(loud);
         loud.masterGain.store(1.0f);
         r.expect(loadPianoDream(loud), "engine loads samples for loud master test");
@@ -871,7 +1054,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.masterGain.store(3.0f);
         engine.energyMacro.store(1.0f);
@@ -901,7 +1084,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.freeze.store(1);
         engine.reverbAmount.store(1.0f);
@@ -919,7 +1102,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         engine.freeze.store(1);
         engine.reverbAmount.store(1.0f);
@@ -937,7 +1120,7 @@ int main()
     }
 
     {
-        PartialEngine engine;
+        HEAP_PARTIAL_ENGINE(engine);
         configureDryTestEngine(engine);
         r.expect(loadPianoDream(engine), "engine loads samples for aurora band test");
         triggerSeatAndRender(engine, 0.5f, 1.0f, 0.5);

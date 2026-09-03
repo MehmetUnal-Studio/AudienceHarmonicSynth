@@ -1,6 +1,7 @@
 #include "../Source/MidiPitch.h"
 
 #include <cmath>
+#include <limits>
 #include <iostream>
 
 namespace
@@ -37,7 +38,7 @@ int main()
         expect (pitch.noteNumber == 24
              && near (pitch.centsOffsetFromNearestNote, 0.0, 0.000001)
              && pitch.pitchBend14Bit == 8192,
-             "C1 spectral root maps to MIDI note 24 with centered bend",
+             "C1 maps to MIDI note 24 with centered bend",
              failed);
     }
 
@@ -48,7 +49,7 @@ int main()
         expect (pitch.noteNumber == 25
              && near (pitch.centsOffsetFromNearestNote, -19.6, 0.05)
              && pitch.pitchBend14Bit < 8192,
-             "microtonal spectral degree keeps cents as per-note pitch bend",
+             "microtonal pitch keeps cents as per-note pitch bend",
              failed);
     }
 
@@ -67,6 +68,35 @@ int main()
              && pitch.pitchBend14Bit >= 0
              && pitch.pitchBend14Bit <= 16383,
              "very high frequencies clamp safely into valid MIDI/bend range",
+             failed);
+    }
+
+    {
+        const auto nanPitch = convertFrequencyToMidiPitch(
+            std::numeric_limits<double>::quiet_NaN(), 48);
+        const auto infPitch = convertFrequencyToMidiPitch(
+            std::numeric_limits<double>::infinity(), 48);
+        expect (nanPitch.noteNumber == 0 && infPitch.noteNumber == 0
+             && std::isfinite(nanPitch.targetFrequencyHz)
+             && std::isfinite(infPitch.targetFrequencyHz),
+             "non-finite frequencies fall back to a finite valid MIDI pitch",
+             failed);
+    }
+
+    {
+        const auto subnormalPitch = convertFrequencyToMidiPitch(
+            std::numeric_limits<double>::denorm_min(), 48);
+        const auto maximumPitch = convertFrequencyToMidiPitch(
+            std::numeric_limits<double>::max(), 48);
+        expect (subnormalPitch.noteNumber == 0
+             && maximumPitch.noteNumber == 127
+             && std::isfinite(subnormalPitch.targetFrequencyHz)
+             && std::isfinite(maximumPitch.targetFrequencyHz)
+             && subnormalPitch.pitchBend14Bit >= 0
+             && subnormalPitch.pitchBend14Bit <= 16383
+             && maximumPitch.pitchBend14Bit >= 0
+             && maximumPitch.pitchBend14Bit <= 16383,
+             "subnormal and DBL_MAX frequencies avoid log/cast overflow",
              failed);
     }
 
